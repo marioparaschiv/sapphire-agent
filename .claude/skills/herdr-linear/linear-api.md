@@ -50,7 +50,7 @@ Repo labels (`resolveRepo`), read from the epic's labels:
 
 ## GitHub (`GitHub` service)
 
-Wraps the `gh` CLI through `ChildProcess`, each call under the call policy (20 s timeout, retries). It needs `gh` on the service `PATH`, authenticated for the service user. Tests use `FakeGitHub`.
+Wraps the `gh` CLI through `ChildProcess`, each call under the call policy (20 s timeout, retries). It needs `gh` on the service `PATH`, authenticated as the user (the default gh config), plus a gh config dir logged in as the bot account (`bot.ghConfigDirectory`). Only `postInProgress` runs as the bot, with `GH_CONFIG_DIR` set on top of the service's env. Tests use `FakeGitHub`.
 
 PR detection (`findPullRequest`):
 
@@ -58,18 +58,19 @@ PR detection (`findPullRequest`):
 - Prefers an `OPEN` PR, else a `MERGED` one, else a `CLOSED` one. A `CLOSED` PR does not take a result; it only triggers cleanup.
 - `owner/repo` comes from the repo's `origin` URL (`Git.githubRepo`).
 
-Thread scan (`pendingThreads`): `gh api graphql --input -`, reading the branch's open PR (`pullRequests(headRefName, states: OPEN, first: 1)`) with its review threads (up to 100) and their comments with the review body each was submitted with. Returns the PR URL and the pending thread ids (rule in `rules.md`); none without an open PR. More threads than one page fails, since a truncated page could hide a pending thread. Linear's public API has no field for PR comments, so this reads GitHub directly; Linear's review UI syncs threads both ways, so `/agent` written there shows up here.
+Thread scan (`pendingThreads`): `gh api graphql --input -`, reading the branch's open PR (`pullRequests(headRefName, states: OPEN, first: 1)`) with its latest 100 PR comments (body and author login, null for a deleted account) and its review threads (up to 100) and their comments with the review body each was submitted with. Returns the PR URL and the pending thread ids (rule in `rules.md`); none without an open PR. More threads than one page fails, since a truncated page could hide a pending thread. Linear's public API has no field for PR comments, so this reads GitHub directly; Linear's review UI syncs threads both ways, so a mention of the bot written there shows up here.
 
 Writes (only the reconciler writes to GitHub; the agent never does). Each first looks for its marker and skips when present:
 
 | Method | Call |
 | --- | --- |
 | `postSummary` | `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. |
+| `postInProgress` | As the bot: `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`, no onBehalfOf block. |
 | `postFlagsReview` | `gh api --method POST repos/<repo>/pulls/<n>/reviews --input -` with `{ event: "COMMENT", body, comments: [{ path, line, side: "RIGHT", body }] }`. The caller skips it when there are no flags. |
 | `replyToThread` | `gh api graphql`, mutation `addPullRequestReviewThreadReply`. |
 | `resolveThread` | `gh api graphql`, mutation `resolveReviewThread`; skipped when already resolved. |
 
-- Every body ends with `ON_BEHALF_OF_CLAUDE`, Linear's `onBehalfOf` block, after the marker. Linear shows such comments as written by Claude; it is the only way to tell the agent's comments from the user's, since both use one GitHub account.
+- Every body the user's account posts ends with `ON_BEHALF_OF_CLAUDE`, Linear's `onBehalfOf` block, after the marker. Linear shows such comments as written by Claude; it is the only way to tell the agent's comments from the user's, since both use one GitHub account.
 - A COMMENT review on your own PR is allowed. Requesting review, approving or requesting changes is not, so the summary ends with `Ready for review, @<PR author>.`, which notifies the user.
 - A flag whose `line` is outside the diff makes GitHub reject the review (HTTP 422, Permanent): the epic is flagged with `permanentFailure`.
 

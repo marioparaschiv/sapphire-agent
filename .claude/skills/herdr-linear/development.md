@@ -43,7 +43,7 @@ Tests sit beside the code as `src/*.test.ts` and use `@effect/vitest` (`it.effec
 | Module | Provides | Controls |
 | --- | --- | --- |
 | `linear-fixture.ts` | `LinearFixture.layer`: a real HTTP server speaking Linear's GraphQL operations, plus the real `Linear` layer pointed at it. Seeded team `Test` with every workflow state. | Seed: `addEpic`, `addLabel`, `addComment`. Inspect: `issue`, `stateName`, `labelNames`, `comments`, `mutations`. Inject: `failWrite`, `rateLimitWrite`, `crashAfterWrite` (applies the write, then drops the connection), `awaitAnswers`, `awaitCrash`. |
-| `github-fake.ts` | `FakeGitHub.layer`: a `GitHub` in memory, with the live layer's marker and pending rules. | `addPullRequest`, `addThread`, `setPullRequestState`; inspect `comments`, `reviews`, `thread`, `writes`; inject `crashAfterWrite`. |
+| `github-fake.ts` | `FakeGitHub.layer`: a `GitHub` in memory, with the live layer's marker and pending rules. | `addPullRequest`, `addComment`, `addThread`, `setPullRequestState`; inspect `comments`, `reviews`, `thread`, `writes`; inject `crashAfterWrite`. Comments posted by `postInProgress` are authored by `bot.login`, the rest by the PR's author. |
 | `herdr-fake.ts` | `FakeHerdr.layer`: a `Herdr` in memory, with the live layer's tab and ownership logic and an event stream. | `addTab`, `setAgentStatus`, `setAgent`, `setTail`, `removeTab`, `setStartBehaviour`; inspect `tabs`, `starts`, `prompts`, `sentKeys`, `closedTabs`, `writes`; `emit` (a state change without `emit` is a dropped event), `disconnect`, `awaitConnections`; inject `failWrite`, `crashAfterWrite`. |
 | `fixtures/herdr/` | Real herdr JSON output and socket events, recorded from a named session. | Used by the herdr service tests, through a fake process spawner that answers each herdr command with them. |
 
@@ -63,7 +63,7 @@ For lifecycle-style tests: advance `TestClock` before a follow-up claim (its sum
 
 ### The lifecycle test
 
-`lifecycle.test.ts` runs one epic through everything on the harness: dispatch, a question and a relayed reply, results with a flags review, a follow-up that replies to and resolves an `/agent` thread, and cleanup once the PR is merged. Each step does what the user or agent does, then ticks until the reconciler got there. It first runs without a crash and asserts the end state, while counting the writes of each kind (journal, Linear, GitHub, herdr). Then it runs once per write with a crash injected at it, in an order shuffled by a seeded PRNG, restarting the reconciler right after the crash, and asserts the same end state and no double posts. Add a step there when a rule gains a write.
+`lifecycle.test.ts` runs one epic through everything on the harness: dispatch, a question and a relayed reply, results with a flags review, a follow-up that replies to and resolves a thread that mentions the bot, and cleanup once the PR is merged. Each step does what the user or agent does, then ticks until the reconciler got there. It first runs without a crash and asserts the end state, while counting the writes of each kind (journal, Linear, GitHub, herdr). Then it runs once per write with a crash injected at it, in an order shuffled by a seeded PRNG, restarting the reconciler right after the crash, and asserts the same end state and no double posts. Add a step there when a rule gains a write.
 
 ## Style
 

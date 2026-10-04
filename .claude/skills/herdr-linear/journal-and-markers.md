@@ -71,6 +71,7 @@ On the GitHub PR:
 | --- | --- | --- |
 | `summary` | `<claimedAt>` | Once per run, as a PR comment. |
 | `flags` | `<claimedAt>` | Once per run, as the COMMENT review holding every flag. |
+| `inProgress` | `<claimedAt>` | Once per follow-up run, as the bot's PR comment when it starts. |
 | `reply` | `<threadId>.<claimedAt>` | Once per thread per run, among the thread's comments. |
 
 Writes without a marker are idempotent by their effect: a move is skipped when the epic is already in that state, a label is added only if missing, a reaction only if the comment lacks that emoji, a thread is resolved only if unresolved, a tab close of a missing tab is a no-op, and worktree removal skips what is already gone.
@@ -79,7 +80,7 @@ Writes without a marker are idempotent by their effect: a move is skipped when t
 
 Every multi-step action is ordered so that a crash at any step leaves something the next tick finishes, without posting twice or skipping a step:
 
-- Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, Claude found in the pane is not started again.
+- Claim before start; record the worktree, then the tab, then post the bot's in-progress comment for a follow-up, then `running`. An unrecorded tab is adopted, Claude found in the pane is not started again, a marked in-progress comment is not posted again.
 - Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
 - Flags put the label on first, then the comment, then the journal update.
 - Cleanup closes the tab, removes the worktree and branch, and only then drops the row.

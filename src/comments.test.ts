@@ -285,4 +285,11 @@ ${startOver}`,
 			);
 		}),
 	);
+
+	it.effect("writes the bot's in-progress comment with the thread count", () =>
+		withComments((comments) => {
+			assertComment(comments.inProgress({ identifier: 'UNB-12', claimedAt, threadCount: 3 }), 'On it: handling 3 review threads.', '<!-- herdr-linear:UNB-12:inProgress:1791000000000 -->');
+			assertComment(comments.inProgress({ identifier: 'UNB-12', claimedAt, threadCount: 1 }), 'On it: handling 1 review thread.', '<!-- herdr-linear:UNB-12:inProgress:1791000000000 -->');
+		}),
+	);
 });

@@ -30,11 +30,12 @@ const load = (env: Record<string, string>, files: { config?: unknown; key?: { te
 
 const fullEnv = { HERDR_BIN_PATH: '/bin/herdr', HERDR_SOCKET_PATH: '/run/herdr.sock', HERDR_PLUGIN_STATE_DIR: '/state' };
 const key = { text: 'lin_api_secret\n', mode: 0o600 };
+const bot = { login: 'orchestratorbot', ghConfigDirectory: '~/.config/gh-orchestratorbot' };
 
 describe('loadAppConfig', () => {
 	it.effect('fills defaults, expands ~ and reads the old stuckAfterSeconds key', () =>
 		Effect.gen(function* () {
-			const config = yield* load(fullEnv, { config: { stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } } }, key });
+			const config = yield* load(fullEnv, { config: { stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, bot }, key });
 
 			assert.strictEqual(config.pollSeconds, 30);
 			assert.strictEqual(config.maxInFlight, 1);
@@ -44,6 +45,7 @@ describe('loadAppConfig', () => {
 			assert.strictEqual(config.labels.stuck, 'agent-stuck');
 			assert.strictEqual(config.worktreesDirectory, join(homedir(), '.herdr/worktrees'));
 			assert.deepStrictEqual(config.teams, { Telecord: { repo: join(homedir(), 'telecord') } });
+			assert.deepStrictEqual(config.bot, { login: 'orchestratorbot', ghConfigDirectory: join(homedir(), '.config/gh-orchestratorbot') });
 			assert.isFalse('stuckAfterSeconds' in config);
 			assert.strictEqual(config.env.claudeConfigPath, join(homedir(), '.claude.json'));
 			assert.strictEqual(config.env.stateDirectory, '/state');
@@ -54,7 +56,7 @@ describe('loadAppConfig', () => {
 	it.effect('reports an env error and two config file errors together in one message', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const error = yield* load(env, { config: { pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } } }, key }).pipe(Effect.flip);
+			const error = yield* load(env, { config: { pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, bot }, key }).pipe(Effect.flip);
 
 			assert.lengthOf(error.problems, 3);
 			assert.match(error.message, /HERDR_BIN_PATH/);
@@ -73,21 +75,25 @@ describe('loadAppConfig', () => {
 		}),
 	);
 
-	it.effect('rejects an empty team map, an unknown team key and invalid JSON', () =>
+	it.effect('rejects an empty team map, an unknown team key, a missing or incomplete bot and invalid JSON', () =>
 		Effect.gen(function* () {
-			const noTeams = yield* load(fullEnv, { config: { teams: {} }, key }).pipe(Effect.flip);
-			const unknownKey = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound', repos: '~/x' } } }, key }).pipe(Effect.flip);
+			const noTeams = yield* load(fullEnv, { config: { teams: {}, bot }, key }).pipe(Effect.flip);
+			const unknownKey = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, bot }, key }).pipe(Effect.flip);
+			const noBot = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } } }, key }).pipe(Effect.flip);
+			const noBotLogin = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } }, bot: { login: '', ghConfigDirectory: '~/gh' } }, key }).pipe(Effect.flip);
 			const badJson = yield* load(fullEnv, { config: '{ "teams": ', key }).pipe(Effect.flip);
 
 			assert.match(noTeams.message, /no teams configured/);
 			assert.match(unknownKey.message, /repos/);
+			assert.match(noBot.message, /config\.json bot: Missing key/);
+			assert.match(noBotLogin.message, /config\.json bot\.login: /);
 			assert.match(badJson.message, /config\.json/);
 		}),
 	);
 
 	it.effect('reports a missing API key file', () =>
 		Effect.gen(function* () {
-			const error = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } } } }).pipe(Effect.flip);
+			const error = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } }, bot } }).pipe(Effect.flip);
 
 			assert.lengthOf(error.problems, 1);
 			assert.match(error.problems[0], /no Linear API key: create .*linear-key with mode 600/);

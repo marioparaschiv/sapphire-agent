@@ -13,7 +13,7 @@ A run is one journal row per epic: the current or last agent run for it. Statuse
 | `awaitingInput` | The agent sat `idle`, `done` or `blocked` without a result file for `awaitingInputAfterSeconds`; the epic is flagged with the question. | yes |
 | `stale` | herdr says `working` but the pane output did not change for `staleAfterSeconds`, and a nudge did not help within `nudgeGraceSeconds`; the epic is flagged. | yes |
 | `error` | The agent exited or vanished without a result file, the result file was invalid or did not match its threads, there was no PR for it, or the run never started; the epic is flagged. | no |
-| `ended` | The run is over and its tab closed (result posted, epic moved on, or a follow-up that never started). Kept to clean the worktree up later and to scan its PR for `/agent` threads. | no |
+| `ended` | The run is over and its tab closed (result posted, epic moved on, or a follow-up that never started). Kept to clean the worktree up later and to scan its PR for threads that mention the bot. | no |
 | `kept` | Cleanup found work that is not on origin, so the worktree stays; the epic was told once. | no |
 
 A run holds a slot while its Claude process may be alive, so live agents never exceed `maxInFlight`. A run's job is `orchestrate` or `follow-up` (with the thread ids it answers).
@@ -79,7 +79,7 @@ For each started run that is `running`, `awaitingInput` or `stale`, every tick r
 
 Skipped while paused. For each `ended` run whose epic is in To Review, in a resolved team, without `agent-stuck`, while `maxInFlight` allows: read the branch's open PR and its review threads. If any are pending, claim one follow-up run for all of them (`claimed`, job `follow-up` with the thread ids), replacing the ended row. The start rule then pulls the branch, opens a tab and starts `/follow-up`.
 
-Pending rule (`isPending`): a thread is pending when it is unresolved and the user's latest comment in it (comments carrying the onBehalfOf block are the agent's own) contains `/agent`, in its body or in the body of the review it was submitted with. So `/agent` in a review body tags every thread of that review, the agent's own flags and replies never count, a flag the user answered with `/agent` counts, and a resolved flag is dismissed. Nothing is stored about threads: pending is read from GitHub every time, and a thread stays pending until the reply is posted and it is resolved.
+Pending rule (`isPending`): a thread is pending when it is unresolved and the user's latest comment in it (comments carrying the onBehalfOf block are the agent's own) mentions the bot, in its body or in the body of the review it was submitted with. A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` counts, `@orchestratorbotx` and `a@orchestratorbot` do not. So a mention in a review body tags every thread of that review, the agent's own flags and replies never count, a flag the user answered with a mention counts, and a resolved flag is dismissed. A comment on the PR itself (not in a thread) that mentions the bot makes every unresolved thread pending, until a comment by the bot account follows it (`reviewRequested`). That is the in-progress comment the start rule posts once the follow-up's Claude runs, so a request written while that follow-up runs stays pending and starts another follow-up after it ends, if unresolved threads remain. Comments of the bot's or the agent's never count as a request. Nothing is stored about threads: pending is read from GitHub every time, and a thread stays pending until the reply is posted and it is resolved.
 
 Only an `ended` run is scanned: an in-flight one already holds the epic, so a restart mid-run claims nothing twice.
 
@@ -95,7 +95,8 @@ Not paused, so a claim made before a pause still starts. Takes each `claimed` ru
 2. Trust the worktree for Claude.
 3. Tab: adopt an owned tab of the epic that no run tracks and that herdr still has (e.g. one opened just before a crash), otherwise open a new one; record the tab and pane.
 4. Claude: if Claude is not already in the pane, start it with the prompt for the job (the follow-up prompt needs the PR's URL). Then herdr must show Claude in the pane, not `blocked`.
-5. Move the epic to Implementing (if not there yet), status `running`.
+5. Follow-up only: the bot posts `On it: handling N review threads.` on the PR (`inProgress` marker, keyed by the claim), through `gh` with `GH_CONFIG_DIR=<bot.ghConfigDirectory>`. It comes after the claim and after Claude runs, so a crash never leaves a comment without a run, and a follow-up that never started does not answer a request on the PR. Until the run is `running` this step repeats every tick, so a failed post is retried and the marker keeps it to one comment.
+6. Move the epic to Implementing (if not there yet), status `running`.
 
 A step that fails Permanently, or a claim not confirmed within `startTimeoutSeconds` (counted from the claim, or from the process start if later, so a restart gets a full window), fails the start: a `startFailed` flag with the pane tail if there is one. An initial run becomes `error` and stays in Ready. A follow-up goes back to `ended` in To Review (moving the epic back if needed), keeping its worktree; removing the label lets the follow-up rule claim it again.
 

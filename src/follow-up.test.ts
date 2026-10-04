@@ -3,7 +3,7 @@ import { assert, describe, it } from '@effect/vitest';
 import { Clock, Effect } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
-import { ON_BEHALF_OF_CLAUDE } from './github.ts';
+import { asClaude, ON_BEHALF_OF_CLAUDE } from './github.ts';
 import type { Epic } from './linear.ts';
 import { git, type Harness, makeHarness, markerKeys } from './test-harness.ts';
 
@@ -29,8 +29,8 @@ const reviewedEpic = (h: Harness, { push = true }: { readonly push?: boolean } =
 
 // Two threads asking the agent for changes, and one the reviewer keeps for themselves.
 const addThreads = (h: Harness, number: number) => {
-	const rename = h.github.addThread(h.githubRepo, number, { comments: [{ body: 'Rename this to syncSettings. /agent' }] });
-	const backoff = h.github.addThread(h.githubRepo, number, { comments: [{ body: 'This retry loop has no backoff.', reviewBody: 'A few things to fix. /agent' }] });
+	const rename = h.github.addThread(h.githubRepo, number, { comments: [{ body: 'Rename this to syncSettings. @orchestratorbot' }] });
+	const backoff = h.github.addThread(h.githubRepo, number, { comments: [{ body: 'This retry loop has no backoff.', reviewBody: 'A few things to fix. @orchestratorbot' }] });
 	const note = h.github.addThread(h.githubRepo, number, { comments: [{ body: 'I will update the docs myself.' }] });
 
 	return { rename, backoff, note };
@@ -61,7 +61,7 @@ const outcome = (h: Harness, epic: Epic, number: number, threadIds: ReadonlyArra
 
 				return [thread.isResolved, markerKeys(thread.comments.nodes.map((comment) => comment.body))];
 			}),
-			summaries: markerKeys(h.github.comments(h.githubRepo, number)),
+			pullRequestComments: markerKeys(h.github.comments(h.githubRepo, number)),
 			state: h.linear.stateName(epic.id),
 			openTabs: h.herdr.tabs().filter((tab) => tab.label.startsWith(`${epic.identifier} `)).length,
 			runs: (yield* h.runs).map((run) => `${run.status} ${run.job._tag}`),
@@ -74,7 +74,7 @@ const answered = ({ rename, backoff, firstRunAt, followUpAt }: { readonly rename
 		[true, [`reply:${rename}.${followUpAt}`]],
 		[true, [`reply:${backoff}.${followUpAt}`]],
 	],
-	summaries: [`summary:${firstRunAt}`, `summary:${followUpAt}`],
+	pullRequestComments: [`summary:${firstRunAt}`, `inProgress:${followUpAt}`, `summary:${followUpAt}`],
 	state: 'To Review',
 	openTabs: 0,
 	runs: ['ended follow-up'],
@@ -128,12 +128,91 @@ describe('follow-ups', () => {
 			assert.strictEqual(h.herdr.closedTabs().at(-1), tab.tabId);
 			assert.deepStrictEqual(
 				h.github.thread(rename).comments.nodes.map((comment) => comment.body.split('\n\n')[0]),
-				['Rename this to syncSettings. /agent', 'Renamed it to syncSettings.'],
+				['Rename this to syncSettings. @orchestratorbot', 'Renamed it to syncSettings.'],
 			);
 			assert.isTrue(h.github.thread(backoff).comments.nodes[1].body.endsWith(ON_BEHALF_OF_CLAUDE));
 			assert.deepStrictEqual([h.github.thread(note).isResolved, h.github.thread(note).comments.nodes.length], [false, 1]);
-			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[1].startsWith('Renamed the sync function and added backoff.\n\nReady for review, @marioparaschiv.'));
+			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[1].startsWith('On it: handling 2 review threads.\n\n<!-- herdr-linear:TEST-10:inProgress:'));
+			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[2].startsWith('Renamed the sync function and added backoff.\n\nReady for review, @marioparaschiv.'));
 			assert.strictEqual(h.herdr.starts().length, 1);
+		}),
+	);
+
+	it.effect('a PR comment mentioning the bot starts one follow-up for every unresolved thread, which the bot answers once, also across a crash', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic, pullRequest, firstRunAt, followUpAt } = yield* reviewedEpic(h);
+			const { rename, backoff, note } = addThreads(h, pullRequest.number);
+			const flag = h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: asClaude('This retry loop has no timeout.') }] });
+
+			h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: asClaude('Unused import.') }], isResolved: true });
+			h.github.addComment(h.githubRepo, pullRequest.number, '@OrchestratorBot please handle the review');
+			// The first GitHub write is the bot's comment; the process dies before the run is recorded as running.
+			h.github.crashAfterWrite(1, new Transient({ message: 'the process died' }));
+			yield* h.tick;
+			assert.deepStrictEqual((yield* h.runs).map((run) => run.status), ['claimed']);
+			yield* h.restart;
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.status, run.job]),
+				[['running', { _tag: 'follow-up', threadIds: [rename, backoff, note, flag] }]],
+			);
+			assert.deepStrictEqual(markerKeys(h.github.comments(h.githubRepo, pullRequest.number)), [`summary:${firstRunAt}`, `inProgress:${followUpAt}`]);
+			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[2].startsWith('On it: handling 4 review threads.'));
+
+			h.herdr.setAgentStatus(followUpTab(h, epic).paneId, 'done');
+			h.writeResultFile(
+				(yield* h.runs)[0],
+				JSON.stringify({
+					summary: 'Handled every review thread.',
+					replies: [...replies(rename, backoff), { threadId: note, body: 'Left the docs to you.' }, { threadId: flag, body: 'Added a timeout.' }],
+					flags: [],
+				}),
+			);
+			yield* h.tick;
+			h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: 'Nit: a typo here.' }] });
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => `${run.status} ${run.job._tag}`),
+				['ended follow-up'],
+			);
+			assert.strictEqual(h.herdr.starts().length, 1);
+		}),
+	);
+
+	it.effect('a PR comment mentioning the bot while a follow-up runs starts another follow-up for the threads still unresolved once it ends', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic, pullRequest, firstRunAt, followUpAt } = yield* reviewedEpic(h);
+			const { rename, backoff, note } = addThreads(h, pullRequest.number);
+
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+
+			const typo = h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: 'Nit: a typo here.' }] });
+
+			h.github.addComment(h.githubRepo, pullRequest.number, '@orchestratorbot take the rest too');
+			h.herdr.setAgentStatus(followUpTab(h, epic).paneId, 'done');
+			h.writeResultFile((yield* h.runs)[0], JSON.stringify({ summary: 'Renamed the sync function and added backoff.', replies: replies(rename, backoff), flags: [] }));
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			const secondAt = yield* Clock.currentTimeMillis;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.status, run.job, run.claimedAt]),
+				[['running', { _tag: 'follow-up', threadIds: [note, typo] }, secondAt]],
+			);
+			assert.deepStrictEqual(markerKeys(h.github.comments(h.githubRepo, pullRequest.number)), [
+				`summary:${firstRunAt}`,
+				`inProgress:${followUpAt}`,
+				`summary:${followUpAt}`,
+				`inProgress:${secondAt}`,
+			]);
+			assert.strictEqual(h.herdr.starts().length, 2);
 		}),
 	);
 
@@ -189,7 +268,7 @@ describe('follow-ups', () => {
 					[false, []],
 					[false, []],
 				],
-				summaries: [`summary:${firstRunAt}`],
+				pullRequestComments: [`summary:${firstRunAt}`, `inProgress:${followUpAt}`],
 				state: 'Implementing',
 				openTabs: 1,
 				runs: ['error follow-up'],

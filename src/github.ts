@@ -1,6 +1,7 @@
 import { Context, Effect, Layer, Option, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
+import { AppConfig } from './config.ts';
 import { hasMarker, type MarkedComment, type Marker } from './markers.ts';
 import type { ResultFile } from './result-file.ts';
 
@@ -32,8 +33,17 @@ export const Bodies = Schema.Struct({ totalCount: Schema.Int, nodes: Schema.Arra
 
 export type Bodies = typeof Bodies.Type;
 
+// The author is null for a deleted account.
+const PullRequestComments = Schema.Struct({
+	totalCount: Schema.Int,
+	nodes: Schema.Array(Schema.Struct({ body: Schema.String, author: Schema.NullOr(Schema.Struct({ login: Schema.String })) })),
+});
+
+type PullRequestComments = typeof PullRequestComments.Type;
+
 const PullRequestThreads = Schema.Struct({
 	url: Schema.String,
+	comments: PullRequestComments,
 	reviewThreads: Schema.Struct({ totalCount: Schema.Int, nodes: Schema.Array(ReviewThread) }),
 });
 
@@ -43,6 +53,8 @@ export type PendingThreads = { readonly url: string; readonly threadIds: Readonl
 
 export type Flags = ResultFile['flags'];
 
+type Account = 'user' | 'bot';
+
 // Linear shows a GitHub comment carrying this block as written by Claude. The agent and the user share one GitHub
 // account, so it is the only way to tell the agent's comments from the user's.
 export const ON_BEHALF_OF_CLAUDE = '<!-- linear:extension {"version":1,"plugins":[{"plugin":"onBehalfOf","agent":"claude"}]} -->';
@@ -51,32 +63,45 @@ export const asClaude = (body: string) => `${body}\n\n${ON_BEHALF_OF_CLAUDE}`;
 
 const isClaude = (body: string) => body.includes(ON_BEHALF_OF_CLAUDE);
 
-const mentionsAgent = (body: string) => /(^|\s)\/agent\b/.test(body);
+// `@<login>` as a whole word, so neither `@<login>x` nor an email address like `a@<login>` counts. GitHub logins are
+// case-insensitive.
+const mentionOf = (login: string) => new RegExp(`(?<![\\w@-])@${RegExp.escape(login)}(?![\\w-])`, 'i');
 
 // GitHub caps a connection page at 100 nodes.
 export const maxNodes = 100;
 
-// Unresolved, and the user's latest comment asks for the agent, in its body or in the body of the review it was
+// Unresolved, and the user's latest comment mentions the bot, in its body or in the body of the review it was
 // submitted with. Comments carrying the onBehalfOf block are the agent's own and never count.
-const isPending = (thread: ReviewThread) => {
+const isPending = (mention: RegExp) => (thread: ReviewThread) => {
 	const latest = thread.comments.nodes.findLast((comment) => !isClaude(comment.body));
 
-	return !thread.isResolved && !!latest && (mentionsAgent(latest.body) || mentionsAgent(latest.pullRequestReview?.body ?? ''));
+	return !thread.isResolved && !!latest && (mention.test(latest.body) || mention.test(latest.pullRequestReview?.body ?? ''));
+};
+
+// A user's PR comment mentions the bot and no comment of the bot's came after it, so every unresolved thread is
+// pending. The bot comments when the follow-up starts, so a request written while that follow-up runs stays pending.
+const reviewRequested = (botLogin: string, mention: RegExp, { nodes }: PullRequestComments) => {
+	const isBot = ({ author }: PullRequestComments['nodes'][number]) => author?.login.toLowerCase() === botLogin.toLowerCase();
+
+	return nodes.slice(nodes.findLastIndex(isBot) + 1).some(({ body }) => !isClaude(body) && mention.test(body));
 };
 
 // The open PR for the branch if there is one, else a merged one, else a closed one.
 export const preferredPullRequest = (pullRequests: ReadonlyArray<PullRequest>) =>
 	Option.fromUndefinedOr(pullRequests.find((pr) => pr.state === 'OPEN') ?? pullRequests.find((pr) => pr.state === 'MERGED') ?? pullRequests[0]);
 
-export const pendingOf = (pullRequest: PullRequestThreads): Effect.Effect<PendingThreads, Permanent> => {
-	const { url, reviewThreads } = pullRequest;
+export const pendingOf = (botLogin: string, pullRequest: PullRequestThreads): Effect.Effect<PendingThreads, Permanent> => {
+	const { url, comments, reviewThreads } = pullRequest;
+	const mention = mentionOf(botLogin);
 
 	// A truncated page could hide a pending thread.
 	if (reviewThreads.totalCount > maxNodes) {
 		return Effect.fail(new Permanent({ message: `${url} has ${reviewThreads.totalCount} review threads, over the ${maxNodes} one query reads` }));
 	}
 
-	return Effect.succeed({ url, threadIds: reviewThreads.nodes.filter(isPending).map((thread) => thread.id) });
+	const wanted = reviewRequested(botLogin, mention, comments) ? (thread: ReviewThread) => !thread.isResolved : isPending(mention);
+
+	return Effect.succeed({ url, threadIds: reviewThreads.nodes.filter(wanted).map((thread) => thread.id) });
 };
 
 // `bodies` holds the latest nodes; past the cap, a missing marker could be on an earlier page.
@@ -106,9 +131,11 @@ export class GitHub extends Context.Service<
 	{
 		// See preferredPullRequest.
 		readonly findPullRequest: (repo: string, branch: string) => Effect.Effect<Option.Option<PullRequest>, CallError>;
-		// The branch's open PR and its pending review threads (see isPending), or none without an open PR.
+		// The branch's open PR and its pending review threads (see isPending and reviewRequested), or none without an open PR.
 		readonly pendingThreads: (repo: string, branch: string) => Effect.Effect<Option.Option<PendingThreads>, CallError>;
 		readonly postSummary: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		// A PR comment as the bot, saying a follow-up started.
+		readonly postInProgress: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 		// One COMMENT review holding every flag as an inline comment on the PR's new code.
 		readonly postFlagsReview: (repo: string, number: number, comment: MarkedComment, flags: Flags) => Effect.Effect<void, CallError>;
 		readonly replyToThread: (threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
@@ -119,15 +146,18 @@ export class GitHub extends Context.Service<
 		GitHub,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+			const { bot } = yield* AppConfig;
 			const encoder = new TextEncoder();
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
-			const run = (args: ReadonlyArray<string>, input: string) => {
+			// The user's account is gh's default login; the bot's is its own gh config dir.
+			const run = (args: ReadonlyArray<string>, input: string, account: Account) => {
 				const command = `gh ${args.join(' ')}`;
+				const env = account === 'bot' ? { env: { GH_CONFIG_DIR: bot.ghConfigDirectory }, extendEnv: true } : {};
 
 				return Effect.scoped(
 					Effect.gen(function* () {
-						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)) }));
+						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)), ...env }));
 						const [stdout, stderr, exitCode] = yield* Effect.all([text(handle.stdout), text(handle.stderr), handle.exitCode], { concurrency: 'unbounded' });
 
 						if (exitCode !== 0) {
@@ -139,8 +169,8 @@ export class GitHub extends Context.Service<
 				).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))));
 			};
 
-			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '') =>
-				run(args, input).pipe(
+			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', account: Account = 'user') =>
+				run(args, input, account).pipe(
 					Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(schema))),
 					Effect.catchTag('SchemaError', (error) => Effect.fail(new Permanent({ message: `gh ${args.join(' ')}: ${error.message}`, cause: error }))),
 				);
@@ -149,8 +179,8 @@ export class GitHub extends Context.Service<
 			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>) =>
 				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables })).pipe(Effect.map(({ data }) => data));
 
-			const post = (endpoint: string, body: Record<string, unknown>) =>
-				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body)).pipe(Effect.asVoid);
+			const post = (endpoint: string, body: Record<string, unknown>, account: Account = 'user') =>
+				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), account).pipe(Effect.asVoid);
 
 			const ownerAndName = (repo: string) => {
 				const [owner, name] = repo.split('/');
@@ -208,6 +238,7 @@ export class GitHub extends Context.Service<
 								pullRequests(headRefName: $branch, states: OPEN, first: 1) {
 									nodes {
 										url
+										comments(last: ${maxNodes}) { totalCount nodes { body author { login } } }
 										reviewThreads(first: ${maxNodes}) {
 											totalCount
 											nodes { id isResolved comments(last: ${maxNodes}) { nodes { body pullRequestReview { body } } } }
@@ -221,7 +252,7 @@ export class GitHub extends Context.Service<
 						Effect.flatMap(({ repository }) => {
 							const [pullRequest] = repository.pullRequests.nodes;
 
-							return pullRequest ? Effect.map(pendingOf(pullRequest), Option.some) : Effect.succeedNone;
+							return pullRequest ? Effect.map(pendingOf(bot.login, pullRequest), Option.some) : Effect.succeedNone;
 						}),
 						withPolicy,
 					),
@@ -232,6 +263,14 @@ export class GitHub extends Context.Service<
 						marker,
 						`${repo}#${number} comments`,
 						post(`repos/${repo}/issues/${number}/comments`, { body: asClaude(body) }),
+					),
+
+				postInProgress: (repo, number, { marker, body }) =>
+					unlessMarked(
+						pullRequestBodies(repo, number, 'comments'),
+						marker,
+						`${repo}#${number} comments`,
+						post(`repos/${repo}/issues/${number}/comments`, { body }, 'bot'),
 					),
 
 				postFlagsReview: (repo, number, { marker, body }, flags) =>

@@ -3,17 +3,20 @@ import { Effect, Exit, Fiber, Layer, Option, Schema, Sink, Stream } from 'effect
 import { ChildProcessSpawner } from 'effect/process';
 import { TestClock } from 'effect/testing';
 import { Permanent, Transient } from './call-policy.ts';
+import { AppConfig } from './config.ts';
 import { asClaude, classifyGhFailure, GitHub, ON_BEHALF_OF_CLAUDE } from './github.ts';
 import { FakeGitHub } from './github-fake.ts';
 import { withMarker } from './markers.ts';
 
-type GhCall = { readonly args: ReadonlyArray<string>; readonly input: string };
+type GhCall = { readonly args: ReadonlyArray<string>; readonly input: string; readonly env: Record<string, string | undefined> | undefined; readonly extendEnv: boolean | undefined };
 
 type GhReply = { readonly stdout: string } | { readonly exitCode: number; readonly stderr: string } | 'hang';
 
 const encoder = new TextEncoder();
 
 const bytes = (text: string) => Stream.make(encoder.encode(text));
+
+const config = AppConfig.layerTest('/tmp/herdr-linear-test');
 
 // The live layer over a fake `gh` that records each call and answers it with `respond`.
 const liveWithGh = (respond: (call: GhCall) => GhReply) => {
@@ -25,7 +28,7 @@ const liveWithGh = (respond: (call: GhCall) => GhReply) => {
 			}
 
 			const input = Stream.isStream(command.options.stdin) ? yield* command.options.stdin.pipe(Stream.decodeText(), Stream.mkString) : '';
-			const call = { args: command.args, input };
+			const call = { args: command.args, input, env: command.options.env, extendEnv: command.options.extendEnv };
 
 			calls.push(call);
 			const reply = respond(call);
@@ -49,7 +52,7 @@ const liveWithGh = (respond: (call: GhCall) => GhReply) => {
 		}),
 	);
 
-	return { calls, layer: GitHub.layer.pipe(Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner))) };
+	return { calls, layer: GitHub.layer.pipe(Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)), Layer.provide(config)) };
 };
 
 const GraphqlRequest = Schema.fromJsonString(
@@ -80,7 +83,7 @@ const pullRequestServer = () => {
 	const state = {
 		comments: new Array<string>(),
 		reviews: new Array<typeof RestRequest.Type>(),
-		thread: { isResolved: false, comments: ['Rename this to fetchUsers /agent'] },
+		thread: { isResolved: false, comments: ['Rename this to fetchUsers @orchestratorbot'] },
 	};
 
 	const respond = (call: GhCall): GhReply => {
@@ -220,6 +223,26 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
+	it.effect('posts the in-progress comment once, as the bot through its gh config dir', () =>
+		Effect.gen(function* () {
+			const server = pullRequestServer();
+			const { calls, layer } = liveWithGh(server.respond);
+			const inProgress = withMarker('On it: handling 1 review thread.', { identifier: 'HL-11', purpose: 'inProgress', key: '1759500000000' });
+
+			yield* GitHub.use((github) => Effect.repeat(github.postInProgress(repo, 7, inProgress), { times: 1 })).pipe(Effect.provide(layer));
+
+			assert.deepStrictEqual(server.state.comments, [inProgress.body]);
+			assert.deepStrictEqual(
+				calls.map(({ args, env, extendEnv }) => [args.join(' '), env, extendEnv]),
+				[
+					['api graphql --input -', undefined, undefined],
+					[`api --method POST repos/${repo}/issues/7/comments --input -`, { GH_CONFIG_DIR: '/tmp/herdr-linear-test/gh-bot' }, true],
+					['api graphql --input -', undefined, undefined],
+				],
+			);
+		}),
+	);
+
 	it.effect('replies to a thread once and resolves it once', () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
@@ -229,7 +252,7 @@ describe('GitHub live layer', () => {
 				Effect.repeat(Effect.andThen(github.replyToThread('PRRT_kwDOA1', reply), github.resolveThread('PRRT_kwDOA1')), { times: 1 }),
 			).pipe(Effect.provide(layer));
 
-			assert.deepStrictEqual(server.state.thread, { isResolved: true, comments: ['Rename this to fetchUsers /agent', asClaude(reply.body)] });
+			assert.deepStrictEqual(server.state.thread, { isResolved: true, comments: ['Rename this to fetchUsers @orchestratorbot', asClaude(reply.body)] });
 			assert.deepStrictEqual(
 				calls.map((call) => /^(query|mutation) \w+/.exec(graphqlRequest(call).query)?.[0]),
 				['query ReviewThread', 'mutation ReplyToThread', 'query ReviewThread', 'mutation ResolveThread', 'query ReviewThread', 'query ReviewThread'],
@@ -256,20 +279,36 @@ describe('GitHub live layer', () => {
 			isResolved,
 			comments: { nodes: comments.map(({ body, review }) => ({ body, pullRequestReview: review === undefined ? null : { body: review } })) },
 		});
-		const threadsResponse = (totalCount: number, nodes: ReadonlyArray<ReturnType<typeof thread>>) =>
-			data({ repository: { pullRequests: { nodes: [{ url: `https://github.com/${repo}/pull/7`, reviewThreads: { totalCount, nodes } }] } } });
+		// PR comments by `mario` unless `author` is given; null is a deleted account.
+		const threadsResponse = (
+			totalCount: number,
+			nodes: ReadonlyArray<ReturnType<typeof thread>>,
+			comments: ReadonlyArray<{ readonly body: string; readonly author?: string | null }> = [],
+		) =>
+			data({
+				repository: {
+					pullRequests: {
+						nodes: [
+							{
+								url: `https://github.com/${repo}/pull/7`,
+								comments: { totalCount: comments.length, nodes: comments.map(({ body, author = 'mario' }) => ({ body, author: author === null ? null : { login: author } })) },
+								reviewThreads: { totalCount, nodes },
+							},
+						],
+					},
+				},
+			});
 
-		it.effect('are unresolved and the latest comment that is not Claude asks for /agent, in its body or its review body', () =>
+		it.effect('are unresolved and the latest comment that is not Claude mentions the bot, in its body or its review body', () =>
 			Effect.gen(function* () {
 				const nodes = [
-					thread('asked', false, [{ body: 'Rename this. /agent' }]),
-					thread('tagged-by-review', false, [{ body: 'Rename this.', review: '/agent please handle these' }]),
-					thread('asked-then-answered', false, [{ body: '/agent rename this' }, { body: asClaude('Renamed it.') }]),
-					thread('flag-asked', false, [{ body: asClaude('This loads every user.') }, { body: '/agent fix it' }]),
-					thread('resolved', true, [{ body: '/agent rename this' }]),
+					thread('asked', false, [{ body: 'Rename this. @orchestratorbot' }]),
+					thread('tagged-by-review', false, [{ body: 'Rename this.', review: '@orchestratorbot please handle these' }]),
+					thread('asked-then-answered', false, [{ body: '@orchestratorbot rename this' }, { body: asClaude('Renamed it.') }]),
+					thread('flag-asked', false, [{ body: asClaude('This loads every user.') }, { body: '@orchestratorbot fix it' }]),
+					thread('resolved', true, [{ body: '@orchestratorbot rename this' }]),
 					thread('flag-only', false, [{ body: asClaude('This loads every user.') }]),
-					thread('changed-mind', false, [{ body: '/agent rename this' }, { body: 'Never mind, keep it.' }]),
-					thread('not-a-word', false, [{ body: 'see src/agent and /agents' }]),
+					thread('changed-mind', false, [{ body: '@orchestratorbot rename this' }, { body: 'Never mind, keep it.' }]),
 					thread('empty', false, []),
 				];
 				const { calls, layer } = liveWithGh(() => threadsResponse(nodes.length, nodes));
@@ -277,7 +316,59 @@ describe('GitHub live layer', () => {
 
 				assert.deepStrictEqual(pending, Option.some({ url: `https://github.com/${repo}/pull/7`, threadIds: ['asked', 'tagged-by-review', 'asked-then-answered', 'flag-asked'] }));
 				assert.match(graphqlRequest(calls[0]).query, /pullRequests\(headRefName: \$branch, states: OPEN, first: 1\)/);
+				assert.match(graphqlRequest(calls[0]).query, /comments\(last: 100\) \{ totalCount nodes \{ body author \{ login \} \} \}/);
 				assert.include(calls[0].input, '"variables":{"owner":"acme","name":"web","branch":"mario/hl-11-github"}');
+			}),
+		);
+
+		it.effect('count a mention of the bot only as a whole word, in any case', () =>
+			Effect.gen(function* () {
+				const bodies = [
+					'@OrchestratorBot rename this',
+					'Rename this (@orchestratorbot).',
+					'Rename this.\n@orchestratorbot',
+					'@orchestratorbotx rename this',
+					'@orchestratorbot-dev rename this',
+					'mail me at mario@orchestratorbot',
+					'/agent please rename this',
+					'orchestratorbot rename this',
+				];
+				const nodes = bodies.map((body, index) => thread(`${index}`, false, [{ body }]));
+				const { layer } = liveWithGh(() => threadsResponse(nodes.length, nodes));
+				const pending = yield* GitHub.use((github) => github.pendingThreads(repo, 'mario/hl-11-github')).pipe(Effect.provide(layer));
+
+				assert.deepStrictEqual(
+					Option.map(pending, ({ threadIds }) => threadIds.map((id) => bodies[Number(id)])),
+					Option.some(['@OrchestratorBot rename this', 'Rename this (@orchestratorbot).', 'Rename this.\n@orchestratorbot']),
+				);
+			}),
+		);
+
+		it.effect('are every unresolved thread while a PR comment mentioning the bot has no comment of the bot after it', () =>
+			Effect.gen(function* () {
+				const nodes = [
+					thread('asked', false, [{ body: 'Rename this. @orchestratorbot' }]),
+					thread('flag-only', false, [{ body: asClaude('This loads every user.') }]),
+					thread('changed-mind', false, [{ body: '@orchestratorbot rename this' }, { body: 'Never mind, keep it.' }]),
+					thread('resolved', true, [{ body: asClaude('Unused import.') }]),
+				];
+				const pendingFor = (comments: ReadonlyArray<{ readonly body: string; readonly author?: string | null }>) =>
+					GitHub.use((github) => github.pendingThreads(repo, 'mario/hl-11-github')).pipe(
+						Effect.provide(liveWithGh(() => threadsResponse(nodes.length, nodes, comments)).layer),
+						Effect.map(Option.map(({ threadIds }) => threadIds)),
+					);
+				const summary = { body: asClaude('Summary.') };
+				const request = { body: '@orchestratorbot review' };
+				const unresolved = Option.some(['asked', 'flag-only', 'changed-mind']);
+				const asked = Option.some(['asked']);
+
+				assert.deepStrictEqual(yield* pendingFor([summary, request, { body: 'Thanks.' }]), unresolved);
+				assert.deepStrictEqual(yield* pendingFor([summary, request, { body: asClaude('Handled every thread.') }]), unresolved);
+				assert.deepStrictEqual(yield* pendingFor([summary, { ...request, author: null }]), unresolved);
+				assert.deepStrictEqual(yield* pendingFor([summary, request, { body: 'On it: handling 3 review threads.', author: 'OrchestratorBot' }]), asked);
+				assert.deepStrictEqual(yield* pendingFor([{ body: 'On it. Mention @orchestratorbot to ask again.', author: 'orchestratorbot' }]), asked);
+				assert.deepStrictEqual(yield* pendingFor([{ body: asClaude('Mention @orchestratorbot to ask for changes.') }]), asked);
+				assert.deepStrictEqual(yield* pendingFor([{ body: '/agent review' }]), asked);
 			}),
 		);
 
@@ -292,7 +383,7 @@ describe('GitHub live layer', () => {
 
 		it.effect('fail as Permanent past 100 threads, since a hidden one could be pending', () =>
 			Effect.gen(function* () {
-				const { layer } = liveWithGh(() => threadsResponse(101, [thread('asked', false, [{ body: '/agent' }])]));
+				const { layer } = liveWithGh(() => threadsResponse(101, [thread('asked', false, [{ body: '@orchestratorbot' }])]));
 				const exit = yield* GitHub.use((github) => github.pendingThreads(repo, 'mario/hl-11-github')).pipe(Effect.provide(layer), Effect.exit);
 
 				assert.deepStrictEqual(
@@ -375,13 +466,13 @@ describe('FakeGitHub', () => {
 			const github = yield* GitHub;
 			const merged = fake.addPullRequest({ repo, branch: 'mario/hl-11-github', state: 'MERGED' });
 
-			fake.addThread(repo, merged.number, { comments: [{ body: '/agent rename this' }] });
+			fake.addThread(repo, merged.number, { comments: [{ body: '@orchestratorbot rename this' }] });
 			assert.deepStrictEqual(yield* github.pendingThreads(repo, 'mario/hl-11-github'), Option.none());
 
 			const open = fake.addPullRequest({ repo, branch: 'mario/hl-11-github', author: 'mario' });
-			const asked = fake.addThread(repo, open.number, { comments: [{ body: 'Rename this.', reviewBody: 'A few things. /agent' }] });
+			const asked = fake.addThread(repo, open.number, { comments: [{ body: 'Rename this.', reviewBody: 'A few things. @orchestratorbot' }] });
 
-			fake.addThread(repo, open.number, { comments: [{ body: '/agent rename this' }], isResolved: true });
+			fake.addThread(repo, open.number, { comments: [{ body: '@orchestratorbot rename this' }], isResolved: true });
 
 			assert.deepStrictEqual(yield* github.pendingThreads(repo, 'mario/hl-11-github'), Option.some({ url: open.url, threadIds: [asked] }));
 			assert.deepStrictEqual(yield* github.findPullRequest(repo, 'mario/hl-11-github'), Option.some(open));
@@ -389,7 +480,7 @@ describe('FakeGitHub', () => {
 			fake.setPullRequestState(repo, open.number, 'CLOSED');
 
 			assert.deepStrictEqual(yield* github.findPullRequest(repo, 'mario/hl-11-github'), Option.some(merged));
-		}).pipe(Effect.provide(FakeGitHub.layer)),
+		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(config)))),
 	);
 
 	it.effect('does not post again after a crash between the write and recording it', () =>
@@ -397,7 +488,7 @@ describe('FakeGitHub', () => {
 			const fake = yield* FakeGitHub;
 			const github = yield* GitHub;
 			const { number } = fake.addPullRequest({ repo, branch: 'mario/hl-11-github' });
-			const threadId = fake.addThread(repo, number, { comments: [{ body: '/agent rename this' }] });
+			const threadId = fake.addThread(repo, number, { comments: [{ body: '@orchestratorbot rename this' }] });
 			const crash = new Transient({ message: 'killed' });
 			const post = Effect.all([
 				github.postSummary(repo, number, summary),
@@ -415,8 +506,8 @@ describe('FakeGitHub', () => {
 			assert.deepStrictEqual(fake.thread(threadId), {
 				id: threadId,
 				isResolved: true,
-				comments: { nodes: [{ body: '/agent rename this', pullRequestReview: null }, { body: asClaude(reply.body), pullRequestReview: null }] },
+				comments: { nodes: [{ body: '@orchestratorbot rename this', pullRequestReview: null }, { body: asClaude(reply.body), pullRequestReview: null }] },
 			});
-		}).pipe(Effect.provide(FakeGitHub.layer)),
+		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(config)))),
 	);
 });

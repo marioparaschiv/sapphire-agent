@@ -13,8 +13,8 @@ A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeco
 3. The start rule prepares the worktree, trusts it for Claude, opens a tab, starts Claude and moves the epic to **Implementing** (status `running`).
 4. The agent works through the sub-issues, moves the epic to **In Review** when it starts `/sreview`, runs `/pr`, reviews its own diff, then writes its result file.
 5. Once the agent stops, the results rule reads the result file, posts the summary as a PR comment and the self-review flags as one review (both shown as Claude), removes `agent-stuck` if present, moves the epic to **To Review**, closes the tab and ends the run (status `ended`).
-6. Human reviews the PR (on GitHub or in Linear's review UI) and writes `/agent` in the threads the agent should handle, or in a review's body to tag all its threads.
-7. Next tick, the follow-up rule finds the pending threads and claims one follow-up run for all of them; the start rule pulls the branch, opens a tab and starts `/follow-up`. The epic goes to **Implementing**.
+6. Human reviews the PR (on GitHub or in Linear's review UI) and mentions the bot (`@<bot.login>`, e.g. `@orchestratorbot`) in the threads the agent should handle, in a review's body to tag all its threads, or in a comment on the PR itself to hand over every unresolved thread.
+7. Next tick, the follow-up rule finds the pending threads and claims one follow-up run for all of them; the start rule pulls the branch, opens a tab and starts `/follow-up`, then the bot comments on the PR that it is on it. The epic goes to **Implementing**.
 8. The follow-up agent changes, commits and pushes, self-reviews, and writes a result file with one reply per thread. The results rule posts the new summary and any flags, posts each reply into its thread and resolves it, moves the epic back to **To Review** and closes the tab.
 9. When the PR is merged or closed (or the epic reaches Shipped), the cleanup rule removes the worktree and local branch and drops the run from the journal.
 
@@ -30,7 +30,7 @@ Epic columns:
 | Ready For Agent | `states.ready` | Human. Also where an epic whose run never started stays until retried. |
 | Implementing | `states.implementing` | Plugin, once Claude is confirmed started (initial or follow-up run). |
 | In Review | `states.inReview` | Agent, when it starts `/sreview` (the orchestrate skill's rule). |
-| To Review | `states.toReview` | Plugin, once the result is posted to the open or merged PR. Epics here are scanned for `/agent` threads. |
+| To Review | `states.toReview` | Plugin, once the result is posted to the open or merged PR. Epics here are scanned for threads that mention the bot. |
 | Shipped | `states.shipped` | Not this code. Linear's GitHub integration on merge. |
 
 Linear's GitHub automation (team settings) must be: PR opened to To Review, merged to Shipped, branch or start to no action. A "start" rule moving to In Progress would pull the epic back out of To Review.
@@ -46,6 +46,7 @@ Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.m
 - Epics without sub-issues are ignored with a one-time log line.
 - Only issues with no parent count as epics.
 - Order is Linear board order (`sortOrder` ascending); at most `maxInFlight` runs at once, follow-ups first.
+- Everything on GitHub (PRs, summaries, replies, flags) is written as the user's account. The bot account only triggers follow-ups by being mentioned and posts the in-progress comment.
 - Linear and GitHub are the source of truth. The journal only holds what cannot be observed (see `journal-and-markers.md`), and every comment carries a hidden marker so it is never posted twice.
 
 ## The prompts the agent gets

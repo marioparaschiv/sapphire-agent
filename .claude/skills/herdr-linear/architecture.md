@@ -33,9 +33,9 @@ Rules run in this order (`rules.ts`):
 | 1 | cleanup | no | Ends what is left of finished runs (tab, worktree, branch, row), and resolves owned tabs and worktrees that no run tracks. |
 | 2 | results | no | Ends runs whose epic moved on; reads, stores and posts result files; moves the epic to To Review. |
 | 3 | monitoring | no | Tracks agent status and pane output; flags awaitingInput, stale, error and the wall-clock cap; nudges; relays replies. |
-| 4 | follow-up | yes | Claims a follow-up run for an ended run whose PR has pending `/agent` threads. |
+| 4 | follow-up | yes | Claims a follow-up run for an ended run whose PR has threads that mention the bot. |
 | 5 | dispatch | yes | Claims ready epics up to `maxInFlight`. |
-| 6 | start | no | Takes each claimed run through worktree, trust, tab, Claude and the move to Implementing. |
+| 6 | start | no | Takes each claimed run through worktree, trust, tab, Claude, the bot's in-progress comment (follow-ups) and the move to Implementing. |
 
 Why this order: cleanup and results end runs before monitoring looks at them, so one tick never flags a run it just ended. Claims come last, follow-ups before ready epics since both count against `maxInFlight`, so the start rule starts them in the same tick. Rules run one after another, so two rules never act on the same epic at once, and each sees in the journal what the rules before it wrote. A rule that takes over a tab checks herdr again first, since an earlier rule may have closed it this tick.
 
@@ -51,7 +51,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | --- | --- | --- | --- |
 | `AppConfig` | `config.ts` | Env, config file and API key, read once at startup. | `AppConfig.layerTest(dir, settings)` |
 | `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, replies, comments, moves, labels, reactions. | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
-| `GitHub` | `github.ts` | `gh` CLI: PR lookup, pending threads, summary, flags review, thread replies and resolves. | `FakeGitHub.layer` |
+| `GitHub` | `github.ts` | `gh` CLI: PR lookup, pending threads, summary, flags review, thread replies and resolves as the user; the in-progress comment as the bot. | `FakeGitHub.layer` |
 | `Herdr` | `herdr.ts` | herdr CLI and event socket: workspaces, tabs, panes, agents, prompts, starting Claude. | `FakeHerdr.layer` |
 | `Git` | `git.ts` | Worktrees, pull, unsaved-work check, removal, origin's GitHub repo, the result file. | Real git in temp repos. |
 | `ClaudeTrust` | `claude-trust.ts` | Pre-accepts Claude's folder trust in `~/.claude.json`. | Real temp files. |

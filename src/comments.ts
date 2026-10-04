@@ -191,6 +191,14 @@ const make = (config: AppConfigShape) => {
 		flagsReview: (run: { readonly identifier: string; readonly claimedAt: number }) =>
 			withMarker('Self-review findings I did not fix in this PR.', { identifier: run.identifier, purpose: 'flags', key: `${run.claimedAt}` }),
 
+		// Posted by the bot; its comment answers a PR-level request (see reviewRequested in github.ts).
+		inProgress: (run: { readonly identifier: string; readonly claimedAt: number; readonly threadCount: number }) =>
+			withMarker(`On it: handling ${run.threadCount} review thread${run.threadCount === 1 ? '' : 's'}.`, {
+				identifier: run.identifier,
+				purpose: 'inProgress',
+				key: `${run.claimedAt}`,
+			}),
+
 		threadReply: (reply: { readonly identifier: string; readonly claimedAt: number; readonly threadId: string; readonly body: string }) =>
 			withMarker(reply.body, { identifier: reply.identifier, purpose: 'reply', key: `${reply.threadId}.${reply.claimedAt}` }),
 	} satisfies Record<string, (...args: never) => MarkedComment>;

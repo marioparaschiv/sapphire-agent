@@ -34,6 +34,8 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; the label group name is this without the trailing `:`. |
 | `teams` | required | At least one team. |
+| `bot.login` | required | GitHub login of the bot account. Mentioning `@<login>` hands threads to the agent (`rules.md`); its comments answer PR-level requests. |
+| `bot.ghConfigDirectory` | required | `~` expanded. A `gh` config dir logged in as the bot, passed as `GH_CONFIG_DIR` when it posts the in-progress comment. Every other GitHub call uses the default `gh` login (the user). |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
@@ -52,7 +54,11 @@ Keyed by exact Linear team name:
 - `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
 - Paths accept `~`. Repo label rules: `linear-api.md`.
 
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/herdr-linear`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults.
+Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/herdr-linear`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs a `bot` entry before this version starts, e.g.:
+
+```json
+"bot": { "login": "orchestratorbot", "ghConfigDirectory": "~/.config/gh-orchestratorbot" }
+```
 
 ## API key
 

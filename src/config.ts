@@ -51,6 +51,9 @@ const Settings = Schema.Struct({
 		repoPrefix: Name('repo:'),
 	}).pipe(withDefault({})),
 	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
+	// The GitHub account whose @mention hands review threads to the agent and that says on the PR when a follow-up
+	// starts. `ghConfigDirectory` is a gh config dir logged in as it.
+	bot: Schema.Struct({ login: Schema.NonEmptyString, ghConfigDirectory: Path }),
 });
 
 export type Settings = typeof Settings.Type;
@@ -169,10 +172,15 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('herdr-linear/AppConfig') {
 	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
-	// Defaults plus one team, with every path under `directory`.
+	// Defaults plus one team and the bot, with every path under `directory`.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
 		Layer.succeed(AppConfig, {
-			...Schema.decodeUnknownSync(Settings)({ teams: { Test: { repo: join(directory, 'repo') } }, worktreesDirectory: join(directory, 'worktrees'), ...settings }),
+			...Schema.decodeUnknownSync(Settings)({
+				teams: { Test: { repo: join(directory, 'repo') } },
+				worktreesDirectory: join(directory, 'worktrees'),
+				bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot') },
+				...settings,
+			}),
 			env: {
 				herdrBinPath: 'herdr',
 				herdrSocketPath: join(directory, 'herdr.sock'),

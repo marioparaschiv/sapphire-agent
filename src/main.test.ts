@@ -11,7 +11,7 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot') } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 
 			const handle = yield* spawner.spawn(
@@ -43,7 +43,7 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot') } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'claims.json'), JSON.stringify({ claims: [{ epicId: 'b1c2d3', identifier: 'UNB-12', status: 'running' }] }));
 

@@ -12,7 +12,7 @@ How the live service is installed, started, paused, drained, deployed, inspected
 - herdr also starts its server on demand when a client attaches. `ExecCondition` runs `herdr status server` and skips the start if it prints `status: running`, so systemd never starts a second server. `inactive` for this unit is normal when herdr was started another way.
 - `ExecStart` pins `~/.nvm/versions/node/v24.21.0/bin/node`. Update both units after a Node upgrade.
 - Apply config or code changes with `systemctl --user restart herdr-linear` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
-- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there.
+- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user by default and as the bot in `bot.ghConfigDirectory` (`GH_CONFIG_DIR=<dir> gh auth login`).
 
 ## Install
 
@@ -62,7 +62,7 @@ The old dispatcher kept its runs in `$STATE/claims.json`; the reconciler does no
 4. Delete `$STATE/claims.json`. The next restart starts the reconciler.
 5. `sh scripts/ctl.sh resume`.
 
-After the cutover, epics the old dispatcher left in To Review have no journal row, so `/agent` threads on their PRs start no follow-up; handle those threads by hand. Their worktrees are removed by the orphan worktree sweep once the epic is finished (Shipped or another completed or canceled state), unless they hold unsaved work.
+After the cutover, epics the old dispatcher left in To Review have no journal row, so threads that mention the bot on their PRs start no follow-up; handle those threads by hand. Their worktrees are removed by the orphan worktree sweep once the epic is finished (Shipped or another completed or canceled state), unless they hold unsaved work.
 
 ## Logs and state
 
@@ -80,7 +80,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 | `team X has no workflow state "..."; skipping it until it does` | Add the named states to that team in Linear (or change `states` in config). Picked up on the next tick, but the log line is printed only once per process and nothing is logged when it recovers. |
 | `team X not found in Linear` | The config key must equal the team's exact name. |
 | Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` run or one whose agent is still working? Team skipped? |
-| `/agent` thread on a PR in To Review starts no follow-up | Paused? `maxInFlight` used up? Epic has `agent-stuck`? Thread resolved, or the user's latest comment in it lacks `/agent`? The run must be `ended` in the journal (`ctl.sh status`); a `kept` run, or an epic from before the cutover, is not scanned. |
+| A thread mentioning the bot on a PR in To Review starts no follow-up | Paused? `maxInFlight` used up? Epic has `agent-stuck`? Thread resolved, or the user's latest comment in it lacks `@<bot.login>`? For a PR-level request: did a bot comment come after it? The run must be `ended` in the journal (`ctl.sh status`); a `kept` run, or an epic from before the cutover, is not scanned. |
 | Epic has `agent-stuck` | Read the epic comment. Retry rules: `rules.md`. |
 | PR is up but the epic stays in Implementing | The agent wrote no result file yet. It is flagged `awaitingInput` once quiet. |
 | `failed; retrying next tick` repeating for an epic | A Transient failure (network, timeout, rate limit, git lock). It retries every tick without double-posting, and comments once after `flagTransientAfterSeconds`. |

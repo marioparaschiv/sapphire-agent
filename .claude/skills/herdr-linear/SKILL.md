@@ -5,7 +5,7 @@ description: Use when working on, debugging, or operating the herdr-linear plugi
 
 # herdr-linear
 
-A herdr plugin plus systemd user service that watches Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses. `/agent` review threads on the PR start `/follow-up` runs that reply to and resolve them. It is written on Effect 4 as one level-triggered reconciler: every tick it observes Linear, herdr, git and GitHub, compares that with a small local journal, and acts.
+A herdr plugin plus systemd user service that watches Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses. Review threads that mention the bot account (`@orchestratorbot`) start `/follow-up` runs that reply to and resolve them. It is written on Effect 4 as one level-triggered reconciler: every tick it observes Linear, herdr, git and GitHub, compares that with a small local journal, and acts.
 
 Repo: `~/herdr-linear`. Read only the files you need.
 

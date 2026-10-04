@@ -15,6 +15,7 @@ import { Option, Schema } from 'effect';
 // - workingOrphan: `<tabId>`, once per untracked tab whose agent is working.
 // On the GitHub PR:
 // - summary, flags: `<claimedAt>`, once per run (flags is the review holding every flag).
+// - inProgress: `<claimedAt>`, once per follow-up run; the bot's comment saying it started.
 // - reply: `<threadId>.<claimedAt>`, once per thread per run; found among the thread's comments.
 export const MarkerPurpose = Schema.Literals([
 	'awaitingInput',
@@ -32,6 +33,7 @@ export const MarkerPurpose = Schema.Literals([
 	'workingOrphan',
 	'summary',
 	'flags',
+	'inProgress',
 	'reply',
 ]);
 

@@ -126,7 +126,7 @@ const currentRun = (h: Harness) =>
 	);
 
 // The whole life of one epic: dispatch, a question relayed through Linear, the result posted to the PR, a follow-up
-// for an /agent thread, and the cleanup once the PR is merged. Returns everything the run left behind in Linear,
+// for a thread that mentions the bot, and the cleanup once the PR is merged. Returns everything the run left behind in Linear,
 // GitHub, herdr, git and the journal.
 const lifecycle = (crash: Option.Option<CrashPoint>) =>
 	Effect.gen(function* () {
@@ -175,10 +175,10 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 		yield* tickUntil('the posted result', (runs) => isRun(runs, (run) => run.status === 'ended'));
 		assert.deepStrictEqual([h.linear.stateName(epic.id), ownTabs(h)], ['To Review', []]);
 
-		// Follow-up: a minute later the reviewer asks for a change with /agent; the follow-up answers and resolves it.
+		// Follow-up: a minute later the reviewer asks the bot for a change; the follow-up answers and resolves it.
 		yield* TestClock.adjust('1 minute');
 
-		const threadId = h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: 'Rename this to syncSettings. /agent' }] });
+		const threadId = h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: 'Rename this to syncSettings. @orchestratorbot' }] });
 
 		yield* tickUntil('the follow-up start', (runs) => isRun(runs, (run) => run.job._tag === 'follow-up' && run.status === 'running'));
 		git(worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Rename to syncSettings');
@@ -250,9 +250,9 @@ describe('lifecycle', () => {
 						],
 					},
 					github: {
-						comments: ['summary:0', `summary:${followUpAt}`],
+						comments: ['summary:0', `inProgress:${followUpAt}`, `summary:${followUpAt}`],
 						reviews: [['flags:0', ['src/sync/merge.ts:3']]],
-						thread: [true, ['Rename this to syncSettings. /agent', `reply:PRRT_1.${followUpAt}`]],
+						thread: [true, ['Rename this to syncSettings. @orchestratorbot', `reply:PRRT_1.${followUpAt}`]],
 					},
 					herdr: { ownedTabs: 0, starts: ['/orchestrate', '/follow-up'], prompts: ['Remote wins. Keep a backup of local.'] },
 					git: { worktrees: [], branch: false },

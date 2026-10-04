@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Option } from 'effect';
 import { type CallError, Permanent } from './call-policy.ts';
+import { AppConfig } from './config.ts';
 import {
 	asClaude,
 	type Bodies,
@@ -22,11 +23,13 @@ export type FakeReview = {
 // `reviewBody` is the body of the review the comment was submitted with.
 export type FakeThreadComment = { readonly body: string; readonly reviewBody?: string };
 
+type FakeComment = { readonly body: string; readonly author: string };
+
 type PullRequestRecord = {
 	readonly repo: string;
 	readonly branch: string;
 	pullRequest: PullRequest;
-	readonly comments: Array<string>;
+	readonly comments: Array<FakeComment>;
 	readonly reviews: Array<FakeReview>;
 	readonly threadIds: Array<string>;
 };
@@ -36,6 +39,8 @@ type ThreadRecord = { isResolved: boolean; readonly comments: Array<ReviewThread
 export type FakeGitHubControls = {
 	readonly addPullRequest: (options: { readonly repo: string; readonly branch: string; readonly state?: PullRequestState; readonly author?: string }) => PullRequest;
 	readonly setPullRequestState: (repo: string, number: number, state: PullRequestState) => void;
+	// A comment on the PR itself, by the PR's author unless `author` is given.
+	readonly addComment: (repo: string, number: number, body: string, author?: string) => void;
 	// Returns the new thread's id.
 	readonly addThread: (repo: string, number: number, options: { readonly comments: ReadonlyArray<FakeThreadComment>; readonly isResolved?: boolean }) => string;
 	// Issue comment bodies as GitHub stores them, onBehalfOf block included.
@@ -51,13 +56,25 @@ export type FakeGitHubControls = {
 // The newest `maxNodes` entries, as the live layer reads them.
 const latestBodies = (bodies: ReadonlyArray<string>): Bodies => ({ totalCount: bodies.length, nodes: bodies.slice(-maxNodes).map((body) => ({ body })) });
 
-const makeFake = () => {
+// The user and the agent share the PR author's account; the bot has its own.
+const makeFake = (botLogin: string) => {
 	const pullRequests: Array<PullRequestRecord> = [];
 	const threads = new Map<string, ThreadRecord>();
 	const crashes = new Map<number, CallError>();
 	let writes = 0;
 
 	const findRecord = (repo: string, number: number) => pullRequests.find((record) => record.repo === repo && record.pullRequest.number === number);
+
+	// For controls, where a missing PR is a mistake in the test.
+	const existingRecord = (repo: string, number: number) => {
+		const found = findRecord(repo, number);
+
+		if (!found) {
+			throw new Error(`no pull request ${repo}#${number}`);
+		}
+
+		return found;
+	};
 
 	const record = (repo: string, number: number) =>
 		Effect.suspend(() => {
@@ -113,12 +130,36 @@ const makeFake = () => {
 					return thread ? [threadView(id, thread)] : [];
 				});
 
-				return Effect.map(pendingOf({ url: open.pullRequest.url, reviewThreads: { totalCount: open.threadIds.length, nodes } }), Option.some);
+				const comments = open.comments.slice(-maxNodes).map(({ body, author }) => ({ body, author: { login: author } }));
+
+				return Effect.map(
+					pendingOf(botLogin, { url: open.pullRequest.url, comments: { totalCount: open.comments.length, nodes: comments }, reviewThreads: { totalCount: open.threadIds.length, nodes } }),
+					Option.some,
+				);
 			}),
 
 		postSummary: (repo, number, comment) =>
 			record(repo, number).pipe(
-				Effect.flatMap((found) => unlessMarked(found.comments, comment, `${repo}#${number} comments`, () => found.comments.push(asClaude(comment.body)))),
+				Effect.flatMap((found) =>
+					unlessMarked(
+						found.comments.map(({ body }) => body),
+						comment,
+						`${repo}#${number} comments`,
+						() => found.comments.push({ body: asClaude(comment.body), author: found.pullRequest.author.login }),
+					),
+				),
+			),
+
+		postInProgress: (repo, number, comment) =>
+			record(repo, number).pipe(
+				Effect.flatMap((found) =>
+					unlessMarked(
+						found.comments.map(({ body }) => body),
+						comment,
+						`${repo}#${number} comments`,
+						() => found.comments.push({ body: comment.body, author: botLogin }),
+					),
+				),
 			),
 
 		postFlagsReview: (repo, number, comment, flags) =>
@@ -172,22 +213,19 @@ const makeFake = () => {
 		},
 
 		setPullRequestState: (repo, number, state) => {
-			const found = findRecord(repo, number);
-
-			if (!found) {
-				throw new Error(`no pull request ${repo}#${number}`);
-			}
+			const found = existingRecord(repo, number);
 
 			found.pullRequest = { ...found.pullRequest, state };
 		},
 
+		addComment: (repo, number, body, author) => {
+			const found = existingRecord(repo, number);
+
+			found.comments.push({ body, author: author ?? found.pullRequest.author.login });
+		},
+
 		addThread: (repo, number, { comments, isResolved = false }) => {
-			const found = findRecord(repo, number);
-
-			if (!found) {
-				throw new Error(`no pull request ${repo}#${number}`);
-			}
-
+			const found = existingRecord(repo, number);
 			const id = `PRRT_${threads.size + 1}`;
 
 			threads.set(id, { isResolved, comments: comments.map(({ body, reviewBody }) => ({ body, pullRequestReview: reviewBody === undefined ? null : { body: reviewBody } })) });
@@ -196,7 +234,7 @@ const makeFake = () => {
 			return id;
 		},
 
-		comments: (repo, number) => [...(findRecord(repo, number)?.comments ?? [])],
+		comments: (repo, number) => (findRecord(repo, number)?.comments ?? []).map(({ body }) => body),
 
 		reviews: (repo, number) => [...(findRecord(repo, number)?.reviews ?? [])],
 
@@ -223,8 +261,8 @@ const makeFake = () => {
 // these controls, with fresh state each time it is built.
 export class FakeGitHub extends Context.Service<FakeGitHub, FakeGitHubControls>()('herdr-linear/FakeGitHub') {
 	static readonly layer = Layer.effectContext(
-		Effect.sync(() => {
-			const { github, controls } = makeFake();
+		AppConfig.useSync(({ bot }) => {
+			const { github, controls } = makeFake(bot.login);
 
 			return Context.make(GitHub, github).pipe(Context.add(FakeGitHub, controls));
 		}),
