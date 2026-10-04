@@ -57,7 +57,6 @@ export type FixtureToken = { readonly installationId: number; readonly token: st
 export type GitHubAppFixtureShape = {
 	// The API base URL on 127.0.0.1.
 	readonly url: string;
-	readonly slug: string;
 	// Installs the App on the repo (`owner/name`) and returns the installation's id.
 	readonly install: (repo: string) => number;
 	// The claims of every JWT that verified, in order.
@@ -264,7 +263,6 @@ const make = Effect.gen(function* () {
 
 	const fixture = {
 		url,
-		slug,
 		install: (repo) => {
 			const id = 1000 + installations.size + 1;
 
