@@ -131,6 +131,20 @@ describe('MissedDeliveries', () => {
 		}).pipe(Effect.provide(layer)),
 	);
 
+	it.effect('moves the mark to the latest delivered_at seen, not that of the highest delivery id', () =>
+		Effect.gen(function* () {
+			const app = yield* GitHubAppFixture;
+
+			yield* TestClock.setTime(Date.UTC(2026, 9, 4, 12, 0, 5));
+			const latest = yield* app.addDelivery(ping, 200);
+			yield* TestClock.setTime(Date.UTC(2026, 9, 4, 12));
+			yield* app.addDelivery(ping, 200);
+			yield* scan;
+
+			assert.deepStrictEqual(yield* Journal.use((journal) => journal.deliveryMark), Option.some(Date.parse(latest.deliveredAt)));
+		}).pipe(Effect.provide(layer)),
+	);
+
 	it.effect('keeps the mark where it was while GitHub refuses a redelivery, so the next scan tries it again', () =>
 		Effect.gen(function* () {
 			const app = yield* GitHubAppFixture;
