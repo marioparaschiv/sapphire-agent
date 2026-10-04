@@ -136,10 +136,7 @@ export class GitHub extends Context.Service<
 
 						return stdout;
 					}),
-				).pipe(
-					Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))),
-					withCallPolicy(callTimeouts.gh),
-				);
+				).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))));
 			};
 
 			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '') =>
@@ -185,16 +182,22 @@ export class GitHub extends Context.Service<
 					),
 				);
 
+			// Each method is one unit under the call policy, so a retry repeats the marker or resolved check before
+			// writing again.
+			const withPolicy = withCallPolicy(callTimeouts.gh);
+
 			const unlessMarked = (bodies: Effect.Effect<Bodies, CallError>, marker: Marker, where: string, write: Effect.Effect<void, CallError>) =>
 				bodies.pipe(
 					Effect.flatMap((found) => containsMarker(found, marker, where)),
 					Effect.flatMap((marked) => (marked ? Effect.void : write)),
+					withPolicy,
 				);
 
 			return GitHub.of({
 				findPullRequest: (repo, branch) =>
 					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']).pipe(
 						Effect.map(preferredPullRequest),
+						withPolicy,
 					),
 
 				pendingThreads: (repo, branch) =>
@@ -207,7 +210,7 @@ export class GitHub extends Context.Service<
 										url
 										reviewThreads(first: ${maxNodes}) {
 											totalCount
-											nodes { id isResolved comments(last: 100) { nodes { body pullRequestReview { body } } } }
+											nodes { id isResolved comments(last: ${maxNodes}) { nodes { body pullRequestReview { body } } } }
 										}
 									}
 								}
@@ -220,6 +223,7 @@ export class GitHub extends Context.Service<
 
 							return pullRequest ? Effect.map(pendingOf(pullRequest), Option.some) : Effect.succeedNone;
 						}),
+						withPolicy,
 					),
 
 				postSummary: (repo, number, { marker, body }) =>
@@ -269,6 +273,7 @@ export class GitHub extends Context.Service<
 										{ threadId },
 									).pipe(Effect.asVoid),
 						),
+						withPolicy,
 					),
 			});
 		}),

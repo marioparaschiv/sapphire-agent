@@ -182,6 +182,24 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
+	it.effect('does not post the summary again when the write lands but times out', () =>
+		Effect.gen(function* () {
+			const server = pullRequestServer();
+			const { layer } = liveWithGh((call) => {
+				const reply = server.respond(call);
+
+				return call.args[1] === '--method' && server.state.comments.length === 1 ? 'hang' : reply;
+			});
+			const fiber = yield* GitHub.use((github) => github.postSummary(repo, 7, summary)).pipe(Effect.provide(layer), Effect.forkChild);
+
+			yield* TestClock.adjust('20 seconds');
+			yield* TestClock.adjust('1200 millis');
+			yield* Fiber.join(fiber);
+
+			assert.deepStrictEqual(server.state.comments, [asClaude(summary.body)]);
+		}),
+	);
+
 	it.effect('posts every flag in one review once, each body as Claude', () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
