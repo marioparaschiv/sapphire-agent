@@ -68,12 +68,15 @@ export const isFinished = (observation: Observation, epic: Epic) => {
 export const epicWithIdentifier = (observation: Observation, identifier: string) =>
 	Option.fromUndefinedOr([...observation.epics.values()].find((epic) => epic.identifier === identifier));
 
+// What a run or a command records of its tab.
+export type TabIds = Pick<Run, 'tabId' | 'paneId'>;
+
 // The run's own tab: herdr can hand a closed tab's id to a new one, so the pane must match too. The label may differ.
-export const tabOf = (observation: Observation, run: Run) =>
+export const tabOf = (observation: Observation, run: TabIds) =>
 	Option.fromUndefinedOr(observation.tabs.find((tab) => tab.tabId === run.tabId && tab.paneId === run.paneId));
 
 // vanished: the run's tab is gone. exited: the pane is left without Claude.
-export const observedAgentStatus = (observation: Observation, run: Run): AgentStatus =>
+export const observedAgentStatus = (observation: Observation, run: TabIds): AgentStatus =>
 	Option.match(tabOf(observation, run), {
 		onNone: () => 'vanished',
 		onSome: (tab) => (Option.contains(tab.agent, 'claude') ? tab.agentStatus : 'exited'),

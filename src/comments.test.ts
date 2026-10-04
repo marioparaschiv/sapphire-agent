@@ -207,10 +207,10 @@ ${startOver}`,
 				comments.threadMismatch({
 					identifier: 'UNB-12',
 					claimedAt,
-					job: { _tag: 'follow-up', threadIds: ['PRRT_inline', 'PRRT_accepted_flag'] },
+					job: { _tag: 'follow-up', threadIds: ['PRRT_inline', 'PRRT_accepted_flag'], instruction: null },
 					mismatch: 'no reply for PRRT_accepted_flag',
 				}),
-				`**herdr-linear** (\`error\`): the agent's result file does not match the review threads it was given: no reply for PRRT_accepted_flag. Nothing was posted to the PR. Remove the label and move the epic to To Review; the pending threads start a new follow-up.`,
+				`**herdr-linear** (\`error\`): the agent's result file does not match the review threads it was given: no reply for PRRT_accepted_flag. Nothing was posted to the PR. Remove the label, move the epic to To Review and mention @orchestratorbot to ask for the follow-up again.`,
 				'<!-- herdr-linear:UNB-12:threadMismatch:1791000000000 -->',
 			);
 			assertComment(
@@ -286,10 +286,14 @@ ${startOver}`,
 		}),
 	);
 
-	it.effect("writes the bot's in-progress comment with the thread count", () =>
+	it.effect("writes a command's replies and its failure, keyed by the request and the claim", () =>
 		withComments((comments) => {
-			assertComment(comments.inProgress({ identifier: 'UNB-12', claimedAt, threadCount: 3 }), 'On it: handling 3 review threads.', '<!-- herdr-linear:UNB-12:inProgress:1791000000000 -->');
-			assertComment(comments.inProgress({ identifier: 'UNB-12', claimedAt, threadCount: 1 }), 'On it: handling 1 review thread.', '<!-- herdr-linear:UNB-12:inProgress:1791000000000 -->');
+			assertComment(comments.commandReply({ identifier: 'CMD-3', requestId: 7, body: 'Stopped UNB-12 and closed its tab.' }), 'Stopped UNB-12 and closed its tab.', '<!-- herdr-linear:CMD-3:commandReply:7 -->');
+			assertComment(
+				comments.commandFailed({ identifier: 'CMD-3', claimedAt, reason: 'exited', tail: Option.some('⏺ Checking the PR.') }),
+				["**herdr-linear** (`error`): CMD-3 exited, so I stopped it.", '', 'Last lines of the pane:', '', '```\n⏺ Checking the PR.\n```', '', 'Mention @orchestratorbot again to retry.'].join('\n'),
+				'<!-- herdr-linear:CMD-3:commandFailed:1791000000000 -->',
+			);
 		}),
 	);
 });

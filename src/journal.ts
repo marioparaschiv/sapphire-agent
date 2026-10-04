@@ -15,8 +15,11 @@ export const AgentStatus = Schema.Literals(['working', 'idle', 'done', 'blocked'
 
 export type AgentStatus = typeof AgentStatus.Type;
 
-// A follow-up run answers the pending review threads it was dispatched for.
-export const Job = Schema.Union([Schema.TaggedStruct('orchestrate', {}), Schema.TaggedStruct('follow-up', { threadIds: Schema.Array(Schema.String) })]);
+// A follow-up run answers the review threads and carries out the instruction its request named.
+export const Job = Schema.Union([
+	Schema.TaggedStruct('orchestrate', {}),
+	Schema.TaggedStruct('follow-up', { threadIds: Schema.Array(Schema.String), instruction: Schema.NullOr(Schema.String) }),
+]);
 
 export type Job = typeof Job.Type;
 
@@ -52,6 +55,70 @@ export const Run = Schema.Struct({
 });
 
 export type Run = typeof Run.Type;
+
+// ignored: the comment's author is not in bot.allowedUsers, so nothing runs. queued: waiting for its turn, as commands
+// run one at a time. claimed: its turn came and it is being started. running: Claude is confirmed started. ended: the agent said it was done and its tab is closed.
+// error: it failed to start, exited, went quiet or stale without saying it was done, or ran over the cap; the comment
+// it answers got a reply saying so and its tab is closed.
+export const CommandStatus = Schema.Literals(['ignored', 'queued', 'claimed', 'running', 'ended', 'error']);
+
+export type CommandStatus = typeof CommandStatus.Type;
+
+// A comment that mentions the bot, recorded before anything else happens for it, so it is handled at most once.
+export const NewCommand = Schema.Struct({
+	// The GitHub node id of the comment.
+	commentId: Schema.String,
+	url: Schema.String,
+	author: Schema.String,
+	body: Schema.String,
+	// The issue or PR the comment is on, as `owner/name` and its number.
+	repo: Schema.String,
+	number: Schema.Int,
+	status: CommandStatus,
+	// The local clone the agent runs in, once found.
+	cwd: Schema.NullOr(Schema.String),
+	tabId: Schema.NullOr(Schema.String),
+	paneId: Schema.NullOr(Schema.String),
+	recordedAt: Millis,
+	// When its turn came. Keys its markers, starts its start timeout and its wall-clock cap.
+	claimedAt: Schema.NullOr(Millis),
+	startedAt: Schema.NullOr(Millis),
+	agentStatus: Schema.NullOr(AgentStatus),
+	agentStatusSince: Schema.NullOr(Millis),
+	nudgedAt: Schema.NullOr(Millis),
+	tailHash: Schema.NullOr(Schema.String),
+});
+
+export type NewCommand = typeof NewCommand.Type;
+
+// `id` numbers commands in the order their comments were seen; `CMD-<id>` names one in logs, markers and the CLI.
+export const Command = Schema.Struct({ id: Schema.Int, ...NewCommand.fields });
+
+export type Command = typeof Command.Type;
+
+export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${command.id}`;
+
+// A GitHub notification thread whose comments are not scanned for mentions yet. `since`: comments created before it
+// were scanned already, or written before mentions were first read.
+export const MentionThread = Schema.Struct({ threadId: Schema.String, repo: Schema.String, number: Schema.Int, since: Millis });
+
+export type MentionThread = typeof MentionThread.Type;
+
+// What `scripts/ctl.sh` asks the reconciler to do on its next tick. The CLI only appends these, so it never races a
+// rule over a row; the rule that acts on one deletes it.
+export const Request = Schema.Union([
+	Schema.TaggedStruct('stop', { identifier: Schema.String }),
+	Schema.TaggedStruct('send', { identifier: Schema.String, text: Schema.String }),
+	Schema.TaggedStruct('follow-up', { identifier: Schema.String, instruction: Schema.NullOr(Schema.String), threadIds: Schema.Array(Schema.String) }),
+	Schema.TaggedStruct('reply', { commandId: Schema.Int, body: Schema.String }),
+	Schema.TaggedStruct('done', { commandId: Schema.Int }),
+]);
+
+export type Request = typeof Request.Type;
+
+export const RequestRow = Schema.Struct({ id: Schema.Int, request: Schema.fromJsonString(Request), createdAt: Millis });
+
+export type RequestRow = typeof RequestRow.Type;
 
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
@@ -89,6 +156,47 @@ const migrations = SqliteMigrator.layer({
 					first_seen_at INTEGER NOT NULL
 				)
 			`;
+			yield* sql`
+				CREATE TABLE commands (
+					id INTEGER PRIMARY KEY,
+					comment_id TEXT NOT NULL UNIQUE,
+					url TEXT NOT NULL,
+					author TEXT NOT NULL,
+					body TEXT NOT NULL,
+					repo TEXT NOT NULL,
+					number INTEGER NOT NULL,
+					status TEXT NOT NULL,
+					cwd TEXT,
+					tab_id TEXT,
+					pane_id TEXT,
+					recorded_at INTEGER NOT NULL,
+					claimed_at INTEGER,
+					started_at INTEGER,
+					agent_status TEXT,
+					agent_status_since INTEGER,
+					nudged_at INTEGER,
+					tail_hash TEXT
+				)
+			`;
+			yield* sql`
+				CREATE TABLE mention_threads (
+					thread_id TEXT PRIMARY KEY,
+					repo TEXT NOT NULL,
+					number INTEGER NOT NULL,
+					since INTEGER NOT NULL
+				)
+			`;
+			// Mentions written before the journal existed are never run.
+			yield* sql`CREATE TABLE mention_floor (since INTEGER NOT NULL)`;
+			yield* sql`INSERT INTO mention_floor (since) VALUES (${yield* Clock.currentTimeMillis})`;
+			// AUTOINCREMENT never hands out an id again, since a reply's marker is keyed by its request's id.
+			yield* sql`
+				CREATE TABLE requests (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					request TEXT NOT NULL,
+					created_at INTEGER NOT NULL
+				)
+			`;
 		}),
 	}),
 });
@@ -107,6 +215,26 @@ export class Journal extends Context.Service<
 		readonly recordTransient: (epicId: string) => Effect.Effect<number, JournalError>;
 		// Ends the epic's Transient streak.
 		readonly clearTransient: (epicId: string) => Effect.Effect<void, JournalError>;
+		// Ordered by id.
+		readonly listCommands: Effect.Effect<ReadonlyArray<Command>, JournalError>;
+		// Does nothing when a command for the same comment exists.
+		readonly addCommand: (command: NewCommand) => Effect.Effect<void, JournalError>;
+		readonly putCommand: (command: Command) => Effect.Effect<void, JournalError>;
+		// When mentions were first read; earlier ones are never run.
+		readonly mentionFloor: Effect.Effect<number, JournalError>;
+		// The oldest `limit` threads.
+		readonly listMentionThreads: (limit: number) => Effect.Effect<ReadonlyArray<MentionThread>, JournalError>;
+		// Does nothing when the thread is listed already, so its earlier `since` stays.
+		readonly addMentionThread: (thread: MentionThread) => Effect.Effect<void, JournalError>;
+		readonly deleteMentionThread: (threadId: string) => Effect.Effect<void, JournalError>;
+		// Returns the request's id.
+		readonly addRequest: (request: Request) => Effect.Effect<number, JournalError>;
+		// Oldest first.
+		readonly listRequests: Effect.Effect<ReadonlyArray<RequestRow>, JournalError>;
+		readonly deleteRequest: (id: number) => Effect.Effect<void, JournalError>;
+		// Records the follow-up's claim and drops the request that asked for it in one transaction, so a crash never
+		// claims it twice or loses it.
+		readonly claimFollowUp: (run: Run, requestId: number) => Effect.Effect<void, JournalError>;
 	}
 >()('herdr-linear/Journal') {
 	static readonly layer = (filename: string) =>
@@ -160,7 +288,93 @@ export class Journal extends Context.Service<
 					execute: (epicId) => sql`DELETE FROM transient_failures WHERE epic_id = ${epicId}`,
 				});
 
-				return Journal.of({ getRun, listRuns, putRun, deleteRun, recordTransient, clearTransient });
+				const listCommands = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: Command,
+					execute: () => sql`SELECT * FROM commands ORDER BY id`,
+				})(undefined);
+
+				const addCommand = SqlSchema.void({
+					Request: NewCommand,
+					execute: (row) => sql`INSERT INTO commands ${sql.insert(row)} ON CONFLICT (comment_id) DO NOTHING`,
+				});
+
+				const putCommand = SqlSchema.void({
+					Request: Command,
+					execute: (row) => sql`INSERT OR REPLACE INTO commands ${sql.insert(row)}`,
+				});
+
+				const mentionFloor = SqlSchema.findOne({
+					Request: Schema.Void,
+					Result: Schema.Struct({ since: Millis }),
+					execute: () => sql`SELECT since FROM mention_floor`,
+				})(undefined).pipe(
+					Effect.map(({ since }) => since),
+					// The migration inserts the row.
+					Effect.catchTag('NoSuchElementError', Effect.die),
+				);
+
+				const listMentionThreads = SqlSchema.findAll({
+					Request: Schema.Int,
+					Result: MentionThread,
+					execute: (limit) => sql`SELECT * FROM mention_threads ORDER BY since LIMIT ${limit}`,
+				});
+
+				const addMentionThread = SqlSchema.void({
+					Request: MentionThread,
+					execute: (row) => sql`INSERT INTO mention_threads ${sql.insert(row)} ON CONFLICT (thread_id) DO NOTHING`,
+				});
+
+				const deleteMentionThread = SqlSchema.void({
+					Request: Schema.String,
+					execute: (threadId) => sql`DELETE FROM mention_threads WHERE thread_id = ${threadId}`,
+				});
+
+				const insertRequest = SqlSchema.findOne({
+					Request: RequestRow.mapFields(({ request, createdAt }) => ({ request, createdAt })),
+					Result: Schema.Struct({ id: Schema.Int }),
+					execute: (row) => sql`INSERT INTO requests ${sql.insert(row)} RETURNING id`,
+				});
+
+				const addRequest = (request: Request) =>
+					Clock.currentTimeMillis.pipe(
+						Effect.flatMap((createdAt) => insertRequest({ request, createdAt })),
+						Effect.map(({ id }) => id),
+						Effect.catchTag('NoSuchElementError', Effect.die),
+					);
+
+				const listRequests = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: RequestRow,
+					execute: () => sql`SELECT * FROM requests ORDER BY id`,
+				})(undefined);
+
+				const deleteRequest = SqlSchema.void({
+					Request: Schema.Int,
+					execute: (id) => sql`DELETE FROM requests WHERE id = ${id}`,
+				});
+
+				const claimFollowUp = (run: Run, requestId: number) => sql.withTransaction(putRun(run).pipe(Effect.andThen(deleteRequest(requestId))));
+
+				return Journal.of({
+					getRun,
+					listRuns,
+					putRun,
+					deleteRun,
+					recordTransient,
+					clearTransient,
+					listCommands,
+					addCommand,
+					putCommand,
+					mentionFloor,
+					listMentionThreads,
+					addMentionThread,
+					deleteMentionThread,
+					addRequest,
+					listRequests,
+					deleteRequest,
+					claimFollowUp,
+				});
 			}),
 		).pipe(
 			Layer.provide(migrations),

@@ -3,6 +3,9 @@ import { AppConfig } from './config.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 
+// `scripts/ctl.sh` writes this file in the state directory after recording a request, so the service ticks at once.
+export const wakeFileName = 'wake';
+
 export class Reconciler extends Context.Service<
 	Reconciler,
 	{

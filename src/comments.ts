@@ -138,7 +138,7 @@ const make = (config: AppConfigShape) => {
 			withMarker(
 				`**herdr-linear** (\`error\`): the agent's result file does not match the review threads it was given: ${run.mismatch}. Nothing was posted to the PR. ${
 					run.job._tag === 'follow-up'
-						? `Remove the label and move the epic to ${config.states.toReview}; the pending threads start a new follow-up.`
+						? `Remove the label, move the epic to ${config.states.toReview} and mention @${config.bot.login} to ask for the follow-up again.`
 						: startOver
 				}`,
 				{ identifier: run.identifier, purpose: 'threadMismatch', key: `${run.claimedAt}` },
@@ -191,16 +191,24 @@ const make = (config: AppConfigShape) => {
 		flagsReview: (run: { readonly identifier: string; readonly claimedAt: number }) =>
 			withMarker('Self-review findings I did not fix in this PR.', { identifier: run.identifier, purpose: 'flags', key: `${run.claimedAt}` }),
 
-		// Posted by the bot; its comment answers a PR-level request (see reviewRequested in github.ts).
-		inProgress: (run: { readonly identifier: string; readonly claimedAt: number; readonly threadCount: number }) =>
-			withMarker(`On it: handling ${run.threadCount} review thread${run.threadCount === 1 ? '' : 's'}.`, {
-				identifier: run.identifier,
-				purpose: 'inProgress',
-				key: `${run.claimedAt}`,
-			}),
-
 		threadReply: (reply: { readonly identifier: string; readonly claimedAt: number; readonly threadId: string; readonly body: string }) =>
 			withMarker(reply.body, { identifier: reply.identifier, purpose: 'reply', key: `${reply.threadId}.${reply.claimedAt}` }),
+
+		// What a command's agent asked to say, posted by the bot.
+		commandReply: (reply: { readonly identifier: string; readonly requestId: number; readonly body: string }) =>
+			withMarker(reply.body, { identifier: reply.identifier, purpose: 'commandReply', key: `${reply.requestId}` }),
+
+		// Posted by the bot when a command ends without its agent saying it was done.
+		commandFailed: (command: { readonly identifier: string; readonly claimedAt: number; readonly reason: string; readonly tail: Option.Option<string> }) =>
+			withMarker(
+				[
+					`**herdr-linear** (\`error\`): ${command.identifier} ${command.reason}, so I stopped it.`,
+					...Option.match(command.tail, { onNone: () => [], onSome: (tail) => ['', 'Last lines of the pane:', '', codeBlock(tail)] }),
+					'',
+					`Mention @${config.bot.login} again to retry.`,
+				].join('\n'),
+				{ identifier: command.identifier, purpose: 'commandFailed', key: `${command.claimedAt}` },
+			),
 	} satisfies Record<string, (...args: never) => MarkedComment>;
 };
 

@@ -1,63 +1,63 @@
-import { Clock, Effect, Option, Ref } from 'effect';
+import { Clock, Effect, Option } from 'effect';
 import { AppConfig } from './config.ts';
 import { claimedRun } from './dispatch.ts';
-import { Git } from './git.ts';
-import { GitHub } from './github.ts';
-import { Journal, type Run } from './journal.ts';
+import { Journal, type Request, type Run } from './journal.ts';
 import type { Epic } from './linear.ts';
 import { hasRole, isInFlight, type Observation, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 
-// One follow-up run per epic in To Review whose open PR has pending review threads, all of them batched, while
-// maxInFlight allows. Only an ended run is scanned: an in-flight one already holds the epic, so a restart mid-run
-// claims nothing twice. The claim replaces the ended run and the start rule takes it from there (pull, /follow-up).
+type FollowUpRequest = Extract<Request, { readonly _tag: 'follow-up' }>;
+
+// Claims a follow-up run for each follow-up request (`ctl.sh follow-up`), oldest first, once the epic's last run ended
+// and while the epic is in To Review, in a resolved team, without the stuck label, and maxInFlight allows. One claim per
+// epic per tick: a second request for it waits until that follow-up ended too. The claim replaces the ended run and
+// drops the request in one transaction; the start rule takes it from there (pull, /follow-up).
 export const followUpRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
-	const git = yield* Git;
-	const github = yield* GitHub;
 
-	const claim = (run: Run, epic: Epic, freeSlots: Ref.Ref<number>) =>
+	const claim = (run: Run, epic: Epic, requestId: number, { threadIds, instruction }: FollowUpRequest) =>
 		Effect.gen(function* () {
-			const pending = Option.filter(
-				yield* git.githubRepo(run.repo).pipe(Effect.flatMap((repo) => github.pendingThreads(repo, run.branch))),
-				({ threadIds }) => threadIds.length > 0,
-			);
-
-			if (Option.isNone(pending)) {
-				return;
-			}
-
-			const { url, threadIds } = pending.value;
-
-			if (!(yield* Ref.modify(freeSlots, (free) => (free > 0 ? [true, free - 1] : [false, free])))) {
-				return;
-			}
-
-			yield* journal.putRun(claimedRun(epic, run.repo, yield* Clock.currentTimeMillis, { _tag: 'follow-up', threadIds }));
-			yield* Effect.log(`claimed a follow-up for ${threadIds.length} review threads on ${url}`);
+			yield* journal.claimFollowUp(claimedRun(epic, run.repo, yield* Clock.currentTimeMillis, { _tag: 'follow-up', threadIds, instruction }), requestId);
+			yield* Effect.log(`claimed a follow-up for ${threadIds.length} review threads${instruction === null ? '' : ' and an instruction'}`);
 		});
 
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
-			const free = config.maxInFlight - runs.filter(isInFlight).length;
+			const requests = yield* journal.listRequests;
+			let free = config.maxInFlight - runs.filter(isInFlight).length;
+			const work: Array<EpicWork> = [];
 
-			if (free <= 0) {
-				return [];
-			}
-
-			const freeSlots = yield* Ref.make(free);
-
-			return runs.flatMap((run): Array<EpicWork> => {
-				const epic = observation.epics.get(run.epicId);
-
-				if (run.status !== 'ended' || !epic || !observation.teams.has(run.teamId) || !hasRole(observation, epic, ['toReview']) || Option.isSome(stuckLabelOf(config, epic))) {
-					return [];
+			for (const { id, request } of requests) {
+				if (free <= 0) {
+					break;
 				}
 
-				return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: claim(run, epic, freeSlots) }];
-			});
+				if (request._tag !== 'follow-up') {
+					continue;
+				}
+
+				const run = runs.find((candidate) => candidate.identifier === request.identifier);
+				const epic = Option.fromUndefinedOr(run && observation.epics.get(run.epicId));
+
+				if (
+					!run ||
+					Option.isNone(epic) ||
+					run.status !== 'ended' ||
+					work.some((claimed) => claimed.epicId === run.epicId) ||
+					!observation.teams.has(run.teamId) ||
+					!hasRole(observation, epic.value, ['toReview']) ||
+					Option.isSome(stuckLabelOf(config, epic.value))
+				) {
+					continue;
+				}
+
+				free -= 1;
+				work.push({ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: claim(run, epic.value, id, request) });
+			}
+
+			return work;
 		});
 
 	return { name: 'follow-up', pausable: true, plan } satisfies Rule;

@@ -144,11 +144,9 @@ export const dispatchRule = Effect.gen(function* () {
 	return { name: 'dispatch', pausable: true, plan } satisfies Rule;
 });
 
-type FollowUp = { readonly repo: string; readonly pullRequest: PullRequest; readonly threadIds: ReadonlyArray<string> };
+export const runsClaude = (pane: Option.Option<Pane>) => Option.exists(pane, (found) => Option.contains(found.agent, 'claude'));
 
-const isClaude = (pane: Option.Option<Pane>) => Option.exists(pane, (found) => Option.contains(found.agent, 'claude'));
-
-const describeAgent = (pane: Option.Option<Pane>) =>
+export const describeAgent = (pane: Option.Option<Pane>) =>
 	Option.match(Option.flatMap(pane, (found) => Option.map(found.agent, (agent) => `${agent} is ${found.agentStatus}`)), {
 		onNone: () => 'no agent is running',
 		onSome: (state) => state,
@@ -174,29 +172,28 @@ export const startRule = Effect.gen(function* () {
 	// After a restart a claimed run gets a full start window again.
 	const bootedAt = yield* Clock.currentTimeMillis;
 
-	// The PR a follow-up answers threads on, which its prompt and the bot's comment need.
-	const followUpOf = (run: Run, threadIds: ReadonlyArray<string>): Effect.Effect<FollowUp, CallError> =>
+	// The PR a follow-up works on, which its prompt names.
+	const pullRequestOf = (run: Run): Effect.Effect<PullRequest, CallError> =>
 		git.githubRepo(run.repo).pipe(
-			Effect.flatMap((repo) =>
-				github.findPullRequest(repo, run.branch).pipe(
-					Effect.flatMap(
-						Option.match({
-							onNone: () => Effect.fail(new Permanent({ message: `branch ${run.branch} has no PR to follow up on` })),
-							onSome: (pullRequest) => Effect.succeed({ repo, pullRequest, threadIds }),
-						}),
-					),
-				),
+			Effect.flatMap((repo) => github.findPullRequest(repo, run.branch)),
+			Effect.flatMap(
+				Option.match({
+					onNone: () => Effect.fail(new Permanent({ message: `branch ${run.branch} has no PR to follow up on` })),
+					onSome: Effect.succeed,
+				}),
 			),
 		);
 
-	const promptFor = (epic: Epic, followUp: Option.Option<FollowUp>) =>
-		Option.match(followUp, {
-			onNone: () => prompts.orchestrate(epic),
-			onSome: ({ pullRequest, threadIds }) => prompts.followUp(epic, { pullRequestUrl: pullRequest.url, threadIds }),
-		});
+	const promptFor = (run: Run, epic: Epic): Effect.Effect<string, CallError> => {
+		const { job } = run;
 
-	// A follow-up that never started goes back to ended in To Review: its worktree is still cleaned up, and once the label
-	// is removed its pending threads start a new one.
+		return job._tag === 'orchestrate'
+			? Effect.succeed(prompts.orchestrate(epic))
+			: Effect.map(pullRequestOf(run), (pullRequest) => prompts.followUp(epic, { pullRequestUrl: pullRequest.url, threadIds: job.threadIds, instruction: job.instruction }));
+	};
+
+	// A follow-up that never started goes back to ended in To Review: its worktree is still cleaned up, and a new follow-up
+	// request starts a new one once the label is removed.
 	const failStart = (observation: Observation, run: Run, epic: Epic, error: string) =>
 		Effect.gen(function* () {
 			const tail = run.paneId === null ? Option.none<string>() : yield* herdr.readTail(run.paneId);
@@ -257,25 +254,15 @@ export const startRule = Effect.gen(function* () {
 		const steps = Effect.gen(function* () {
 			const path = run.worktreePath ?? (yield* prepare);
 			const { tabId, paneId } = run.tabId !== null && run.paneId !== null ? { tabId: run.tabId, paneId: run.paneId } : yield* openTab(path);
-			const followUp = run.job._tag === 'follow-up' ? Option.some(yield* followUpOf(run, run.job.threadIds)) : Option.none<FollowUp>();
-
-			if (!isClaude(yield* herdr.agent(paneId))) {
+			if (!runsClaude(yield* herdr.agent(paneId))) {
 				yield* Effect.log(`starting Claude in ${tabId} (${path})`);
-				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), promptFor(epic, followUp));
+				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), yield* promptFor(run, epic));
 
 				const agent = yield* herdr.agent(paneId);
 
-				if (!isClaude(agent) || Option.exists(agent, (found) => found.agentStatus === 'blocked')) {
+				if (!runsClaude(agent) || Option.exists(agent, (found) => found.agentStatus === 'blocked')) {
 					return yield* new Permanent({ message: `Claude did not start in ${tabId}: ${describeAgent(agent)}` });
 				}
-			}
-
-			// Only once Claude runs: the bot's comment answers a request on the PR, which a follow-up that never started
-			// must leave pending. This step repeats until the run is running, so a failed post is retried on the next tick.
-			if (Option.isSome(followUp)) {
-				const { repo, pullRequest, threadIds } = followUp.value;
-
-				yield* github.postInProgress(repo, pullRequest.number, comments.inProgress({ identifier: run.identifier, claimedAt: run.claimedAt, threadCount: threadIds.length }));
 			}
 
 			const team = observation.teams.get(run.teamId);

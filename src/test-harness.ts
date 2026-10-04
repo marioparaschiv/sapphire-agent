@@ -3,15 +3,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
-import { Context, Effect, Exit, Layer, Option, Scope } from 'effect';
+import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
+import { TestConsole } from 'effect/testing';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
+import { runCtl } from './ctl.ts';
 import { FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
 import { Git } from './git.ts';
 import { Herdr, type HerdrAgentStatus } from './herdr.ts';
 import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
-import { Journal, type Run } from './journal.ts';
+import { type Command, Journal, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
@@ -45,7 +47,7 @@ export type Harness = {
 	// A process restart: the planner, its rules and the journal connection are built again on the same journal file,
 	// while Linear, GitHub, herdr and the repos keep their state.
 	readonly restart: Effect.Effect<void>;
-	// Counted from this call: the nth journal write (putRun or deleteRun) dies without being applied, as if the process
+	// Counted from this call: the nth journal write the reconciler makes dies without being applied, as if the process
 	// crashed right before recording what it had just done.
 	readonly crashAtJournalWrite: (nth: number) => void;
 	// As the user renames a tab in herdr.
@@ -54,9 +56,10 @@ export type Harness = {
 	readonly moveEpic: (epicId: string, state: string) => void;
 	// Whether the injected journal crash happened.
 	readonly crashed: () => boolean;
-	// Journal writes (putRun or deleteRun) so far, the crashed one included.
+	// Journal writes of the reconciler so far, the crashed one included.
 	readonly journalWrites: () => number;
 	readonly runs: Effect.Effect<ReadonlyArray<Run>>;
+	readonly commands: Effect.Effect<ReadonlyArray<Command>>;
 	// markerKeys of the issue's comments.
 	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
 	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
@@ -67,6 +70,9 @@ export type Harness = {
 	// Paths of the worktrees git knows under the worktrees directory.
 	readonly worktrees: () => ReadonlyArray<string>;
 	readonly hasBranch: (branch: string) => boolean;
+	// Runs `scripts/ctl.sh <args>` as a command's agent does, through its own journal connection, and returns the lines
+	// it printed.
+	readonly ctl: (...args: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<string>, unknown>;
 };
 
 const makeRepos = (dir: string) => {
@@ -123,6 +129,13 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					...journal,
 					putRun: (run) => crashPoint.pipe(Effect.andThen(journal.putRun(run))),
 					deleteRun: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteRun(epicId))),
+					addCommand: (command) => crashPoint.pipe(Effect.andThen(journal.addCommand(command))),
+					putCommand: (command) => crashPoint.pipe(Effect.andThen(journal.putCommand(command))),
+					addMentionThread: (thread) => crashPoint.pipe(Effect.andThen(journal.addMentionThread(thread))),
+					deleteMentionThread: (threadId) => crashPoint.pipe(Effect.andThen(journal.deleteMentionThread(threadId))),
+					addRequest: (request) => crashPoint.pipe(Effect.andThen(journal.addRequest(request))),
+					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
+					claimFollowUp: (run, requestId) => crashPoint.pipe(Effect.andThen(journal.claimFollowUp(run, requestId))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -226,6 +239,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 				issue.stateId = found.id;
 			},
 			runs: journal.pipe(Effect.flatMap((found) => found.listRuns), Effect.orDie),
+			commands: journal.pipe(Effect.flatMap((found) => found.listCommands), Effect.orDie),
 			epicMarkers: (issueId) => markerKeys(linear.comments(issueId).map((comment) => comment.body)),
 			startedRun,
 			writeResultFile: (run, contents) => {
@@ -241,6 +255,17 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					.filter((line) => line.startsWith('worktree ') && line !== `worktree ${repo}`)
 					.map((line) => line.slice('worktree '.length)),
 			hasBranch: (branch) => git(repo, 'branch', '--list', branch) !== '',
+			ctl: (...args) =>
+				Effect.gen(function* () {
+					const output = yield* TestConsole.make;
+
+					yield* runCtl(args).pipe(
+						Effect.provideService(Console.Console, output),
+						Effect.provide(Layer.mergeAll(Journal.layer(join(dir, 'journal.db')), NodeServices.layer).pipe(Layer.provideMerge(Layer.succeedContext(fixtures)))),
+					);
+
+					return (yield* output.logLines).flatMap((line) => String(line).split('\n'));
+				}),
 		} satisfies Harness;
 	});
 

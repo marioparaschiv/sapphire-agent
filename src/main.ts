@@ -1,6 +1,6 @@
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
-import { Effect, Layer, Stream } from 'effect';
+import { Effect, FileSystem, Layer, Stream } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
@@ -15,7 +15,7 @@ import { Observer } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
-import { Reconciler } from './reconciler.ts';
+import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
 
 const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
@@ -36,11 +36,19 @@ const program = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const reconciler = yield* Reconciler;
 	const herdr = yield* Herdr;
+	const fs = yield* FileSystem.FileSystem;
 
 	yield* refuseUndrainedClaims;
 	yield* Effect.log(`watching ${Object.keys(config.teams).join(', ')} every ${config.pollSeconds}s, at most ${config.maxInFlight} in flight`);
 
 	yield* Effect.forkChild(Stream.runForEach(herdr.events, () => reconciler.wake));
+	yield* Effect.forkChild(
+		fs.watch(config.env.stateDirectory).pipe(
+			Stream.filter((event) => basename(event.path) === wakeFileName),
+			Stream.runForEach(() => reconciler.wake),
+			Effect.catch((error) => Effect.logWarning(`cannot watch ${config.env.stateDirectory}; ctl.sh requests wait for the next poll`, error)),
+		),
+	);
 
 	return yield* reconciler.run;
 });

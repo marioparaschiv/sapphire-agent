@@ -16,17 +16,29 @@ export type EpicWork = {
 	readonly apply: Effect.Effect<void, unknown>;
 };
 
-// One concern of the reconciler (dispatch, monitoring, results, cleanup, follow-ups), each in its own module that
-// exports an Effect building its Rule from the services it needs. Every tick the planner observes the world once and
-// hands that to each rule's `plan`, which reads the journal and returns the work per epic, at most one per epic.
-// The planner then runs each epic's work in its own fiber under the failure policy, so one bad epic never blocks
-// the others.
+// What one rule does this tick that is not about an epic: a command, the GitHub mentions, a request whose epic has no
+// run. `task` (e.g. CMD-3) names it in every log line. There is no epic to flag, so the work handles the failures it
+// can act on itself and the planner only logs the rest.
+export type TaskWork = {
+	readonly task: string;
+	readonly apply: Effect.Effect<void, unknown>;
+};
+
+export type Work = EpicWork | TaskWork;
+
+const isTaskWork = (work: Work): work is TaskWork => 'task' in work;
+
+// One concern of the reconciler (dispatch, monitoring, results, cleanup, follow-ups, commands), each in its own module
+// that exports an Effect building its Rule from the services it needs. Every tick the planner observes the world once
+// and hands that to each rule's `plan`, which reads the journal and returns the work per epic or task, at most one
+// each. The planner then runs each piece of work in its own fiber under the failure policy, so one bad epic never
+// blocks the others.
 export type Rule = {
 	readonly name: string;
 	// Pausing stops new runs only. Rules that start runs (dispatch, follow-ups) set this and are skipped while the
 	// pause file exists. Rules that watch runs in flight (monitoring, results, cleanup) leave it false.
 	readonly pausable: boolean;
-	readonly plan: (observation: Observation) => Effect.Effect<ReadonlyArray<EpicWork>, unknown>;
+	readonly plan: (observation: Observation) => Effect.Effect<ReadonlyArray<Work>, unknown>;
 };
 
 // Interruption (shutdown) must still stop the tick, so only failures and defects are logged and dropped.
@@ -99,9 +111,12 @@ export class Planner extends Context.Service<
 				const observer = yield* Observer;
 				const reconcileEpic = yield* makePolicy;
 
+				const runWork = (observation: Observation, rateLimited: Ref.Ref<boolean>) => (work: Work) =>
+					isTaskWork(work) ? work.apply.pipe(logFailure('failed'), Effect.annotateLogs({ task: work.task })) : reconcileEpic(observation, rateLimited, work);
+
 				const runRule = (observation: Observation, rateLimited: Ref.Ref<boolean>) => (rule: Rule) =>
 					rule.plan(observation).pipe(
-						Effect.flatMap((work) => Effect.forEach(work, (epic) => reconcileEpic(observation, rateLimited, epic), { concurrency: 'unbounded', discard: true })),
+						Effect.flatMap((work) => Effect.forEach(work, runWork(observation, rateLimited), { concurrency: 'unbounded', discard: true })),
 						logFailure('planning failed'),
 						Effect.annotateLogs({ rule: rule.name }),
 					);

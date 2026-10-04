@@ -2,7 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Fiber, Option, Random } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
-import type { Run } from './journal.ts';
+import type { Command, Run } from './journal.ts';
 import { parseMarker } from './markers.ts';
 import { deliveredEmoji } from './monitoring.ts';
 import { git, type Harness, makeHarness } from './test-harness.ts';
@@ -80,12 +80,12 @@ const makeDriver = (h: Harness, crash: Option.Option<CrashPoint>) => {
 	});
 
 	// Ticks until the reconciler got there. The bound only turns a hang into a failure.
-	const tickUntil = (what: string, reached: (runs: ReadonlyArray<Run>) => boolean) =>
+	const tickUntil = (what: string, reached: (runs: ReadonlyArray<Run>, commands: ReadonlyArray<Command>) => boolean) =>
 		Effect.gen(function* () {
 			for (let ticks = 0; ticks < 5; ticks += 1) {
 				yield* tick;
 
-				if (reached(yield* h.runs)) {
+				if (reached(yield* h.runs, yield* h.commands)) {
 					return;
 				}
 			}
@@ -112,6 +112,16 @@ const ownTab = (h: Harness) => {
 	return tab;
 };
 
+const commandTab = (h: Harness) => {
+	const tab = h.herdr.tabs().find((candidate) => candidate.label === '@bot CMD-1');
+
+	if (!tab) {
+		throw new Error('CMD-1 has no tab');
+	}
+
+	return tab;
+};
+
 const currentRun = (h: Harness) =>
 	h.runs.pipe(
 		Effect.map((runs) => {
@@ -125,9 +135,9 @@ const currentRun = (h: Harness) =>
 		}),
 	);
 
-// The whole life of one epic: dispatch, a question relayed through Linear, the result posted to the PR, a follow-up
-// for a thread that mentions the bot, and the cleanup once the PR is merged. Returns everything the run left behind in Linear,
-// GitHub, herdr, git and the journal.
+// The whole life of one epic: dispatch, a question relayed through Linear, the result posted to the PR, a review thread
+// that mentions the bot, whose command hands it to a follow-up, and the cleanup once the PR is merged. Returns everything
+// the run left behind in Linear, GitHub, herdr, git and the journal.
 const lifecycle = (crash: Option.Option<CrashPoint>) =>
 	Effect.gen(function* () {
 		const h = yield* makeHarness();
@@ -175,11 +185,20 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 		yield* tickUntil('the posted result', (runs) => isRun(runs, (run) => run.status === 'ended'));
 		assert.deepStrictEqual([h.linear.stateName(epic.id), ownTabs(h)], ['To Review', []]);
 
-		// Follow-up: a minute later the reviewer asks the bot for a change; the follow-up answers and resolves it.
+		// Command: a minute later the reviewer asks the bot for a change in a review thread. Its agent replies, hands the
+		// thread to a follow-up and says it is done.
 		yield* TestClock.adjust('1 minute');
 
 		const threadId = h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: 'Rename this to syncSettings. @orchestratorbot' }] });
+		const [mention] = h.github.thread(threadId).comments;
 
+		yield* tickUntil('the command start', (_, commands) => commands.some((command) => command.status === 'running'));
+		yield* h.ctl('reply', mention.url, 'On it: a follow-up renames it.');
+		yield* h.ctl('follow-up', 'TEST-10', '--threads', threadId);
+		yield* h.ctl('done', 'CMD-1');
+		h.herdr.setAgentStatus(commandTab(h).paneId, 'done');
+
+		// Follow-up: it answers and resolves the thread.
 		yield* tickUntil('the follow-up start', (runs) => isRun(runs, (run) => run.job._tag === 'follow-up' && run.status === 'running'));
 		git(worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Rename to syncSettings');
 		git(worktreePath, 'push', '--quiet', 'origin', branch);
@@ -188,7 +207,7 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 			yield* currentRun(h),
 			JSON.stringify({ summary: 'Renamed the sync function.', replies: [{ threadId, body: 'Renamed it to syncSettings.' }], flags: [] }),
 		);
-		yield* tickUntil('the posted follow-up', (runs) => isRun(runs, (run) => run.job._tag === 'follow-up' && run.status === 'ended'));
+		yield* tickUntil('the posted follow-up', (runs, commands) => isRun(runs, (run) => run.job._tag === 'follow-up' && run.status === 'ended') && commands.every((command) => command.status === 'ended'));
 		assert.deepStrictEqual([h.linear.stateName(epic.id), ownTabs(h)], ['To Review', []]);
 
 		// Cleanup: the PR is merged.
@@ -215,13 +234,16 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 				github: {
 					comments: h.github.comments(h.githubRepo, pullRequest.number).map(markerOrFirstLine),
 					reviews: h.github.reviews(h.githubRepo, pullRequest.number).map((review) => [markerOrFirstLine(review.body), review.comments.map((comment) => `${comment.path}:${comment.line}`)]),
-					thread: [thread.isResolved, thread.comments.nodes.map((comment) => markerOrFirstLine(comment.body))],
+					thread: [thread.isResolved, thread.comments.map((comment) => markerOrFirstLine(comment.body))],
+					unread: h.github.unread(h.githubRepo, pullRequest.number),
 				},
 				herdr: {
 					ownedTabs: ownTabs(h).length,
+					openTabs: h.herdr.tabs().filter((tab) => tab.label !== 'notes').length,
 					starts: h.herdr.starts().map((start) => start.prompt.split(' ')[0]),
 					prompts: h.herdr.prompts().map((prompt) => prompt.text),
 				},
+				commands: (yield* h.commands).map((command) => `${command.status} ${command.author}`),
 				git: { worktrees: h.worktrees(), branch: h.hasBranch(branch) },
 				runs: (yield* h.runs).length,
 			},
@@ -250,11 +272,13 @@ describe('lifecycle', () => {
 						],
 					},
 					github: {
-						comments: ['summary:0', `inProgress:${followUpAt}`, `summary:${followUpAt}`],
+						comments: ['summary:0', 'commandReply:1', `summary:${followUpAt}`],
 						reviews: [['flags:0', ['src/sync/merge.ts:3']]],
 						thread: [true, ['Rename this to syncSettings. @orchestratorbot', `reply:PRRT_1.${followUpAt}`]],
+						unread: false,
 					},
-					herdr: { ownedTabs: 0, starts: ['/orchestrate', '/follow-up'], prompts: ['Remote wins. Keep a backup of local.'] },
+					herdr: { ownedTabs: 0, openTabs: 0, starts: ['/orchestrate', 'You', '/follow-up'], prompts: ['Remote wins. Keep a backup of local.'] },
+					commands: ['ended marioparaschiv'],
 					git: { worktrees: [], branch: false },
 					runs: 0,
 				});

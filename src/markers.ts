@@ -1,6 +1,6 @@
 import { Option, Schema } from 'effect';
 
-// What a comment is for. Together with the epic's identifier and a key it names one comment, so a write first looks
+// What a comment is for. Together with the epic's identifier (or a command's, `CMD-<id>`) and a key it names one comment, so a write first looks
 // for its marker and skips if it is there: a retry or a restart never posts twice, while a later occurrence (a new
 // question in the same run, a new summary from a follow-up run) has a new key and is posted. The Comments service
 // builds every key; `claimedAt` is the run's claim time in epoch ms.
@@ -15,8 +15,10 @@ import { Option, Schema } from 'effect';
 // - workingOrphan: `<tabId>`, once per untracked tab whose agent is working.
 // On the GitHub PR:
 // - summary, flags: `<claimedAt>`, once per run (flags is the review holding every flag).
-// - inProgress: `<claimedAt>`, once per follow-up run; the bot's comment saying it started.
 // - reply: `<threadId>.<claimedAt>`, once per thread per run; found among the thread's comments.
+// On the issue or PR a command came from, as the bot:
+// - commandReply: `<requestId>`, once per reply the command's agent asked for.
+// - commandFailed: `<claimedAt>`, once per command that failed.
 export const MarkerPurpose = Schema.Literals([
 	'awaitingInput',
 	'stale',
@@ -33,8 +35,9 @@ export const MarkerPurpose = Schema.Literals([
 	'workingOrphan',
 	'summary',
 	'flags',
-	'inProgress',
 	'reply',
+	'commandReply',
+	'commandFailed',
 ]);
 
 export type MarkerPurpose = typeof MarkerPurpose.Type;
