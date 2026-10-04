@@ -108,6 +108,22 @@ export class Herdr {
 		await this.exec(['tab', 'rename', tabId, label]);
 	}
 
+	async tab(tabId: string) {
+		try {
+			return (await this.call(z.object({ tab: tabSchema }), ['tab', 'get', tabId])).tab;
+		} catch (error) {
+			if (error instanceof HerdrError && error.code === 'tab_not_found') {
+				return undefined;
+			}
+
+			throw error;
+		}
+	}
+
+	async closeTab(tabId: string) {
+		await this.exec(['tab', 'close', tabId]);
+	}
+
 	async tabs(workspaceId: string) {
 		return (await this.call(z.object({ tabs: z.array(tabSchema) }), ['tab', 'list', '--workspace', workspaceId])).tabs;
 	}

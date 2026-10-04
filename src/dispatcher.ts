@@ -18,7 +18,8 @@ export type DispatcherOptions = {
 type ResolvedTeam = { team: LinearTeam; stateIds: Record<StateRole, string> };
 
 const QUIET_STATUSES = new Set(['idle', 'done', 'blocked']);
-const IN_FLIGHT_STATUSES = new Set(['claimed', 'running', 'stuck']);
+// Claims whose agent may still be alive. They hold a maxInFlight slot so live Claude processes never exceed it.
+const IN_FLIGHT_STATUSES = new Set<Claim['status']>(['claimed', 'running', 'awaitingInput', 'stale']);
 
 // The only component that talks to Linear. Every tick and every worker message runs one at a time, so
 // claim updates never interleave.
@@ -28,6 +29,7 @@ export class Dispatcher {
 	private queue: Promise<void> = Promise.resolve();
 	private readonly warned = new Set<string>();
 	private paused = false;
+	private startedAt = 0;
 
 	constructor(options: DispatcherOptions) {
 		this.options = options;
@@ -35,6 +37,8 @@ export class Dispatcher {
 
 	// Re-attaches every claim that outlived the previous process.
 	start() {
+		this.startedAt = this.options.now();
+
 		for (const claim of this.options.claims.all()) {
 			if (claim.job && IN_FLIGHT_STATUSES.has(claim.status)) {
 				this.options.send({ type: 'watch', job: claim.job, run: claim.run });
@@ -86,7 +90,8 @@ export class Dispatcher {
 					await claims.put({ ...claim, status: 'running', run: message.run, agent: undefined });
 					log(`${claim.identifier}: agent started in tab ${message.run.tabId}`);
 
-					if (claim.status === 'claimed') {
+					// An error claim here started after the start timeout flagged it.
+					if (claim.status === 'claimed' || claim.status === 'error') {
 						await this.move(claim, 'implementing');
 					}
 
@@ -97,7 +102,7 @@ export class Dispatcher {
 					const previous = claim.agent;
 					const stillQuiet = previous && QUIET_STATUSES.has(previous.status) && QUIET_STATUSES.has(message.status);
 					const since = stillQuiet ? previous.since : now();
-					const resumed = claim.status === 'stuck' && message.status === 'working';
+					const resumed = claim.status === 'awaitingInput' && message.status === 'working';
 
 					await claims.put({
 						...claim,
@@ -120,9 +125,32 @@ export class Dispatcher {
 				}
 
 				case 'failed': {
-					log(`${claim.identifier}: failed to start: ${message.error}`);
-					await claims.put({ ...claim, status: 'failed' });
-					await this.flag(claim, failureComment(this.options.config, message.error, message.tail));
+					if (claim.status === 'claimed') {
+						await this.failStart(claim, message.error, message.tail);
+					} else {
+						log(`${claim.identifier}: failed to start after it was flagged: ${message.error}`);
+					}
+
+					return;
+				}
+
+				// A newer dispatch may have replaced the claim since the cleanup was sent.
+				case 'cleaned': {
+					if (claim.status === 'ended' || claim.status === 'kept') {
+						await this.release(claim, 'its worktree is removed');
+					}
+
+					return;
+				}
+
+				case 'kept': {
+					if (claim.status !== 'ended') {
+						return;
+					}
+
+					log(`${claim.identifier}: kept ${message.worktreePath}: ${message.reason}`);
+					await this.options.linear.comment(claim.epicId, keptComment(message.worktreePath, message.reason));
+					await claims.put({ ...claim, status: 'kept' });
 				}
 			}
 		});
@@ -207,6 +235,19 @@ export class Dispatcher {
 		this.options.log(`${claim.identifier}: moved to ${this.options.config.states[role]}`);
 	}
 
+	private async failStart(claim: Claim, error: string, tail?: string) {
+		this.options.log(`${claim.identifier}: failed to start: ${error}`);
+		await this.options.claims.put({ ...claim, status: 'error' });
+		await this.flag(claim, failureComment(this.options.config, error, tail));
+	}
+
+	// The run's tab is closed; the claim stays until the worktree is cleaned up.
+	private async endRun(claim: Claim, job: Job, run: Run, reason: string) {
+		this.options.log(`${claim.identifier}: ${reason}; ending the run`);
+		await this.options.claims.put({ ...claim, status: 'ended' });
+		this.options.send({ type: 'close', job, run });
+	}
+
 	private async flag(claim: Claim, comment: string) {
 		const { linear, config } = this.options;
 
@@ -221,18 +262,32 @@ export class Dispatcher {
 			return;
 		}
 
-		if (!this.teams.has(claim.teamId) || claim.status === 'claimed') {
+		if (!this.teams.has(claim.teamId)) {
+			return;
+		}
+
+		if (claim.status === 'claimed') {
+			await this.checkStartTimeout(claim);
+
 			return;
 		}
 
 		const role = this.roleOf(claim, epic);
+		const { job, run } = claim;
 
-		if (claim.status === 'failed') {
+		// Only a run that never started lacks these.
+		if (!job || !run) {
 			if (role !== 'ready') {
 				await this.release(claim, `the epic moved to ${epic.state.name}`);
 			} else if (!this.stuckLabel(epic)) {
 				await this.release(claim, `the ${this.options.config.labels.stuck} label was removed`);
 			}
+
+			return;
+		}
+
+		if (claim.status === 'ended' || claim.status === 'kept') {
+			await this.checkCleanup(job, run, role);
 
 			return;
 		}
@@ -243,15 +298,24 @@ export class Dispatcher {
 			return;
 		}
 
+		// Closing a working agent's tab would kill it mid-turn, so a run only ends once the agent is not working.
+		const working = !claim.agent || claim.agent.status === 'working';
+
 		if (role !== 'implementing' && role !== 'inReview') {
-			await this.release(claim, `the epic moved to ${epic.state.name}`);
+			if (!working) {
+				await this.endRun(claim, job, run, `the epic moved to ${epic.state.name}`);
+			}
 
 			return;
 		}
 
-		const pullRequest = claim.run && (await this.options.findPullRequest(claim.run.githubRepo, claim.run.branch));
+		const pullRequest = await this.options.findPullRequest(run.githubRepo, run.branch);
 
-		if (pullRequest) {
+		if (pullRequest && pullRequest.state !== 'CLOSED') {
+			if (working) {
+				return;
+			}
+
 			this.options.log(`${claim.identifier}: PR ${pullRequest.url} is ${pullRequest.state.toLowerCase()}`);
 			await this.move(claim, 'toReview');
 
@@ -261,35 +325,65 @@ export class Dispatcher {
 				await this.options.linear.removeLabel(claim.epicId, stuckLabel.id);
 			}
 
-			await this.release(claim, 'the PR is up');
+			await this.endRun(claim, job, run, 'the PR is up');
 
 			return;
 		}
 
-		const { agent, run } = claim;
+		const { agent } = claim;
 
-		if (claim.status === 'running' && agent && run && this.agentStopped(agent)) {
-			this.options.log(`${claim.identifier}: agent ${agent.status} without a PR; flagging it`);
-			await this.flag(claim, stuckComment(this.options.config, claim, agent, run, this.options.now()));
-			await this.options.claims.put({ ...claim, status: 'stuck' });
+		if (!agent || claim.status === 'error') {
+			return;
+		}
+
+		if (agent.status === 'exited' || agent.status === 'vanished') {
+			await this.flagRun(claim, run, agent, 'error');
+		} else if (claim.status === 'running' && this.quietTooLong(agent)) {
+			await this.flagRun(claim, run, agent, 'awaitingInput');
 		}
 	}
 
-	private agentStopped(agent: Agent) {
-		if (agent.status === 'exited' || agent.status === 'vanished') {
-			return true;
+	// After a restart the worker gets a full window to adopt the run before it counts as never started.
+	private async checkStartTimeout(claim: Claim) {
+		const { config, now } = this.options;
+		const waitingSince = Math.max(claim.claimedAt, this.startedAt);
+
+		if (now() - waitingSince >= config.startTimeoutSeconds * 1000) {
+			await this.failStart(claim, `the agent was not confirmed running within ${config.startTimeoutSeconds} s`);
+		}
+	}
+
+	// Sent every poll until the worker reports the worktree removed, so a kept worktree goes once its work is pushed.
+	private async checkCleanup(job: Job, run: Run, role: StateRole | undefined) {
+		if (role !== 'shipped') {
+			const pullRequest = await this.options.findPullRequest(run.githubRepo, run.branch);
+
+			if (pullRequest?.state !== 'MERGED' && pullRequest?.state !== 'CLOSED') {
+				return;
+			}
 		}
 
-		return (
-			QUIET_STATUSES.has(agent.status) && this.options.now() - agent.since >= this.options.config.stuckAfterSeconds * 1000
-		);
+		this.options.send({ type: 'cleanup', job, run });
+	}
+
+	private async flagRun(claim: Claim, run: Run, agent: Agent, status: 'awaitingInput' | 'error') {
+		this.options.log(`${claim.identifier}: agent ${agent.status} without a PR; flagging it as ${status}`);
+		await this.flag(claim, runComment(this.options.config, status, claim, agent, run, this.options.now()));
+		await this.options.claims.put({ ...claim, status });
+	}
+
+	private quietTooLong(agent: Agent) {
+		const { config, now } = this.options;
+
+		return QUIET_STATUSES.has(agent.status) && now() - agent.since >= config.awaitingInputAfterSeconds * 1000;
 	}
 
 	private async dispatchReady(ready: Epic[]) {
 		const { claims, config, send, now, log } = this.options;
 		let inFlight = claims.all().filter((claim) => IN_FLIGHT_STATUSES.has(claim.status)).length;
+		const runOver = (claim: Claim | undefined) => !claim || claim.status === 'ended' || claim.status === 'kept';
 		const candidates = ready
-			.filter((epic) => this.teams.has(epic.team.id) && !claims.get(epic.id) && !this.stuckLabel(epic))
+			.filter((epic) => this.teams.has(epic.team.id) && runOver(claims.get(epic.id)) && !this.stuckLabel(epic))
 			.sort((a, b) => a.sortOrder - b.sortOrder);
 
 		for (const epic of candidates) {
@@ -312,9 +406,7 @@ export class Dispatcher {
 			const repo = resolveRepo(config, epic.team.name, epic.labels.nodes);
 
 			if (!repo.ok) {
-				log(`${epic.identifier}: ${repo.error}`);
-				await claims.put({ ...claim, status: 'failed' });
-				await this.flag(claim, failureComment(config, repo.error));
+				await this.failStart(claim, repo.error);
 				continue;
 			}
 
@@ -367,9 +459,14 @@ function describeStop(agent: Agent, now: number) {
 	}
 }
 
-function stuckComment(config: Config, claim: Claim, agent: Agent, run: Run, now: number) {
+function runComment(config: Config, status: 'awaitingInput' | 'error', claim: Claim, agent: Agent, run: Run, now: number) {
+	const next =
+		status === 'awaitingInput'
+			? `Answer the agent in its tab and it carries on, or remove the label and move the epic back to ${config.states.ready} to start over.`
+			: `Remove the label and move the epic back to ${config.states.ready} to start over.`;
+
 	return [
-		`**herdr-linear:** the agent ${describeStop(agent, now)} without opening a PR.`,
+		`**herdr-linear** (\`${status}\`): the agent ${describeStop(agent, now)} without opening a PR.`,
 		'',
 		`- Tab: \`${claim.job?.tabLabel}\` (${run.tabId}), pane ${run.paneId}`,
 		`- Worktree: \`${run.worktreePath}\` on branch \`${run.branch}\``,
@@ -378,15 +475,19 @@ function stuckComment(config: Config, claim: Claim, agent: Agent, run: Run, now:
 		'',
 		codeBlock(agent.tail),
 		'',
-		`The epic stays in ${config.states.implementing} with the \`${config.labels.stuck}\` label. Answer the agent in its tab and it carries on, or remove the label and move the epic back to ${config.states.ready} to start over.`,
+		`The epic stays in ${config.states.implementing} with the \`${config.labels.stuck}\` label. ${next}`,
 	].join('\n');
 }
 
 function failureComment(config: Config, error: string, tail?: string) {
 	return [
-		`**herdr-linear:** couldn't start an agent for this epic: ${error}`,
+		`**herdr-linear** (\`error\`): couldn't start an agent for this epic: ${error}`,
 		...(tail ? ['', 'Last lines of the pane:', '', codeBlock(tail)] : []),
 		'',
 		`Fix the problem, then remove the \`${config.labels.stuck}\` label to retry.`,
 	].join('\n');
+}
+
+function keptComment(worktreePath: string, reason: string) {
+	return `**herdr-linear:** kept the worktree \`${worktreePath}\` because it has ${reason}. Push or discard that work and it is removed on a later poll.`;
 }

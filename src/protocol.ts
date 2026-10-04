@@ -33,6 +33,11 @@ export const dispatcherMessageSchema = z.discriminatedUnion('type', [
 	// Re-attach to a run after a dispatcher restart. Without a run, the dispatch was interrupted before
 	// the worker confirmed it, so the worker looks for the job's tab instead.
 	z.object({ type: z.literal('watch'), job: jobSchema, run: runSchema.optional() }),
+	// The run is over: stop watching it and close its tab.
+	z.object({ type: z.literal('close'), job: jobSchema, run: runSchema }),
+	// The epic shipped or its PR was merged or closed: close the tab, then remove the worktree and local branch
+	// unless they hold work that is not on origin.
+	z.object({ type: z.literal('cleanup'), job: jobSchema, run: runSchema }),
 ]);
 
 export type DispatcherMessage = z.infer<typeof dispatcherMessageSchema>;
@@ -47,6 +52,8 @@ export const workerMessageSchema = z.discriminatedUnion('type', [
 		tail: z.string(),
 	}),
 	z.object({ type: z.literal('failed'), epicId: z.string(), error: z.string(), tail: z.string().optional() }),
+	z.object({ type: z.literal('cleaned'), epicId: z.string() }),
+	z.object({ type: z.literal('kept'), epicId: z.string(), worktreePath: z.string(), reason: z.string() }),
 ]);
 
 export type WorkerMessage = z.infer<typeof workerMessageSchema>;

@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { ClaimStore } from './claims.ts';
 import { configSchema } from './config.ts';
 import { Dispatcher } from './dispatcher.ts';
-import { FakeLinear, unboundStates } from './fixtures/linear-server.ts';
+import { FakeLinear, UNBOUND_TEAM_ID, unboundStates } from './fixtures/linear-server.ts';
 import type { PullRequest } from './github.ts';
 import { LinearClient } from './linear.ts';
 import type { DispatcherMessage, Run } from './protocol.ts';
 
 const config = configSchema.parse({
-	stuckAfterSeconds: 180,
+	awaitingInputAfterSeconds: 180,
+	startTimeoutSeconds: 300,
 	teams: { Unbound: { repo: '/srv/unbound', labelReposDirectory: '/srv/unbound-app' } },
 });
 
@@ -151,19 +152,24 @@ test('keeps at most maxInFlight epics in flight, in board order', async (t) => {
 	);
 
 	await dispatcher.handle({ type: 'started', epicId: first.id, run: runFor('UNB-40') });
+	await dispatcher.handle({ type: 'status', epicId: first.id, status: 'idle', tail: 'PR opened.' });
 	h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/88', state: 'OPEN' };
 	await dispatcher.tick();
 
 	assert.equal(h.linear.stateName(first.id), 'To Review');
 	assert.deepEqual(
-		h.sent.map((message) => message.job.epicId),
-		[first.id, second.id],
+		h.sent.map((message) => `${message.type} ${message.job.epicId}`),
+		[`dispatch ${first.id}`, `close ${first.id}`, `dispatch ${second.id}`],
 	);
 });
 
-test('flags an agent that sits idle without a PR, then hands the epic over once the PR exists', async (t) => {
+const claimsOnDisk = (h: { statePath: string }) =>
+	JSON.parse(readFileSync(h.statePath, 'utf8')).claims as { epicId: string; status: string }[];
+
+test('flags an agent that sits idle as awaiting input, keeps its slot, and resumes it once it works again', async (t) => {
 	const h = await harness(t);
-	const epic = h.linear.addEpic({ identifier: 'UNB-50', title: 'Stuck agent' });
+	const epic = h.linear.addEpic({ identifier: 'UNB-50', title: 'Asking a question', sortOrder: 1 });
+	h.linear.addEpic({ identifier: 'UNB-51', title: 'Queued behind it', sortOrder: 2 });
 	const dispatcher = await h.dispatcher();
 	await dispatcher.tick();
 	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-50') });
@@ -177,7 +183,7 @@ test('flags an agent that sits idle without a PR, then hands the epic over once 
 
 	h.now += 179_000;
 	await dispatcher.tick();
-	assert.equal(h.linear.comments.length, 0, 'still inside the grace period');
+	assert.equal(h.linear.comments.length, 0, 'still inside the quiet window');
 
 	h.now += 1_000;
 	await dispatcher.tick();
@@ -185,28 +191,47 @@ test('flags an agent that sits idle without a PR, then hands the epic over once 
 	assert.equal(h.linear.comments.length, 1);
 	const [comment] = h.linear.comments;
 	assert.equal(comment.issueId, epic.id);
-	assert.match(comment.body, /has been idle for 3 min without opening a PR/);
+	assert.match(comment.body, /\(`awaitingInput`\): the agent has been idle for 3 min without opening a PR/);
 	assert.match(comment.body, /w1:t4/);
 	assert.match(comment.body, /Which auth provider should slice 2 use\?/);
 	assert.equal(h.linear.stateName(epic.id), 'Implementing');
 	assert.deepEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+	assert.equal(claimsOnDisk(h)[0].status, 'awaitingInput');
 
 	h.now += 600_000;
 	await dispatcher.tick();
-	assert.equal(h.linear.comments.length, 1, 'a stuck epic is reported once');
-	assert.equal(h.sent.length, 1, 'a stuck epic still counts as in flight');
+	assert.equal(h.linear.comments.length, 1, 'an epic awaiting input is reported once');
+	assert.equal(h.sent.length, 1, 'an epic awaiting input still counts as in flight');
 
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '' });
+	assert.equal(claimsOnDisk(h)[0].status, 'running');
+	assert.ok(h.logs.includes('UNB-50: agent is working again'));
+});
+
+test('hands the epic over once the PR is up and the agent stops working, then closes its tab', async (t) => {
+	const h = await harness(t);
+	const epic = h.linear.addEpic({ identifier: 'UNB-55', title: 'PR while working' });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-55') });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '' });
 	h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/91', state: 'OPEN' };
+
+	await dispatcher.tick();
+	assert.equal(h.linear.stateName(epic.id), 'Implementing', 'a working agent is not interrupted');
+
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Opened PR #91.' });
 	await dispatcher.tick();
 
 	assert.equal(h.linear.stateName(epic.id), 'To Review');
-	assert.deepEqual(h.linear.labelNames(epic.id), []);
-	assert.deepEqual(JSON.parse(readFileSync(h.statePath, 'utf8')).claims, []);
+	assert.deepEqual(h.sent.at(-1), { type: 'close', job: h.sent[0].job, run: runFor('UNB-55') });
+	assert.equal(claimsOnDisk(h)[0].status, 'ended');
 });
 
-test('flags a run that vanished without a PR straight away', async (t) => {
+test('flags a run that vanished without a PR as an error straight away and frees its slot', async (t) => {
 	const h = await harness(t);
-	const epic = h.linear.addEpic({ identifier: 'UNB-60', title: 'Tab closed' });
+	const epic = h.linear.addEpic({ identifier: 'UNB-60', title: 'Tab closed', sortOrder: 1 });
+	const next = h.linear.addEpic({ identifier: 'UNB-61', title: 'Next in line', sortOrder: 2 });
 	const dispatcher = await h.dispatcher();
 	await dispatcher.tick();
 	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-60') });
@@ -215,9 +240,173 @@ test('flags a run that vanished without a PR straight away', async (t) => {
 	await dispatcher.tick();
 
 	assert.equal(h.linear.comments.length, 1);
-	assert.match(h.linear.comments[0].body, /disappeared \(its tab was closed or herdr restarted\)/);
+	assert.match(h.linear.comments[0].body, /\(`error`\): the agent disappeared \(its tab was closed or herdr restarted\)/);
 	assert.equal(h.linear.stateName(epic.id), 'Implementing');
 	assert.deepEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+	assert.equal(claimsOnDisk(h)[0].status, 'error');
+	assert.deepEqual(
+		h.sent.map((message) => message.job.epicId),
+		[epic.id, next.id],
+	);
+
+	await dispatcher.tick();
+	assert.equal(h.linear.comments.length, 1, 'an error is reported once');
+});
+
+test('an agent that exits after being flagged as awaiting input becomes an error', async (t) => {
+	const h = await harness(t);
+	const epic = h.linear.addEpic({ identifier: 'UNB-62', title: 'Gave up' });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-62') });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'blocked', tail: 'Allow this command?' });
+	h.now += 180_000;
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'finished', epicId: epic.id, reason: 'exited', tail: '$' });
+
+	await dispatcher.tick();
+
+	assert.equal(claimsOnDisk(h)[0].status, 'error');
+	assert.deepEqual(
+		h.linear.comments.map((comment) => /\(`(\w+)`\): the agent (\w+)/.exec(comment.body)?.slice(1).join(' ')),
+		['awaitingInput has', 'error exited'],
+	);
+});
+
+test('a run not confirmed within the start timeout is an error and frees its slot', async (t) => {
+	const h = await harness(t);
+	const epic = h.linear.addEpic({ identifier: 'UNB-65', title: 'Hung start', sortOrder: 1 });
+	const next = h.linear.addEpic({ identifier: 'UNB-66', title: 'Next in line', sortOrder: 2 });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+
+	h.now += 299_000;
+	await dispatcher.tick();
+	assert.equal(h.sent.length, 1, 'still inside the start timeout');
+
+	h.now += 1_000;
+	await dispatcher.tick();
+
+	assert.equal(claimsOnDisk(h).find((claim) => claim.epicId === epic.id)?.status, 'error');
+	assert.match(h.linear.comments[0].body, /\(`error`\): couldn't start an agent for this epic: the agent was not confirmed running within 300 s/);
+	assert.deepEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+	assert.deepEqual(
+		h.sent.map((message) => message.job.epicId),
+		[epic.id, next.id],
+	);
+
+	await dispatcher.handle({ type: 'failed', epicId: epic.id, error: 'herdr timeout' });
+	assert.equal(h.linear.comments.length, 1, 'a late failure is not reported again');
+});
+
+test('a restarted dispatcher gives an unconfirmed run a fresh start timeout to be adopted', async (t) => {
+	const h = await harness(t);
+	const epic = h.linear.addEpic({ identifier: 'UNB-67', title: 'Claimed before a long outage' });
+	await (await h.dispatcher()).tick();
+
+	h.now += 3_600_000;
+	const restarted = await h.dispatcher();
+	restarted.start();
+	await restarted.tick();
+
+	assert.equal(h.linear.comments.length, 0);
+	await restarted.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-67') });
+	assert.equal(h.linear.stateName(epic.id), 'Implementing');
+});
+
+test('awaitingInput and stale claims hold a maxInFlight slot, error and ended ones do not', async (t) => {
+	const h = await harness(t);
+	const flagged = h.linear.addEpic({ identifier: 'UNB-1', title: 'Already running', stateId: 'st-impl' });
+	h.linear.addEpic({ identifier: 'UNB-68', title: 'Waiting for a slot' });
+	const job = {
+		epicId: flagged.id,
+		identifier: 'UNB-1',
+		branch: runFor('UNB-1').branch,
+		repoPath: '/srv/unbound',
+		tabLabel: 'UNB-1 Already running',
+		prompt: '/orchestrate',
+	};
+
+	for (const [status, holdsSlot] of [
+		['awaitingInput', true],
+		['stale', true],
+		['error', false],
+		['ended', false],
+	] as const) {
+		const claim = { epicId: flagged.id, identifier: 'UNB-1', teamId: UNBOUND_TEAM_ID, status, claimedAt: h.now, job, run: runFor('UNB-1') };
+		writeFileSync(h.statePath, JSON.stringify({ claims: [claim] }));
+		h.sent.length = 0;
+
+		await (await h.dispatcher()).tick();
+
+		assert.deepEqual(
+			h.sent.map((message) => `${message.type} ${message.job.identifier}`),
+			holdsSlot ? [] : ['dispatch UNB-68'],
+			status,
+		);
+	}
+});
+
+async function endedRun(h: Awaited<ReturnType<typeof harness>>, identifier: string) {
+	const epic = h.linear.addEpic({ identifier, title: 'Ready to ship' });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor(identifier) });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'done', tail: 'Opened the PR.' });
+	h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/120', state: 'OPEN' };
+	await dispatcher.tick();
+	assert.equal(h.linear.stateName(epic.id), 'To Review');
+
+	return { epic, job: h.sent[0].job, run: runFor(identifier) };
+}
+
+test('cleans up the worktree once the epic ships, across a restart, keeping a dirty one and saying so once', async (t) => {
+	const h = await harness(t);
+	const { epic, job, run } = await endedRun(h, 'UNB-120');
+	const dispatcher = await h.dispatcher();
+
+	await dispatcher.tick();
+	assert.deepEqual(
+		h.sent.map((message) => message.type),
+		['dispatch', 'close'],
+		'nothing to clean while the PR is in review',
+	);
+
+	h.linear.issues.get(epic.id)!.stateId = 'st-shipped';
+	const restarted = await h.dispatcher();
+	restarted.start();
+	await restarted.tick();
+
+	assert.deepEqual(h.sent.slice(2), [{ type: 'cleanup', job, run }], 'an ended run is not watched again');
+
+	const kept = { type: 'kept', epicId: epic.id, worktreePath: run.worktreePath, reason: '2 unpushed commits' } as const;
+	await restarted.handle(kept);
+	await restarted.tick();
+	await restarted.handle(kept);
+
+	assert.equal(h.linear.comments.length, 1);
+	assert.match(h.linear.comments[0].body, /kept the worktree `\/home\/dev\/\.herdr\/worktrees\/unbound\/mario-unb-120` because it has 2 unpushed commits/);
+	assert.deepEqual(h.sent.at(-1), { type: 'cleanup', job, run }, 'a kept worktree is retried every poll');
+
+	await restarted.handle({ type: 'cleaned', epicId: epic.id });
+	assert.deepEqual(claimsOnDisk(h), []);
+
+	const sent = h.sent.length;
+	await restarted.tick();
+	assert.equal(h.sent.length, sent);
+	assert.ok(!h.logs.some((line) => /failed/.test(line)), h.logs.join('\n'));
+});
+
+test('a merged or closed PR triggers cleanup too', async (t) => {
+	for (const state of ['MERGED', 'CLOSED'] as const) {
+		const h = await harness(t);
+		const { job, run } = await endedRun(h, 'UNB-121');
+		h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/121', state };
+
+		await (await h.dispatcher()).tick();
+
+		assert.deepEqual(h.sent.at(-1), { type: 'cleanup', job, run }, state);
+	}
 });
 
 test('a failed start is reported on the epic and retried only once the label is removed', async (t) => {

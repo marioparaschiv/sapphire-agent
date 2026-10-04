@@ -4,8 +4,19 @@ import { writeFileAtomic } from './atomic-write.ts';
 import { agentStatusSchema, jobSchema, runSchema } from './protocol.ts';
 
 // claimed: recorded before the dispatch is sent. running: the worker confirmed the agent started.
-// stuck: the agent stopped without a PR and the epic was flagged. failed: the run never started.
-export const claimStatusSchema = z.enum(['claimed', 'running', 'stuck', 'failed']);
+// awaitingInput: the agent sat idle or blocked without a PR. stale: herdr says working but the pane stopped
+// changing. error: the agent exited or vanished, or the run never started. Those three flag the epic.
+// ended: the run is over and its tab closed; the worktree stays until the epic ships or its PR is merged or
+// closed. kept: cleanup found work that is not on origin, so the worktree stays and the epic was told.
+const statuses = z.enum(['claimed', 'running', 'awaitingInput', 'stale', 'error', 'ended', 'kept']);
+
+// Names written by older versions.
+const renamedStatuses: Record<string, z.infer<typeof statuses>> = { stuck: 'awaitingInput', failed: 'error' };
+
+export const claimStatusSchema = z.preprocess(
+	(status) => (typeof status === 'string' && Object.hasOwn(renamedStatuses, status) ? renamedStatuses[status] : status),
+	statuses,
+);
 
 const claimSchema = z.object({
 	epicId: z.string(),

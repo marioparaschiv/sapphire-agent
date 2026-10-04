@@ -30,8 +30,9 @@ Run both before calling work done.
 
 | File | Covers | How |
 | --- | --- | --- |
-| `dispatcher.test.ts` | Claim/dispatch/reconcile/stuck/fail/retry/pause/skip | Real `Dispatcher` + `LinearClient` against `FakeLinear`, real `ClaimStore` in a temp dir, fake `now`, fake `findPullRequest`, `send` captured. |
-| `git.test.ts` | `prepareWorktree`, `parseGithubRepo` | Real git: bare origin, seed and clone in a temp dir. |
+| `dispatcher.test.ts` | Claim/dispatch/reconcile, awaitingInput/error/start timeout, `maxInFlight` accounting, retry, run end and cleanup decisions, pause/skip | Real `Dispatcher` + `LinearClient` against `FakeLinear`, real `ClaimStore` in a temp dir, fake `now`, fake `findPullRequest`, `send` captured. |
+| `git.test.ts` | `prepareWorktree`, `unsavedWork`, `removeWorktree`, `parseGithubRepo` | Real git: bare origin, seed and clone in a temp dir. |
+| `claims.test.ts` | Loading old `stuck` / `failed` statuses | Real temp file. |
 | `trust.test.ts` | `trustFolder` | Real temp files. |
 | `config.test.ts` | Defaults, errors, `resolveRepo` | Real files and pure calls. |
 

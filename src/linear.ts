@@ -43,6 +43,9 @@ const responseSchema = z.object({
 
 const successSchema = z.object({ success: z.literal(true) });
 
+// Linear rejects larger pages.
+const MAX_PAGE_SIZE = 250;
+
 export class LinearError extends Error {}
 
 export class LinearClient {
@@ -90,6 +93,11 @@ export class LinearClient {
 
 	// Top-level issues in the ready states, plus the claimed issues wherever they are now.
 	async poll(readyStateIds: string[], claimedIds: string[]) {
+		// A truncated page would make the dispatcher release claims whose epics still exist.
+		if (claimedIds.length > MAX_PAGE_SIZE) {
+			throw new Error(`${claimedIds.length} claims exceed the ${MAX_PAGE_SIZE} issues one poll can read`);
+		}
+
 		const result = await this.request(
 			z.object({
 				ready: z.object({ nodes: z.array(epicSchema) }),
@@ -99,7 +107,7 @@ export class LinearClient {
 				ready: issues(first: 50, filter: { state: { id: { in: $readyStateIds } }, parent: { null: true } }) {
 					nodes { ${EPIC_FIELDS} }
 				}
-				claimed: issues(first: 50, filter: { id: { in: $claimedIds } }) { nodes { ${EPIC_FIELDS} } }
+				claimed: issues(first: ${MAX_PAGE_SIZE}, filter: { id: { in: $claimedIds } }) { nodes { ${EPIC_FIELDS} } }
 			}`,
 			{ readyStateIds, claimedIds },
 		);

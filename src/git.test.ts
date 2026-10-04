@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { parseGithubRepo, prepareWorktree } from './git.ts';
+import { parseGithubRepo, prepareWorktree, removeWorktree, unsavedWork } from './git.ts';
 
 const git = (cwd: string, ...args: string[]) =>
 	execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], {
@@ -78,6 +78,65 @@ test('finds the default branch when origin/HEAD was never set', async (t) => {
 	assert.equal(git(path, 'log', '-1', '--format=%s'), 'after clone');
 	assert.equal(git(bare, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'), 'origin/main');
 	await assert.rejects(prepareWorktree(join(repo, '..', 'missing'), 'mario/unb-15', worktrees));
+});
+
+const hasBranch = (repo: string, branch: string) => git(repo, 'branch', '--list', branch) !== '';
+
+test('removes a worktree whose work is all on origin, ignored files included, and does nothing the second time', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const branch = 'mario/unb-16';
+	const path = await prepareWorktree(repo, branch, worktrees);
+	writeFileSync(join(path, '.gitignore'), 'node_modules/\n');
+	git(path, 'add', '.gitignore');
+	git(path, 'commit', '--quiet', '-m', 'ignore deps');
+	git(path, 'push', '--quiet', '-u', 'origin', branch);
+	mkdirSync(join(path, 'node_modules'));
+	writeFileSync(join(path, 'node_modules', 'dep.js'), '');
+
+	assert.equal(await unsavedWork(repo, branch, path), undefined);
+	await removeWorktree(repo, branch, path);
+
+	assert.equal(existsSync(path), false);
+	assert.equal(hasBranch(repo, branch), false);
+	assert.equal(await unsavedWork(repo, branch, path), undefined);
+	await removeWorktree(repo, branch, path);
+	assert.equal(await prepareWorktree(repo, branch, worktrees), path, 'a later run restores it from origin');
+	assert.equal(git(path, 'log', '-1', '--format=%s'), 'ignore deps');
+});
+
+test('reports uncommitted changes and unpushed commits, including on a branch never pushed', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const branch = 'mario/unb-17';
+	const path = await prepareWorktree(repo, branch, worktrees);
+
+	assert.equal(await unsavedWork(repo, branch, path), undefined, 'a new branch with nothing on it');
+
+	writeFileSync(join(path, 'notes.md'), 'draft');
+	assert.equal(await unsavedWork(repo, branch, path), 'uncommitted changes');
+
+	git(path, 'add', 'notes.md');
+	git(path, 'commit', '--quiet', '-m', 'slice 1');
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 2');
+	assert.equal(await unsavedWork(repo, branch, path), '2 unpushed commits');
+
+	git(path, 'push', '--quiet', '-u', 'origin', branch);
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 3');
+	assert.equal(await unsavedWork(repo, branch, path), '1 unpushed commit');
+});
+
+test('checks the branch when its worktree directory was deleted by hand, then removes it', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const branch = 'mario/unb-18';
+	const path = await prepareWorktree(repo, branch, worktrees);
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 1');
+	rmSync(path, { recursive: true, force: true });
+
+	assert.equal(await unsavedWork(repo, branch, path), '1 unpushed commit');
+
+	git(repo, 'push', '--quiet', 'origin', branch);
+	assert.equal(await unsavedWork(repo, branch, path), undefined);
+	await removeWorktree(repo, branch, path);
+	assert.equal(hasBranch(repo, branch), false);
 });
 
 test('reads owner/repo from GitHub remotes', () => {

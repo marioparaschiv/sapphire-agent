@@ -7,8 +7,8 @@ How the dispatcher and worker are split, the messages between them, how `main.ts
 | | Dispatcher (`src/dispatcher.ts`) | Worker (`src/worker.ts`) |
 | --- | --- | --- |
 | Talks to | Linear, `gh`, `claims.json`, pause file | git, herdr CLI and socket, `~/.claude.json` |
-| Owns | Claims, Linear state moves, comments, labels, PR checks | Worktrees, tabs, starting Claude, watching agent status |
-| Concurrency | Every tick and every worker message runs through one promise queue (`serial`, `dispatcher.ts:131-137`) | Reconciles of tracked runs run one at a time (`worker.ts:182-190`); dispatches can overlap |
+| Owns | Claims, Linear state moves, comments, labels, PR checks | Worktrees, tabs, starting Claude, watching agent status, closing tabs, removing worktrees |
+| Concurrency | Every tick and every worker message runs through one promise queue (`serial`, `dispatcher.ts:159-165`) | Reconciles of tracked runs run one at a time; starts and cleanups share another queue (`serial`) |
 | State | `claims.json` (durable) | In-memory `runs` map only |
 
 The worker never talks to Linear and the dispatcher never talks to herdr.
@@ -27,6 +27,8 @@ Dispatcher to worker:
 | --- | --- |
 | `dispatch { job }` | Start a new run. |
 | `watch { job, run? }` | Re-attach after a dispatcher restart. With `run`: track that pane. Without: find the tab by label ("adopt"). |
+| `close { job, run }` | The run ended: stop tracking it and close its tab. |
+| `cleanup { job, run }` | Epic shipped or PR merged/closed: close the tab, remove the worktree and local branch unless they hold unpushed work. |
 
 Worker to dispatcher:
 
@@ -36,12 +38,14 @@ Worker to dispatcher:
 | `status { epicId, status, tail }` | Agent status changed. `tail` is the last pane lines (empty while `working`). |
 | `finished { epicId, reason, tail }` | `exited` (pane alive, Claude gone) or `vanished` (pane gone). Worker stops tracking. |
 | `failed { epicId, error, tail? }` | The run could not start or be adopted. |
+| `cleaned { epicId }` | Worktree and branch are gone (or already were). |
+| `kept { epicId, worktreePath, reason }` | Worktree kept: `uncommitted changes` or `N unpushed commits`. |
 
 ## In-process link (`src/main.ts`)
 
 - Parses env with zod (`main.ts:14-23`), loads config, reads the API key (`main.ts:26-42`).
 - Worker `send` parses with `workerMessageSchema` and calls `dispatcher.handle` (`main.ts:54`).
-- Dispatcher `send` parses with `dispatcherMessageSchema` and calls `worker.handle` in a `queueMicrotask` (`main.ts:62`), so the worker runs outside the dispatcher's call stack. The claim is already saved before `send` (`dispatcher.ts:323-325`).
+- Dispatcher `send` parses with `dispatcherMessageSchema` and calls `worker.handle` in a `queueMicrotask` (`main.ts:62`), so the worker runs outside the dispatcher's call stack. The claim is already saved before `send`.
 - Startup order: `worker.start()` (reconcile timer), `dispatcher.start()` (send `watch` for in-flight claims), one `tick()`, then `setInterval(tick, pollSeconds)` (`main.ts:73-76`).
 - Pause is a file: `$HERDR_PLUGIN_STATE_DIR/paused` (`main.ts:45, 64-67`).
 
@@ -61,14 +65,14 @@ Note: `Run.worktreePath` and `Job.repoPath` are paths on the worker's machine.
 | --- | --- |
 | `src/main.ts` | Entry point: env, config, key, wiring, timers. |
 | `src/protocol.ts` | zod schemas for `Job`, `Run`, and all messages. |
-| `src/dispatcher.ts` | Poll, reconcile claims, dispatch, flag stuck/failed, build the prompt and comments. |
+| `src/dispatcher.ts` | Poll, reconcile claims, dispatch, flag runs, decide cleanup, build the prompt and comments. |
 | `src/claims.ts` | `ClaimStore`: zod-validated `claims.json`, atomic save on every change. |
-| `src/worker.ts` | Start runs, adopt after restart, track panes via events plus timer. |
+| `src/worker.ts` | Start runs, adopt after restart, track panes via events plus timer, close tabs, clean up worktrees. |
 | `src/herdr.ts` | herdr CLI wrapper and raw-socket event subscription. |
-| `src/git.ts` | Worktree path layout, `prepareWorktree`, GitHub `owner/repo` from origin. |
+| `src/git.ts` | Worktree path layout, `prepareWorktree`, `unsavedWork`, `removeWorktree`, GitHub `owner/repo` from origin. |
 | `src/trust.ts` | Pre-accept Claude's folder trust in `~/.claude.json`. |
 | `src/linear.ts` | Linear GraphQL client. |
-| `src/github.ts` | `findPullRequest` via `gh pr list`. |
+| `src/github.ts` | `findPullRequest` via `gh pr list`: open, else merged, else closed. |
 | `src/config.ts` | Config schema, defaults, `~` expansion, `resolveRepo`. |
 | `src/atomic-write.ts` | Temp file + fsync + rename, mode 600. |
 | `src/fixtures/linear-server.ts` | Fake Linear GraphQL server for tests. |

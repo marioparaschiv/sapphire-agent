@@ -6,11 +6,9 @@ const execFileAsync = promisify(execFile);
 
 const pullRequestSchema = z.object({ url: z.string(), state: z.enum(['OPEN', 'CLOSED', 'MERGED']) });
 
-export type PullRequest = z.infer<typeof pullRequestSchema> & { state: 'OPEN' | 'MERGED' };
+export type PullRequest = z.infer<typeof pullRequestSchema>;
 
-const isLive = (pr: z.infer<typeof pullRequestSchema>): pr is PullRequest => pr.state !== 'CLOSED';
-
-// A closed, unmerged PR doesn't count: the work isn't waiting for review.
+// The open PR for the branch if there is one, else a merged one, else a closed one.
 export async function findPullRequest(githubRepo: string, branch: string): Promise<PullRequest | undefined> {
 	const { stdout } = await execFileAsync('gh', [
 		'pr',
@@ -24,7 +22,9 @@ export async function findPullRequest(githubRepo: string, branch: string): Promi
 		'--json',
 		'url,state',
 	]);
-	const live = z.array(pullRequestSchema).parse(JSON.parse(stdout)).filter(isLive);
+	const pullRequests = z.array(pullRequestSchema).parse(JSON.parse(stdout));
 
-	return live.find((pr) => pr.state === 'OPEN') ?? live[0];
+	return (
+		pullRequests.find((pr) => pr.state === 'OPEN') ?? pullRequests.find((pr) => pr.state === 'MERGED') ?? pullRequests[0]
+	);
 }

@@ -12,19 +12,20 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 
 Config is read once at startup. Restart the service after editing (see `operations.md`).
 
-## Fields (`config.ts:18-42`)
+## Fields (`config.ts:18-44`)
 
 The schema is strict: unknown keys fail startup with a zod error naming the field.
 
 | Field | Default | Notes |
 | --- | --- | --- |
 | `pollSeconds` | `30` | int, min 5. Linear poll interval, worker reconcile interval, event resubscribe delay. |
-| `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `stuck` claims. |
-| `stuckAfterSeconds` | `180` | int, min 30. Quiet time before flagging an agent with no PR. |
+| `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` claims. |
+| `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle` / `done` / `blocked`) time before flagging an agent with no PR as `awaitingInput`. Was `stuckAfterSeconds`. |
+| `startTimeoutSeconds` | `300` | int, min 60. Time from claim (or dispatcher start) for the worker to confirm Claude started before the claim becomes `error`. Covers queueing behind other starts, the fetch and herdr's 30 s start wait. |
 | `worktreesDirectory` | `~/.herdr/worktrees` | `~` expanded. |
 | `workspaceLabel` | `agents` | herdr workspace that holds the run tabs. |
 | `states.*` | see below | Exact Linear workflow state names. |
-| `labels.stuck` | `agent-stuck` | Label added on stuck or failed. |
+| `labels.stuck` | `agent-stuck` | Label added when a claim becomes `awaitingInput`, `stale` or `error`. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; group name is this minus trailing `:`. |
 | `teams` | required | At least one team. |
 

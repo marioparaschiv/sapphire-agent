@@ -11,9 +11,9 @@ A dispatcher (systemd user service, `node src/main.ts`) polls Linear every `poll
 1. Human moves an epic to **Ready For Agent**.
 2. Dispatcher claims it (`claims.json`, status `claimed`) and sends `dispatch` to the worker.
 3. Worker prepares the worktree, trusts it for Claude, opens a tab, starts Claude, replies `started`.
-4. Dispatcher moves the epic to **Implementing** (`dispatcher.ts:89-91`).
+4. Dispatcher moves the epic to **Implementing** (`dispatcher.ts:94-96`).
 5. Agent works through sub-issues, moves the epic to **In Review** when it starts `/sreview`, then runs `/pr`.
-6. Dispatcher sees a live PR via `gh`, moves the epic to **To Review**, removes `agent-stuck` if present, drops the claim (`dispatcher.ts:252-267`).
+6. Dispatcher sees an open or merged PR via `gh` and, once the agent stops working, moves the epic to **To Review**, removes `agent-stuck` if present, marks the claim `ended` and has the worker close the tab.
 
 If the agent stops without a PR, see `claims-and-lifecycle.md`.
 
@@ -24,7 +24,7 @@ Epic columns:
 | Column | Config key | Moved in by |
 | --- | --- | --- |
 | To Do | none | Human. The plugin never reads or sets it. |
-| Ready For Agent | `states.ready` | Human. Also where a failed epic stays until retried. |
+| Ready For Agent | `states.ready` | Human. Also where an epic whose run never started stays until retried. |
 | Implementing | `states.implementing` | Plugin, after the worker confirms Claude started. |
 | In Review | `states.inReview` | Agent, when it starts `/sreview` (the orchestrate skill's rule). |
 | To Review | `states.toReview` | Plugin, when a PR for the branch is open or merged. |
@@ -39,8 +39,8 @@ Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.m
 
 ## Things worth knowing up front
 
-- Every role in `states` must exist in a team's workflow, including `shipped`, which the plugin never sets. A team missing one is skipped (`dispatcher.ts:163-176`).
-- Epics without sub-issues are ignored with a one-time log line (`dispatcher.ts:296-299`).
+- Every role in `states` must exist in a team's workflow, including `shipped`, which the plugin never sets. A team missing one is skipped (`resolveTeams`).
+- Epics without sub-issues are ignored with a one-time log line (`dispatchReady`).
 - Only issues with no parent count as epics (`linear.ts:99`).
 - Order is Linear board order (`sortOrder` ascending); at most `maxInFlight` runs at once.
 - The dispatcher is the only component that talks to Linear; the worker only touches git, herdr and `~/.claude.json`.

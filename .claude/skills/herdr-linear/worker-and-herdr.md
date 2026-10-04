@@ -2,7 +2,7 @@
 
 How the worker starts a Claude Code run (worktree, trust, tab, `herdr agent start`) and how it watches the agent afterwards.
 
-## Dispatch sequence (`worker.ts:79-110`)
+## Dispatch sequence (`worker.ts:107-138`)
 
 1. `prepareWorktree(repoPath, branch, worktreesDirectory)`.
 2. `githubRepo(repoPath)`: `owner/repo` from `origin` (must be GitHub).
@@ -11,9 +11,9 @@ How the worker starts a Claude Code run (worktree, trust, tab, `herdr agent star
 5. `herdr agent start`, then confirm with `herdr agent get`.
 6. Send `started { run }` and begin tracking.
 
-Any throw becomes a `failed` message (`worker.ts:69-76`). Errors after the tab exists carry the last 40 pane lines.
+Any throw becomes a `failed` message (`startRun`). Errors after the tab exists carry the last 40 pane lines.
 
-Starts (dispatch and adopt) run one at a time through `serialStart`, so parallel epics never race on `~/.claude.json` or on creating the `agents` workspace. Watching runs is fully parallel.
+Starts (dispatch and adopt) and cleanups run one at a time through `serial`, so parallel epics never race on `~/.claude.json`, on creating the `agents` workspace, or on git's worktree locks. Watching runs is fully parallel.
 
 ## Worktrees (`src/git.ts`)
 
@@ -24,6 +24,13 @@ Starts (dispatch and adopt) run one at a time through `serialStart`, so parallel
 - Only on origin: `worktree add --track -b <branch> <path> origin/<branch>`.
 - New: `worktree add --no-track -b <branch> <path> <origin default>`, so a plain `git push` never targets the default branch. Default comes from `origin/HEAD`, set with `remote set-head --auto` if missing.
 
+Cleanup (`unsavedWork`, `removeWorktree`):
+
+- Kept if `git status --porcelain` is non-empty (untracked files count, ignored ones do not): `uncommitted changes`.
+- Kept if the worktree's `HEAD` or the local branch has commits that no `origin/*` ref contains: `N unpushed commits`. A branch never pushed is unpushed once it has commits beyond the default branch. No fetch first: `git push` already updates the remote-tracking ref.
+- Otherwise `git worktree remove <path>` (no `--force`), `git worktree prune` (for a directory deleted by hand), `git branch -D <branch>`. Each step is skipped if already done, so a second cleanup is a no-op.
+- A later run then starts again from `origin/<branch>` through `prepareWorktree`.
+
 Done in git directly rather than `herdr worktree create`, which creates and opens its own workspace; this code needs a tab in the shared `agents` workspace plus the reuse and no-track rules above.
 
 ## Trust pre-accept (`src/trust.ts`)
@@ -33,22 +40,28 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 - Optimistic: re-reads before writing and retries up to 5 times if Claude changed the file meanwhile, then throws.
 - Unparseable JSON throws instead of overwriting.
 
-## Tabs (`worker.ts:112-126`, `herdr.ts:84-109`)
+## Tabs (`worker.ts:140-154`, `herdr.ts:84-109`)
 
 - Looks for a workspace labelled `workspaceLabel` (default `agents`).
 - Found: `herdr tab create --workspace <id> --label <tabLabel> --cwd <worktree> --env HERDR_BLANK=1 --no-focus`.
 - Missing: `herdr workspace create --label agents ...` with the same flags, then `tab rename` to the tab label.
 - `HERDR_BLANK=1` makes the pane shell skip its automatic Claude launch, so `agent start` gets a plain prompt.
-- Tab label: `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>` (`dispatcher.ts:333`). Adopt finds tabs by this exact label.
+- Tab label: `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>` (`dispatcher.ts:434`). Adopt finds tabs by this exact label.
 
-## `herdr agent start` quirks (`herdr.ts:144-148`, `worker.ts:90-104`)
+## Closing tabs (`closeRun`)
+
+- On `close` and at the start of `cleanup`: stop tracking the run, `herdr tab get <tabId>`, and `herdr tab close <tabId>` only if the tab's label is still the job's `tabLabel`. After a herdr restart the same tab id can belong to another tab.
+- `tab_not_found` means already closed; not an error.
+- Errors are logged (`closing <ID>'s tab failed: ...`); a `cleanup` closes the tab again later.
+
+## `herdr agent start` quirks (`herdr.ts:160-164`, `worker.ts:118-132`)
 
 Command: `herdr agent start <identifier lowercased> --kind claude --pane <pane> --timeout 30000 -- <prompt>`.
 
 - It returns only when the agent is ready for input, which with an initial prompt means after that prompt's whole turn. So it nearly always times out.
 - A `HerdrError` with code `timeout` is treated as "still starting". Any other error fails the run.
 - Then `herdr agent get <pane>` must show `agent: claude` with status other than `blocked`; otherwise `failed` with the pane tail.
-- The prompt must be one line. herdr refuses to pass newlines to the shell (`dispatcher.ts:335`).
+- The prompt must be one line. herdr refuses to pass newlines to the shell (`dispatcher.ts:426`).
 
 ## CLI wrapper (`src/herdr.ts`)
 
@@ -57,7 +70,7 @@ Command: `herdr agent start <identifier lowercased> --kind claude --pane <pane> 
 - `pane_not_found` / `agent_not_found` map to `undefined` in `pane()` and `agent()`.
 - `readPane` uses `--source recent-unwrapped` and squeezes blank-line runs.
 
-## Watching a run (`worker.ts:41-48, 152-225`)
+## Watching a run (`worker.ts:44-51, 219-291`)
 
 - Events: raw socket at `$HERDR_SOCKET_PATH`, `events.subscribe` for `pane.agent_status_changed`, `pane.agent_detected`, `pane.exited`, `pane.closed`, each filtered by `pane_id` (subscriptions need it).
 - Events only trigger a reconcile; their payload is ignored.
