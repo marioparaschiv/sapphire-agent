@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Context, Effect, Layer, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
-import { readBody, serveFixture } from './fixture-server.ts';
+import { serveFixture } from './fixture-server.ts';
 import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
@@ -152,6 +152,16 @@ const writeFailure = (status: number, retryAfterSeconds?: number, code?: string)
 });
 
 class NotFound extends Error {}
+
+const readBody = async (request: IncomingMessage) => {
+	const chunks: Array<Buffer> = [];
+
+	for await (const chunk of request) {
+		chunks.push(Buffer.from(chunk));
+	}
+
+	return Buffer.concat(chunks).toString('utf8');
+};
 
 const make = Effect.gen(function* () {
 	const answers = yield* SubscriptionRef.make(0);

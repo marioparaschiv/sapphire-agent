@@ -88,10 +88,10 @@ export class GitHub extends Context.Service<
 			const encoder = new TextEncoder();
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
-			// The user's account is gh's default login. `env` switches it to a GitHub App installation token.
-			const run = (args: ReadonlyArray<string>, input: string, env?: Record<string, string>) => {
+			// The user's account is gh's default login. `token` switches it to a GitHub App installation token.
+			const run = (args: ReadonlyArray<string>, input: string, token?: Redacted.Redacted<string>) => {
 				const command = `gh ${args.join(' ')}`;
-				const options = env ? { env, extendEnv: true } : {};
+				const options = token ? { env: { GH_TOKEN: Redacted.value(token) }, extendEnv: true } : {};
 
 				return Effect.scoped(
 					Effect.gen(function* () {
@@ -107,8 +107,8 @@ export class GitHub extends Context.Service<
 				).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))));
 			};
 
-			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', env?: Record<string, string>) =>
-				run(args, input, env).pipe(
+			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', token?: Redacted.Redacted<string>) =>
+				run(args, input, token).pipe(
 					Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(schema))),
 					Effect.catchTag('SchemaError', (error) => Effect.fail(new Permanent({ message: `gh ${args.join(' ')}: ${error.message}`, cause: error }))),
 				);
@@ -117,8 +117,8 @@ export class GitHub extends Context.Service<
 			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>) =>
 				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables })).pipe(Effect.map(({ data }) => data));
 
-			const post = (endpoint: string, body: Record<string, unknown>, env?: Record<string, string>) =>
-				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), env).pipe(Effect.asVoid);
+			const post = (endpoint: string, body: Record<string, unknown>, token?: Redacted.Redacted<string>) =>
+				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), token).pipe(Effect.asVoid);
 
 			const ownerAndName = (repo: string) => {
 				const [owner, name] = repo.split('/');
@@ -240,7 +240,7 @@ export class GitHub extends Context.Service<
 
 				postAsBot: (repo, number, { marker, body }) =>
 					Effect.flatMap(app.installationToken(repo), (token) =>
-						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, { GH_TOKEN: Redacted.value(token) })),
+						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, token)),
 					),
 			});
 		}),

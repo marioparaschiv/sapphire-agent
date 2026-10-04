@@ -1,15 +1,5 @@
-import { createServer, type IncomingMessage, type RequestListener } from 'node:http';
+import { createServer, type RequestListener } from 'node:http';
 import { Effect } from 'effect';
-
-export const readBody = async (request: IncomingMessage) => {
-	const chunks: Array<Buffer> = [];
-
-	for await (const chunk of request) {
-		chunks.push(Buffer.from(chunk));
-	}
-
-	return Buffer.concat(chunks).toString('utf8');
-};
 
 // A node:http server on 127.0.0.1 and a free port while the scope is open. Returns its base URL, e.g.
 // `http://127.0.0.1:41234`.
