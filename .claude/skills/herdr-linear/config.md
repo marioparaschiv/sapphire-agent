@@ -12,7 +12,7 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 
 Config is read once at startup. Restart the service after editing (see `operations.md`).
 
-## Fields (`config.ts:18-50`)
+## Fields (`config.ts:18-64`)
 
 The schema is strict: unknown keys fail startup with a zod error naming the field.
 

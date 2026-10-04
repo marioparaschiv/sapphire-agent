@@ -130,7 +130,7 @@ A re-dispatch reuses the existing worktree if it is on the same branch (see `wor
 - `cleanup` is re-sent every tick for `kept` claims, so pushing or discarding the work lets the next tick remove it. A worktree or branch already gone counts as cleaned.
 - An `ended` claim whose epic stops existing in Linear is released without cleanup.
 
-## Restart re-attach (`dispatcher.ts:39-47`, `worker.ts`)
+## Restart re-attach (`dispatcher.ts:44-53`, `worker.ts`)
 
 On start the dispatcher sends `watch` for every in-flight claim (`claimed`, `running`, `awaitingInput`, `stale`) with a job, without `run` for `claimed` ones:
 

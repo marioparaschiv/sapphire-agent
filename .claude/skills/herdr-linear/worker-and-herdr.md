@@ -2,7 +2,7 @@
 
 How the worker starts a Claude Code run (worktree, trust, tab, `herdr agent start`) and how it watches the agent afterwards.
 
-## Dispatch sequence (`worker.ts:107-138`)
+## Dispatch sequence (`worker.ts:118-157`)
 
 1. `prepareWorktree(repoPath, branch, worktreesDirectory)`. Follow-up runs (`job.threadIds`) then run `git pull --ff-only origin <branch>` (`pullBranch`), so they start from what is on the PR.
 2. `githubRepo(repoPath)`: `owner/repo` from `origin` (must be GitHub). Delete a leftover result file from an earlier run.
@@ -40,13 +40,13 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 - Optimistic: re-reads before writing and retries up to 5 times if Claude changed the file meanwhile, then throws.
 - Unparseable JSON throws instead of overwriting.
 
-## Tabs (`worker.ts:140-154`, `herdr.ts:84-109`)
+## Tabs (`worker.ts:159-173`, `herdr.ts:84-109`)
 
 - Looks for a workspace labelled `workspaceLabel` (default `agents`).
 - Found: `herdr tab create --workspace <id> --label <tabLabel> --cwd <worktree> --env HERDR_BLANK=1 --no-focus`.
 - Missing: `herdr workspace create --label agents ...` with the same flags, then `tab rename` to the tab label.
 - `HERDR_BLANK=1` makes the pane shell skip its automatic Claude launch, so `agent start` gets a plain prompt.
-- Tab label: `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>` (`dispatcher.ts:434`). Adopt finds tabs by this exact label.
+- Tab label: `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>` (`dispatcher.ts:629`). Adopt finds tabs by this exact label.
 
 ## Closing tabs (`closeRun`)
 
@@ -54,14 +54,14 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 - `tab_not_found` means already closed; not an error.
 - Errors are logged (`closing <ID>'s tab failed: ...`); a `cleanup` closes the tab again later.
 
-## `herdr agent start` quirks (`herdr.ts:160-164`, `worker.ts:118-132`)
+## `herdr agent start` quirks (`herdr.ts:160-164`, `worker.ts:137-151`)
 
 Command: `herdr agent start <identifier lowercased> --kind claude --pane <pane> --timeout 30000 -- <prompt>`.
 
 - It returns only when the agent is ready for input, which with an initial prompt means after that prompt's whole turn. So it nearly always times out.
 - A `HerdrError` with code `timeout` is treated as "still starting". Any other error fails the run.
 - Then `herdr agent get <pane>` must show `agent: claude` with status other than `blocked`; otherwise `failed` with the pane tail.
-- The prompt must be one line. herdr refuses to pass newlines to the shell (`dispatcher.ts:426`).
+- The prompt must be one line. herdr refuses to pass newlines to the shell (`dispatcher.ts:631-635`).
 
 ## CLI wrapper (`src/herdr.ts`)
 
@@ -70,7 +70,7 @@ Command: `herdr agent start <identifier lowercased> --kind claude --pane <pane> 
 - `pane_not_found` / `agent_not_found` map to `undefined` in `pane()` and `agent()`.
 - `readPane` uses `--source recent-unwrapped` and squeezes blank-line runs.
 
-## Watching a run (`worker.ts:44-51, 219-291`)
+## Watching a run (`worker.ts:46-52, 246-342`)
 
 - Events: raw socket at `$HERDR_SOCKET_PATH`, `events.subscribe` for `pane.agent_status_changed`, `pane.agent_detected`, `pane.exited`, `pane.closed`, each filtered by `pane_id` (subscriptions need it).
 - Events only trigger a reconcile; their payload is ignored.

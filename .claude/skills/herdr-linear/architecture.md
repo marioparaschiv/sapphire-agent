@@ -8,7 +8,7 @@ How the dispatcher and worker are split, the messages between them, how `main.ts
 | --- | --- | --- |
 | Talks to | Linear, `gh` (reads and every GitHub write), `claims.json`, pause file | git, herdr CLI and socket, `~/.claude.json`, the run's result file |
 | Owns | Claims, Linear state moves, comments, labels, PR checks, posting results to PRs, stale/cap timing | Worktrees, tabs, starting Claude, watching agent status and pane tail, reading the result file, nudging, typing replies, closing tabs, removing worktrees |
-| Concurrency | Every tick and every worker message runs through one promise queue (`serial`, `dispatcher.ts:159-165`) | Reconciles of tracked runs run one at a time; starts and cleanups share another queue (`serial`) |
+| Concurrency | Every tick and every worker message runs through one promise queue (`serial`, `dispatcher.ts:211-217`) | Reconciles of tracked runs run one at a time; starts and cleanups share another queue (`serial`) |
 | State | `claims.json` (durable) | In-memory `runs` map only |
 
 The worker never talks to Linear and the dispatcher never talks to herdr.

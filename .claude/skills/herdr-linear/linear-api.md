@@ -6,7 +6,7 @@ The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states a
 
 - Endpoint `https://api.linear.app/graphql`, overridable via the `endpoint` option (tests point it at the fake server).
 - Header `authorization: <raw API key>` (personal key, no `Bearer`).
-- Any GraphQL `errors`, non-2xx, or unreadable body throws `LinearError` with the HTTP status and messages (`linear.ts:58-77`).
+- Any GraphQL `errors`, non-2xx, or unreadable body throws `LinearError` with the HTTP status and messages (`linear.ts:71-90`).
 - Every response is parsed with zod.
 
 ## Operations
@@ -22,7 +22,7 @@ The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states a
 | `removeLabel(id, labelId)` | `issueRemoveLabel` | Remove `agent-stuck` when the PR is up. |
 | `labelId` (private) | `query Labels`, `issueLabelCreate` | Find or create the label ID. |
 
-`poll` details (`linear.ts:92-108`):
+`poll` details (`linear.ts:104-131`):
 
 - `ready`: `issues(first: 50)` with state in the ready state IDs and `parent: { null: true }`.
 - `claimed`: `issues(first: 250)` with `id in claimedIds`. `poll` throws when there are more than 250 claims, because a truncated page would release claims whose epics still exist.
@@ -30,7 +30,7 @@ The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states a
 - `replies`: `comments(first: 250)` with `parent.id in questionIds`: id, body, createdAt, parent id, reaction emojis. An empty list matches nothing.
 - No pagination: more than 50 ready epics are cut off.
 
-## State resolution (`dispatcher.ts:174-210`)
+## State resolution (`dispatcher.ts:226-262`)
 
 - Each tick: `teams(Object.keys(config.teams))`, matched by exact team name.
 - Each role in `config.states` is matched by exact state name in that team.
@@ -40,13 +40,13 @@ The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states a
 
 ## Labels
 
-`agent-stuck` (`labels.stuck`), via `labelId` (`linear.ts:152-189`):
+`agent-stuck` (`labels.stuck`), via `labelId` (`linear.ts:189-225`):
 
 - Prefers a workspace label (no team) of that name, then the team's label.
 - Creates a team label if neither exists.
 - Cached per `teamId/name` for the process lifetime.
 
-Repo labels (`resolveRepo`, `config.ts:67-104`), read from the epic's labels:
+Repo labels (`resolveRepo`, `config.ts:87-124`), read from the epic's labels:
 
 - `repo:<name>` (prefix `labels.repoPrefix`), or a label `<name>` inside a label group named `repo` (prefix minus trailing `:`; Linear shows it as `repo/<name>`).
 - None: the team's `repo`. One: `<labelReposDirectory>/<name>`.
@@ -62,7 +62,7 @@ PR detection:
 - Prefers an `OPEN` PR, else a `MERGED` one, else a `CLOSED` one. A `CLOSED` PR does not hand a run over; it only triggers worktree cleanup.
 - Called when a run with a result file finishes, and each tick for `ended` / `kept` claims not in Shipped.
 - Needs `gh` on the service `PATH` and authenticated for the service user. A `gh` failure aborts the tick.
-- `owner/repo` comes from the repo's `origin` URL (`git.ts:23-35`), stored in `run.githubRepo`.
+- `owner/repo` comes from the repo's `origin` URL (`git.ts:25-37`), stored in `run.githubRepo`.
 
 Writes (dispatcher only; the agent never posts to GitHub):
 
