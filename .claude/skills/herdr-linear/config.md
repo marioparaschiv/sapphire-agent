@@ -28,7 +28,7 @@ The schema is strict: unknown keys fail startup with a zod error naming the fiel
 | `labels.repoPrefix` | `repo:` | Repo label prefix; group name is this minus trailing `:`. |
 | `teams` | required | At least one team. |
 
-`states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped", `subIssueDone` "Done". All six must exist in a team or it is skipped.
+`states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
 ## Teams
 

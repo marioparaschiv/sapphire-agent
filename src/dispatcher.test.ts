@@ -83,7 +83,7 @@ test('records the claim on disk before dispatching, and moves the epic only afte
 	assert.equal(message.job.repoPath, '/srv/unbound');
 	assert.equal(message.job.branch, 'mario/unb-12-plugin-settings-sync');
 	assert.equal(message.job.tabLabel, 'UNB-12 Plugin settings sync');
-	assert.match(message.job.prompt, /^\/orchestrate the sub-issues of Linear epic UNB-12 \(https:\/\/linear\.app\/.+\)/);
+	assert.match(message.job.prompt, /^\/orchestrate the sub-issues of Linear epic UNB-12 \(https:\/\/linear\.app\/.+\) autonomously,/);
 	assert.doesNotMatch(message.job.prompt, /\n/);
 	assert.equal(h.linear.stateName(epic.id), 'Ready For Agent');
 	assert.deepEqual(h.linear.mutations, []);

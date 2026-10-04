@@ -318,7 +318,7 @@ export class Dispatcher {
 				continue;
 			}
 
-			const job = buildJob(config, epic, repo.path);
+			const job = buildJob(epic, repo.path);
 
 			await claims.put({ ...claim, job });
 			inFlight += 1;
@@ -328,18 +328,11 @@ export class Dispatcher {
 	}
 }
 
-export function buildJob(config: Config, epic: Epic, repoPath: string): Job {
-	const { states } = config;
+export function buildJob(epic: Epic, repoPath: string): Job {
 	const shortTitle = epic.title.length > 40 ? `${epic.title.slice(0, 39).trimEnd()}…` : epic.title;
 
-	// herdr refuses to pass newlines to the shell, so the prompt is one line.
-	const prompt = [
-		`/orchestrate the sub-issues of Linear epic ${epic.identifier} (${epic.url}), in the worktree you are in.`,
-		`Move each sub-issue to "${states.implementing}" when you start it and to "${states.subIssueDone}" when its slice lands, and move the epic to "${states.inReview}" when you start /sreview.`,
-		`Commit your work as you go; this overrides /orchestrate's "don't commit unless asked".`,
-		'When everything passes and /sreview is done, run /pr against the default branch.',
-		`If you get blocked on a decision only I can make, comment the question on epic ${epic.identifier} and stop.`,
-	].join(' ');
+	// The orchestrate skill owns the workflow (Linear moves, commits, /pr). herdr refuses newlines in the prompt.
+	const prompt = `/orchestrate the sub-issues of Linear epic ${epic.identifier} (${epic.url}) autonomously, in the worktree you are in.`;
 
 	return {
 		epicId: epic.id,

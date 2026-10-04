@@ -26,18 +26,20 @@ Epic columns:
 | To Do | none | Human. The plugin never reads or sets it. |
 | Ready For Agent | `states.ready` | Human. Also where a failed epic stays until retried. |
 | Implementing | `states.implementing` | Plugin, after the worker confirms Claude started. |
-| In Review | `states.inReview` | Agent, when it starts `/sreview` (told so in the prompt). |
+| In Review | `states.inReview` | Agent, when it starts `/sreview` (the orchestrate skill's rule). |
 | To Review | `states.toReview` | Plugin, when a PR for the branch is open or merged. |
 | Shipped | `states.shipped` | Not this code. Linear's GitHub integration on merge. |
 
-Sub-issue columns (all moved by the agent, as instructed in the prompt, `dispatcher.ts:336-342`):
+Linear's GitHub automation (team settings) must be: PR opened → To Review, merged → Shipped, branch/start → no action. A "start" rule moving to In Progress would pull the epic back out of To Review.
+
+Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.md`):
 
 - **Implementing** when it starts a sub-issue.
-- **Done** (`states.subIssueDone`) when that slice lands.
+- **Done** when that slice is verified. The plugin does not check this state exists; the agent fails to move sub-issues if it doesn't.
 
 ## Things worth knowing up front
 
-- Every role in `states` must exist in a team's workflow, including `shipped` and `subIssueDone` which the plugin never sets. A team missing one is skipped (`dispatcher.ts:163-176`).
+- Every role in `states` must exist in a team's workflow, including `shipped`, which the plugin never sets. A team missing one is skipped (`dispatcher.ts:163-176`).
 - Epics without sub-issues are ignored with a one-time log line (`dispatcher.ts:296-299`).
 - Only issues with no parent count as epics (`linear.ts:99`).
 - Order is Linear board order (`sortOrder` ascending); at most `maxInFlight` runs at once.
@@ -45,12 +47,13 @@ Sub-issue columns (all moved by the agent, as instructed in the prompt, `dispatc
 
 ## The prompt the agent gets
 
-Built in `buildJob` (`dispatcher.ts:331-352`). It tells Claude to:
+Built in `buildJob` (`src/dispatcher.ts`), one line:
 
-- `/orchestrate` the epic's sub-issues in the current worktree.
-- Move sub-issues and the epic as in the table above.
-- Commit as it goes (overrides `/orchestrate`'s "don't commit").
-- Run `/pr` against the default branch after `/sreview`.
-- Comment a question on the epic and stop if blocked on a human decision.
+`/orchestrate the sub-issues of Linear epic <ID> (<url>) autonomously, in the worktree you are in.`
 
-Changing the column flow means editing this prompt as well as the dispatcher.
+The workflow lives in the orchestrate skill (`~/.claude/skills/orchestrate/SKILL.md`), sections **Linear epics** and **Autonomous runs**:
+
+- Move sub-issues to Implementing / Done and the epic to In Review at `/sreview`.
+- `autonomously` means: commit each verified slice, run `/pr` after `/sreview`, comment a question on the epic and stop if blocked.
+
+Changing the column names means editing that skill as well as `states` in the config.

@@ -29,7 +29,6 @@ export const configSchema = z.strictObject({
 			inReview: z.string().min(1).default('In Review'),
 			toReview: z.string().min(1).default('To Review'),
 			shipped: z.string().min(1).default('Shipped'),
-			subIssueDone: z.string().min(1).default('Done'),
 		})
 		.prefault({}),
 	labels: z
