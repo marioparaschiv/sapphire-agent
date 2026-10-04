@@ -33,6 +33,7 @@ export class Worker {
 	private readonly runs = new Map<string, Tracked>();
 	private timer: NodeJS.Timeout | undefined;
 	private reconciling = Promise.resolve();
+	private starting = Promise.resolve();
 
 	constructor(options: WorkerOptions) {
 		this.options = options;
@@ -59,12 +60,10 @@ export class Worker {
 		const { job } = message;
 
 		try {
-			if (message.type === 'dispatch') {
-				await this.dispatch(job);
-			} else if (message.run) {
+			if (message.type === 'watch' && message.run) {
 				this.track(job.epicId, message.run);
 			} else {
-				await this.adopt(job);
+				await this.serialStart(() => (message.type === 'dispatch' ? this.dispatch(job) : this.adopt(job)));
 			}
 		} catch (error) {
 			this.options.send({
@@ -74,6 +73,14 @@ export class Worker {
 				tail: error instanceof StartError ? error.tail : undefined,
 			});
 		}
+	}
+
+	// Starts run one at a time: concurrent ones would race on ~/.claude.json and on creating the workspace.
+	private serialStart(start: () => Promise<void>) {
+		const result = this.starting.then(start);
+		this.starting = result.catch(() => {});
+
+		return result;
 	}
 
 	private async dispatch(job: Job) {

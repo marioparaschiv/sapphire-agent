@@ -13,6 +13,8 @@ How the worker starts a Claude Code run (worktree, trust, tab, `herdr agent star
 
 Any throw becomes a `failed` message (`worker.ts:69-76`). Errors after the tab exists carry the last 40 pane lines.
 
+Starts (dispatch and adopt) run one at a time through `serialStart`, so parallel epics never race on `~/.claude.json` or on creating the `agents` workspace. Watching runs is fully parallel.
+
 ## Worktrees (`src/git.ts`)
 
 - Path: `<worktreesDirectory>/<basename(repoPath)>/<branch with [^A-Za-z0-9._-]+ replaced by ->`, e.g. `~/.herdr/worktrees/unbound/mario-unb-12-settings-sync`. Same layout as herdr's own worktrees.

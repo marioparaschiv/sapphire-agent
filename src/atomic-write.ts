@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { open, rename } from 'node:fs/promises';
 
 // Readers see either the old or the new file, never a partial write.
 export async function writeFileAtomic(path: string, data: string, mode = 0o600) {
-	const tempPath = `${path}.${process.pid}.tmp`;
+	const tempPath = `${path}.${randomUUID()}.tmp`;
 	const file = await open(tempPath, 'w', mode);
 
 	try {
