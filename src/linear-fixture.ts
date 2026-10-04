@@ -83,6 +83,8 @@ export type LinearFixtureShape = {
 	// Completes once the fixture's Linear layer has got n answers (a response or a transport error) in total. A retry
 	// delay that follows an answer is on the clock by then, so TestClock.adjust can be called safely.
 	readonly awaitAnswers: (n: number) => Effect.Effect<void>;
+	// Completes once a write armed by crashAfterWrite was applied and the Linear layer saw its connection drop.
+	readonly awaitCrash: Effect.Effect<void>;
 };
 
 const testTeamId = 'team-test';
@@ -173,6 +175,7 @@ const make = Effect.gen(function* () {
 	const writeFailures = new Map<number, WriteFailure>();
 	const writeCrashes = new Set<number>();
 	let writes = 0;
+	let crashes = 0;
 
 	const find = <A>(items: Iterable<A>, predicate: (item: A) => boolean, what: string) => {
 		for (const item of items) {
@@ -402,6 +405,7 @@ const make = Effect.gen(function* () {
 		}
 
 		if (result === 'crash') {
+			crashes += 1;
 			request.socket.destroy();
 
 			return;
@@ -502,6 +506,10 @@ const make = Effect.gen(function* () {
 				Stream.takeUntil((count) => count >= n),
 				Stream.runDrain,
 			),
+		awaitCrash: SubscriptionRef.changes(answers).pipe(
+			Stream.takeUntil(() => crashes > 0),
+			Stream.runDrain,
+		),
 	};
 
 	const client = (yield* HttpClient.HttpClient).pipe(HttpClient.transformResponse(Effect.onExit(() => SubscriptionRef.update(answers, (count) => count + 1))));

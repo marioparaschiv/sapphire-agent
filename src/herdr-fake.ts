@@ -75,6 +75,8 @@ export type FakeHerdrControls = {
 	readonly failWrite: (nth: number, error: CallError) => void;
 	// Counted from this call: the nth write after it is applied, then fails, as if the process died before recording it.
 	readonly crashAfterWrite: (nth: number, error: CallError) => void;
+	// Writes received so far, failed ones included.
+	readonly writes: () => number;
 };
 
 type Signal = { readonly _tag: 'Event'; readonly event: HerdrEvent } | { readonly _tag: 'Disconnect' };
@@ -303,6 +305,7 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 		crashAfterWrite: (nth, error) => {
 			failures.set(writes + nth, { error, afterApplying: true });
 		},
+		writes: () => writes,
 	};
 
 	return { herdr, controls };

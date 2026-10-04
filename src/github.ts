@@ -1,165 +1,276 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { z } from 'zod';
-import type { ResultFile } from './protocol.ts';
+import { Context, Effect, Layer, Option, Schema, Stream } from 'effect';
+import { ChildProcess, ChildProcessSpawner } from 'effect/process';
+import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
+import { hasMarker, type MarkedComment, type Marker } from './markers.ts';
+import type { ResultFile } from './result-file.ts';
 
-const execFileAsync = promisify(execFile);
+export const PullRequestState = Schema.Literals(['OPEN', 'CLOSED', 'MERGED']);
 
-const pullRequestSchema = z.object({
-	number: z.number().int(),
-	url: z.string(),
-	state: z.enum(['OPEN', 'CLOSED', 'MERGED']),
-	author: z.object({ login: z.string() }),
+export type PullRequestState = typeof PullRequestState.Type;
+
+export const PullRequest = Schema.Struct({
+	number: Schema.Int,
+	url: Schema.String,
+	state: PullRequestState,
+	author: Schema.Struct({ login: Schema.String }),
 });
 
-export type PullRequest = z.infer<typeof pullRequestSchema>;
+export type PullRequest = typeof PullRequest.Type;
 
-// Runs `gh` with the arguments and, when given, `input` on stdin; resolves with stdout.
-export type Gh = (args: string[], input?: string) => Promise<string>;
+export const ReviewThread = Schema.Struct({
+	id: Schema.String,
+	isResolved: Schema.Boolean,
+	comments: Schema.Struct({
+		nodes: Schema.Array(Schema.Struct({ body: Schema.String, pullRequestReview: Schema.NullOr(Schema.Struct({ body: Schema.String })) })),
+	}),
+});
 
-const runGh: Gh = async (args, input) => {
-	const pending = execFileAsync('gh', args, { maxBuffer: 16 * 1024 * 1024 });
-	pending.child.stdin?.end(input ?? '');
+export type ReviewThread = typeof ReviewThread.Type;
 
-	return (await pending).stdout;
-};
+// A page of a GitHub connection, enough to look for a marker.
+export const Bodies = Schema.Struct({ totalCount: Schema.Int, nodes: Schema.Array(Schema.Struct({ body: Schema.String })) });
+
+export type Bodies = typeof Bodies.Type;
+
+const PullRequestThreads = Schema.Struct({
+	url: Schema.String,
+	reviewThreads: Schema.Struct({ totalCount: Schema.Int, nodes: Schema.Array(ReviewThread) }),
+});
+
+export type PullRequestThreads = typeof PullRequestThreads.Type;
+
+export type PendingThreads = { readonly url: string; readonly threadIds: ReadonlyArray<string> };
+
+export type Flags = ResultFile['flags'];
 
 // Linear shows a GitHub comment carrying this block as written by Claude. The agent and the user share one GitHub
 // account, so it is the only way to tell the agent's comments from the user's.
-export const ON_BEHALF_OF_CLAUDE =
-	'<!-- linear:extension {"version":1,"plugins":[{"plugin":"onBehalfOf","agent":"claude"}]} -->';
+export const ON_BEHALF_OF_CLAUDE = '<!-- linear:extension {"version":1,"plugins":[{"plugin":"onBehalfOf","agent":"claude"}]} -->';
 
-const asClaude = (body: string) => `${body}\n\n${ON_BEHALF_OF_CLAUDE}`;
+export const asClaude = (body: string) => `${body}\n\n${ON_BEHALF_OF_CLAUDE}`;
 
 const isClaude = (body: string) => body.includes(ON_BEHALF_OF_CLAUDE);
 
 const mentionsAgent = (body: string) => /(^|\s)\/agent\b/.test(body);
 
 // GitHub caps a connection page at 100 nodes.
-const MAX_THREADS = 100;
-
-const reviewThreadSchema = z.object({
-	id: z.string(),
-	isResolved: z.boolean(),
-	comments: z.object({
-		nodes: z.array(z.object({ body: z.string(), pullRequestReview: z.object({ body: z.string() }).nullable() })),
-	}),
-});
-
-type ReviewThread = z.infer<typeof reviewThreadSchema>;
+export const maxNodes = 100;
 
 // Unresolved, and the user's latest comment asks for the agent, in its body or in the body of the review it was
 // submitted with. Comments carrying the onBehalfOf block are the agent's own and never count.
-function isPending(thread: ReviewThread) {
+export const isPending = (thread: ReviewThread) => {
 	const latest = thread.comments.nodes.findLast((comment) => !isClaude(comment.body));
 
 	return !thread.isResolved && !!latest && (mentionsAgent(latest.body) || mentionsAgent(latest.pullRequestReview?.body ?? ''));
-}
+};
 
-// Every GitHub read and write the dispatcher makes, through the `gh` CLI.
-export class GitHub {
-	private readonly gh: Gh;
+// The open PR for the branch if there is one, else a merged one, else a closed one.
+export const preferredPullRequest = (pullRequests: ReadonlyArray<PullRequest>) =>
+	Option.fromUndefinedOr(pullRequests.find((pr) => pr.state === 'OPEN') ?? pullRequests.find((pr) => pr.state === 'MERGED') ?? pullRequests[0]);
 
-	constructor(gh: Gh = runGh) {
-		this.gh = gh;
+export const pendingOf = (pullRequest: PullRequestThreads): Effect.Effect<PendingThreads, Permanent> => {
+	const { url, reviewThreads } = pullRequest;
+
+	// A truncated page could hide a pending thread.
+	if (reviewThreads.totalCount > maxNodes) {
+		return Effect.fail(new Permanent({ message: `${url} has ${reviewThreads.totalCount} review threads, over the ${maxNodes} one query reads` }));
 	}
 
-	// The open PR for the branch if there is one, else a merged one, else a closed one.
-	async findPullRequest(githubRepo: string, branch: string): Promise<PullRequest | undefined> {
-		const stdout = await this.gh(['pr', 'list', '--repo', githubRepo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']);
-		const pullRequests = z.array(pullRequestSchema).parse(JSON.parse(stdout));
+	return Effect.succeed({ url, threadIds: reviewThreads.nodes.filter(isPending).map((thread) => thread.id) });
+};
 
-		return (
-			pullRequests.find((pr) => pr.state === 'OPEN') ?? pullRequests.find((pr) => pr.state === 'MERGED') ?? pullRequests[0]
-		);
+// `bodies` holds the latest nodes; past the cap, a missing marker could be on an earlier page.
+export const containsMarker = (bodies: Bodies, marker: Marker, where: string): Effect.Effect<boolean, Permanent> => {
+	if (bodies.nodes.some(({ body }) => hasMarker(body, marker))) {
+		return Effect.succeed(true);
 	}
 
-	async comment(githubRepo: string, number: number, body: string) {
-		await this.post(`repos/${githubRepo}/issues/${number}/comments`, { body: asClaude(body) });
+	if (bodies.totalCount > maxNodes) {
+		return Effect.fail(new Permanent({ message: `${where} has ${bodies.totalCount} entries, over the ${maxNodes} one query reads` }));
 	}
 
-	// One review holding every flag as an inline comment on the PR's new code.
-	async review(githubRepo: string, number: number, flags: ResultFile['flags']) {
-		await this.post(`repos/${githubRepo}/pulls/${number}/reviews`, {
-			event: 'COMMENT',
-			body: asClaude('Self-review findings I did not fix in this PR.'),
-			comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body: asClaude(body) })),
-		});
-	}
+	return Effect.succeed(false);
+};
 
-	// The branch's open PR and its pending review threads (see isPending), or undefined without an open PR.
-	async pendingThreads(githubRepo: string, branch: string) {
-		const [owner, name] = githubRepo.split('/');
-		const data = await this.graphql(
-			z.object({
-				repository: z.object({
-					pullRequests: z.object({
-						nodes: z.array(
-							z.object({
-								url: z.string(),
-								reviewThreads: z.object({ totalCount: z.number().int(), nodes: z.array(reviewThreadSchema) }),
-							}),
-						),
-					}),
-				}),
-			}),
-			`query PendingThreads($owner: String!, $name: String!, $branch: String!) {
-				repository(owner: $owner, name: $name) {
-					pullRequests(headRefName: $branch, states: OPEN, first: 1) {
-						nodes {
-							url
-							reviewThreads(first: ${MAX_THREADS}) {
-								totalCount
-								nodes { id isResolved comments(last: 100) { nodes { body pullRequestReview { body } } } }
-							}
+const transientFailure = /error connecting to|connection (reset|refused)|timeout|timed out|unexpected EOF|HTTP 5\d\d|HTTP 429|rate limit/i;
+
+// gh prints e.g. `HTTP 502: Bad Gateway (https://api.github.com/graphql)` or `error connecting to api.github.com`.
+export const classifyGhFailure = (command: string, exitCode: number, stderr: string): CallError => {
+	const message = `${command} exited with ${exitCode}: ${stderr.trim()}`;
+
+	return transientFailure.test(stderr) ? new Transient({ message }) : new Permanent({ message });
+};
+
+export class GitHub extends Context.Service<
+	GitHub,
+	{
+		// See preferredPullRequest.
+		readonly findPullRequest: (repo: string, branch: string) => Effect.Effect<Option.Option<PullRequest>, CallError>;
+		// The branch's open PR and its pending review threads (see isPending), or none without an open PR.
+		readonly pendingThreads: (repo: string, branch: string) => Effect.Effect<Option.Option<PendingThreads>, CallError>;
+		readonly postSummary: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		// One COMMENT review holding every flag as an inline comment on the PR's new code.
+		readonly postFlagsReview: (repo: string, number: number, comment: MarkedComment, flags: Flags) => Effect.Effect<void, CallError>;
+		readonly replyToThread: (threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		readonly resolveThread: (threadId: string) => Effect.Effect<void, CallError>;
+	}
+>()('herdr-linear/GitHub') {
+	static readonly layer = Layer.effect(
+		GitHub,
+		Effect.gen(function* () {
+			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+			const encoder = new TextEncoder();
+			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
+
+			const run = (args: ReadonlyArray<string>, input: string) => {
+				const command = `gh ${args.join(' ')}`;
+
+				return Effect.scoped(
+					Effect.gen(function* () {
+						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)) }));
+						const [stdout, stderr, exitCode] = yield* Effect.all([text(handle.stdout), text(handle.stderr), handle.exitCode], { concurrency: 'unbounded' });
+
+						if (exitCode !== 0) {
+							return yield* Effect.fail(classifyGhFailure(command, exitCode, stderr));
 						}
-					}
-				}
-			}`,
-			{ owner, name, branch },
-		);
-		const [pullRequest] = data.repository.pullRequests.nodes;
 
-		if (!pullRequest) {
-			return undefined;
-		}
+						return stdout;
+					}),
+				).pipe(
+					Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))),
+					withCallPolicy(callTimeouts.gh),
+				);
+			};
 
-		// A truncated page could hide a pending thread.
-		if (pullRequest.reviewThreads.totalCount > MAX_THREADS) {
-			throw new Error(`${pullRequest.url} has ${pullRequest.reviewThreads.totalCount} review threads, over the ${MAX_THREADS} one query reads`);
-		}
+			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '') =>
+				run(args, input).pipe(
+					Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(schema))),
+					Effect.catchTag('SchemaError', (error) => Effect.fail(new Permanent({ message: `gh ${args.join(' ')}: ${error.message}`, cause: error }))),
+				);
 
-		return { url: pullRequest.url, threadIds: pullRequest.reviewThreads.nodes.filter(isPending).map((thread) => thread.id) };
-	}
+			// gh exits non-zero when the response carries GraphQL errors.
+			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>) =>
+				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables })).pipe(Effect.map(({ data }) => data));
 
-	async replyToThread(threadId: string, body: string) {
-		await this.graphql(
-			z.object({ addPullRequestReviewThreadReply: z.object({ comment: z.object({ id: z.string() }) }) }),
-			`mutation ReplyToThread($threadId: ID!, $body: String!) {
-				addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
-			}`,
-			{ threadId, body: asClaude(body) },
-		);
-	}
+			const post = (endpoint: string, body: Record<string, unknown>) =>
+				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body)).pipe(Effect.asVoid);
 
-	async resolveThread(threadId: string) {
-		await this.graphql(
-			z.object({ resolveReviewThread: z.object({ thread: z.object({ isResolved: z.literal(true) }) }) }),
-			`mutation ResolveThread($threadId: ID!) {
-				resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
-			}`,
-			{ threadId },
-		);
-	}
+			const ownerAndName = (repo: string) => {
+				const [owner, name] = repo.split('/');
 
-	private async post(endpoint: string, body: Record<string, unknown>) {
-		await this.gh(['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body));
-	}
+				return { owner, name };
+			};
 
-	// gh exits non-zero when the response carries GraphQL errors.
-	private async graphql<T extends z.ZodType>(schema: T, query: string, variables: Record<string, unknown>): Promise<z.infer<T>> {
-		const stdout = await this.gh(['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }));
+			const pullRequestBodies = (repo: string, number: number, connection: 'comments' | 'reviews') =>
+				graphql(
+					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ [connection]: Bodies }) }) }),
+					`query PullRequestBodies($owner: String!, $name: String!, $number: Int!) {
+						repository(owner: $owner, name: $name) {
+							pullRequest(number: $number) { ${connection}(last: ${maxNodes}) { totalCount nodes { body } } }
+						}
+					}`,
+					{ ...ownerAndName(repo), number },
+				).pipe(Effect.map(({ repository }) => repository.pullRequest[connection]));
 
-		return schema.parse(z.object({ data: z.unknown() }).parse(JSON.parse(stdout)).data);
-	}
+			const reviewThread = (threadId: string) =>
+				graphql(
+					Schema.Struct({ node: Schema.NullOr(Schema.Struct({ isResolved: Schema.Boolean, comments: Bodies })) }),
+					`query ReviewThread($threadId: ID!) {
+						node(id: $threadId) { ... on PullRequestReviewThread { isResolved comments(last: ${maxNodes}) { totalCount nodes { body } } } }
+					}`,
+					{ threadId },
+				).pipe(
+					Effect.flatMap(({ node }) =>
+						node === null ? Effect.fail(new Permanent({ message: `no review thread ${threadId}` })) : Effect.succeed(node),
+					),
+				);
+
+			const unlessMarked = (bodies: Effect.Effect<Bodies, CallError>, marker: Marker, where: string, write: Effect.Effect<void, CallError>) =>
+				bodies.pipe(
+					Effect.flatMap((found) => containsMarker(found, marker, where)),
+					Effect.flatMap((marked) => (marked ? Effect.void : write)),
+				);
+
+			return GitHub.of({
+				findPullRequest: (repo, branch) =>
+					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']).pipe(
+						Effect.map(preferredPullRequest),
+					),
+
+				pendingThreads: (repo, branch) =>
+					graphql(
+						Schema.Struct({ repository: Schema.Struct({ pullRequests: Schema.Struct({ nodes: Schema.Array(PullRequestThreads) }) }) }),
+						`query PendingThreads($owner: String!, $name: String!, $branch: String!) {
+							repository(owner: $owner, name: $name) {
+								pullRequests(headRefName: $branch, states: OPEN, first: 1) {
+									nodes {
+										url
+										reviewThreads(first: ${maxNodes}) {
+											totalCount
+											nodes { id isResolved comments(last: 100) { nodes { body pullRequestReview { body } } } }
+										}
+									}
+								}
+							}
+						}`,
+						{ ...ownerAndName(repo), branch },
+					).pipe(
+						Effect.flatMap(({ repository }) => {
+							const [pullRequest] = repository.pullRequests.nodes;
+
+							return pullRequest ? Effect.map(pendingOf(pullRequest), Option.some) : Effect.succeedNone;
+						}),
+					),
+
+				postSummary: (repo, number, { marker, body }) =>
+					unlessMarked(
+						pullRequestBodies(repo, number, 'comments'),
+						marker,
+						`${repo}#${number} comments`,
+						post(`repos/${repo}/issues/${number}/comments`, { body: asClaude(body) }),
+					),
+
+				postFlagsReview: (repo, number, { marker, body }, flags) =>
+					unlessMarked(
+						pullRequestBodies(repo, number, 'reviews'),
+						marker,
+						`${repo}#${number} reviews`,
+						post(`repos/${repo}/pulls/${number}/reviews`, {
+							event: 'COMMENT',
+							body: asClaude(body),
+							comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body: asClaude(body) })),
+						}),
+					),
+
+				replyToThread: (threadId, { marker, body }) =>
+					unlessMarked(
+						Effect.map(reviewThread(threadId), ({ comments }) => comments),
+						marker,
+						`review thread ${threadId}`,
+						graphql(
+							Schema.Struct({ addPullRequestReviewThreadReply: Schema.Struct({ comment: Schema.Struct({ id: Schema.String }) }) }),
+							`mutation ReplyToThread($threadId: ID!, $body: String!) {
+								addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
+							}`,
+							{ threadId, body: asClaude(body) },
+						).pipe(Effect.asVoid),
+					),
+
+				resolveThread: (threadId) =>
+					reviewThread(threadId).pipe(
+						Effect.flatMap(({ isResolved }) =>
+							isResolved
+								? Effect.void
+								: graphql(
+										Schema.Struct({ resolveReviewThread: Schema.Struct({ thread: Schema.Struct({ isResolved: Schema.Literal(true) }) }) }),
+										`mutation ResolveThread($threadId: ID!) {
+											resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
+										}`,
+										{ threadId },
+									).pipe(Effect.asVoid),
+						),
+					),
+			});
+		}),
+	);
 }

@@ -70,16 +70,18 @@ export const resultsRule = Effect.gen(function* () {
 			yield* postResult(run, result, repo, pullRequest.value);
 			yield* Effect.log(`posted the result to ${pullRequest.value.url}`);
 
-			const team = observation.teams.get(run.teamId);
-
-			if (team && !Option.contains(roleOf(observation, epic), 'toReview')) {
-				yield* linear.moveIssue(epic.id, team.stateIds.toReview);
-			}
-
+			// The label goes first: once the epic is in To Review, a crash leaves a run whose epic moved on, which is only
+			// ended.
 			const stuckLabel = stuckLabelOf(config, epic);
 
 			if (Option.isSome(stuckLabel)) {
 				yield* linear.removeLabel(epic.id, stuckLabel.value.id);
+			}
+
+			const team = observation.teams.get(run.teamId);
+
+			if (team && !Option.contains(roleOf(observation, epic), 'toReview')) {
+				yield* linear.moveIssue(epic.id, team.stateIds.toReview);
 			}
 
 			yield* endRun(observation, run, 'the agent finished');

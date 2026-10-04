@@ -47,7 +47,7 @@ const followUp: Run = {
 	result: {
 		summary: 'Added the Linear service.',
 		replies: [{ threadId: 'PRRT_1', body: 'Fixed.' }],
-		flags: [{ path: 'src/effect/linear.ts', line: 12, body: 'Check the page size.' }],
+		flags: [{ path: 'src/linear.ts', line: 12, body: 'Check the page size.' }],
 	},
 	questionCommentId: 'comment-9',
 	deliveredReplyIds: ['reply-1'],

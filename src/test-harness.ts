@@ -53,6 +53,8 @@ export type Harness = {
 	readonly moveEpic: (epicId: string, state: string) => void;
 	// Whether the injected journal crash happened.
 	readonly crashed: () => boolean;
+	// Journal writes (putRun or deleteRun) so far, the crashed one included.
+	readonly journalWrites: () => number;
 	readonly runs: Effect.Effect<ReadonlyArray<Run>>;
 	readonly putRun: (run: Run) => Effect.Effect<void>;
 	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
@@ -211,6 +213,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 				crashed = false;
 			},
 			crashed: () => crashed,
+			journalWrites: () => journalWrites,
 			renameTab: (tabId, label) => Context.get(fixtures, Herdr).renameTab(tabId, label).pipe(Effect.orDie),
 			moveEpic: (epicId, state) => {
 				const issue = linear.issue(epicId);

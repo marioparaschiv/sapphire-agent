@@ -16,7 +16,7 @@ case "${1:-}" in
 	status)
 		if [ -e "$state_dir/paused" ]; then echo "dispatching: paused"; else echo "dispatching: active"; fi
 		echo "service: $(systemctl --user is-active herdr-linear.service)"
-		cat "$state_dir/claims.json" 2>/dev/null || echo '{ "claims": [] }'
+		HERDR_PLUGIN_STATE_DIR="$state_dir" node "$(dirname "$0")/../src/status.ts"
 		;;
 	*)
 		echo "usage: ctl.sh pause|resume|status" >&2

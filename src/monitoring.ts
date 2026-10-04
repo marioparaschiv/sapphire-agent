@@ -82,8 +82,8 @@ export const monitoringRule = Effect.gen(function* () {
 		now,
 	});
 
-	// The reply is typed, then recorded, then marked: a crash never types it twice, and a recorded reply without the
-	// emoji gets it next tick. A refused reply (e.g. the agent sits at a dialog) gets a notice under the question,
+	// The reply is typed, then recorded, then marked: a recorded reply is never typed again, and one without the emoji
+	// gets it next tick. A crash between typing and recording types it again after the restart, which beats losing it. A refused reply (e.g. the agent sits at a dialog) gets a notice under the question,
 	// whose marker also keeps it from being typed later.
 	const deliverReplies = (initial: StartedRun, question: string, replies: ReadonlyArray<Reply>) =>
 		Effect.gen(function* () {
