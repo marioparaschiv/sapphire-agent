@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Fiber, Option } from 'effect';
+import { Effect, Fiber, Option, Random } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import type { Run } from './journal.ts';
@@ -37,32 +37,7 @@ const writesSoFar = (h: Harness): Record<CrashPoint['kind'], number> => ({
 	herdr: h.herdr.writes(),
 });
 
-// mulberry32: a small seeded PRNG, so the order of the crash points is the same on every run.
-const seededRandom = (seed: number) => {
-	let state = seed;
-
-	return () => {
-		state = (state + 0x6d2b79f5) | 0;
-		let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
-
-		mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
-
-		return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
-	};
-};
-
-const shuffled = <A>(items: ReadonlyArray<A>, random: () => number) => {
-	const result = [...items];
-
-	for (let index = result.length - 1; index > 0; index -= 1) {
-		const other = Math.floor(random() * (index + 1));
-
-		[result[index], result[other]] = [result[other], result[index]];
-	}
-
-	return result;
-};
-
+// The crash points run in a shuffled but fixed order.
 const seed = 20_261_004;
 
 const question = '⏺ The sync needs a conflict rule.\n\n❯ Which should win, local or remote?';
@@ -288,7 +263,7 @@ describe('lifecycle', () => {
 				const { prompts } = uncrashed.outcome.herdr;
 				const retyped: Array<CrashPoint['kind']> = [];
 
-				for (const point of shuffled(points, seededRandom(seed))) {
+				for (const point of yield* Random.shuffle(points).pipe(Random.withSeed(seed))) {
 					const { crashed, retypes, outcome } = yield* lifecycle(Option.some(point));
 
 					assert.isTrue(crashed, `${describePoint(point)} never happened`);

@@ -363,10 +363,14 @@ describe('Herdr events', () => {
 
 			second.socket.end();
 			yield* Deferred.await(second.closed);
-			// The backoff timing itself is asserted against the fake, which reconnects the same way.
-			yield* TestClock.adjust('1 second');
 
-			const third = yield* Queue.take(connections);
+			// The client may not have seen the close and started its backoff yet, so time moves on until it reconnects. The
+			// backoff timing itself is asserted against the fake, which reconnects the same way.
+			const third = yield* TestClock.adjust('1 second').pipe(
+				Effect.andThen(Queue.poll(connections)),
+				Effect.repeat({ until: Option.isSome }),
+				Effect.map(Option.getOrThrow),
+			);
 
 			assert.deepStrictEqual(yield* Deferred.await(third.request), subscription);
 			yield* send(third, [eventLines[0], eventLines[4]]);
