@@ -89,6 +89,9 @@ export const squeezeTail = (text: string) =>
 // herdr rejects newlines in a prompt, so lines are joined with spaces.
 export const oneLine = (text: string) => text.trim().replace(/\s*[\r\n]+\s*/g, ' ');
 
+// Variables set in a new pane's shell, on top of what herdr passes on.
+export type TabEnv = Readonly<Record<string, string>>;
+
 // What the commands below need to find owned tabs and open new ones; both the live and the fake herdr provide it.
 type Commands = Pick<Herdr['Service'], 'workspaces' | 'createWorkspace' | 'createTab' | 'renameTab' | 'tabs' | 'panes'>;
 
@@ -127,17 +130,17 @@ const ownedTabsOf = (commands: Commands, workspaceLabel: string): Effect.Effect<
 
 export const openTabWith =
 	(commands: Commands, workspaceLabel: string) =>
-	(label: string, cwd: string): Effect.Effect<OpenedTab, CallError> =>
+	(label: string, cwd: string, env: TabEnv = {}): Effect.Effect<OpenedTab, CallError> =>
 		Effect.gen(function* () {
 			const workspace = yield* findWorkspace(commands, workspaceLabel);
 
 			if (Option.isSome(workspace)) {
-				const { tab, rootPane } = yield* commands.createTab(workspace.value.workspaceId, label, cwd);
+				const { tab, rootPane } = yield* commands.createTab(workspace.value.workspaceId, label, cwd, env);
 
 				return { tabId: tab.tabId, paneId: rootPane.paneId };
 			}
 
-			const { tab, rootPane } = yield* commands.createWorkspace(workspaceLabel, cwd);
+			const { tab, rootPane } = yield* commands.createWorkspace(workspaceLabel, cwd, env);
 
 			yield* commands.renameTab(tab.tabId, label);
 
@@ -163,8 +166,8 @@ export class Herdr extends Context.Service<
 	{
 		readonly workspaces: Effect.Effect<ReadonlyArray<Workspace>, CallError>;
 		// The new pane's shell skips its automatic Claude launch (HERDR_BLANK=1) and the workspace does not take focus.
-		readonly createWorkspace: (label: string, cwd: string) => Effect.Effect<{ readonly workspace: Workspace; readonly tab: Tab; readonly rootPane: Pane }, CallError>;
-		readonly createTab: (workspaceId: string, label: string, cwd: string) => Effect.Effect<{ readonly tab: Tab; readonly rootPane: Pane }, CallError>;
+		readonly createWorkspace: (label: string, cwd: string, env?: TabEnv) => Effect.Effect<{ readonly workspace: Workspace; readonly tab: Tab; readonly rootPane: Pane }, CallError>;
+		readonly createTab: (workspaceId: string, label: string, cwd: string, env?: TabEnv) => Effect.Effect<{ readonly tab: Tab; readonly rootPane: Pane }, CallError>;
 		readonly renameTab: (tabId: string, label: string) => Effect.Effect<void, CallError>;
 		readonly tabs: (workspaceId: string) => Effect.Effect<ReadonlyArray<Tab>, CallError>;
 		readonly panes: (workspaceId: string) => Effect.Effect<ReadonlyArray<Pane>, CallError>;
@@ -178,9 +181,10 @@ export class Herdr extends Context.Service<
 		readonly sendKeys: (paneId: string, keys: ReadonlyArray<string>) => Effect.Effect<void, CallError>;
 		// Lines are joined with spaces. herdr refuses a prompt while the agent sits at a dialog (agent_blocked).
 		readonly prompt: (paneId: string, text: string) => Effect.Effect<void, CallError>;
-		readonly startClaude: (paneId: string, name: string, prompt: string) => Effect.Effect<StartOutcome, CallError>;
+		// `args` go to Claude before the prompt.
+		readonly startClaude: (paneId: string, name: string, prompt: string, args?: ReadonlyArray<string>) => Effect.Effect<StartOutcome, CallError>;
 		// A new tab in the workspace labelled workspaceLabel, creating the workspace when there is none.
-		readonly openTab: (label: string, cwd: string) => Effect.Effect<OpenedTab, CallError>;
+		readonly openTab: (label: string, cwd: string, env?: TabEnv) => Effect.Effect<OpenedTab, CallError>;
 		readonly workspaceTabs: Effect.Effect<ReadonlyArray<WorkspaceTab>, CallError>;
 		// Status, exit and close events of owned panes and tabs. Never fails: reconnects with backoff. Events are not
 		// durable, so they only make a tick come sooner; the poll stays authoritative.
@@ -245,11 +249,11 @@ export class Herdr extends Context.Service<
 					policy,
 				);
 
-			const blank = ['--env', 'HERDR_BLANK=1', '--no-focus'];
+			const blank = (env: TabEnv) => [...Object.entries({ HERDR_BLANK: '1', ...env }).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
 
 			const commands = {
 				workspaces: call(Schema.Struct({ workspaces: Schema.Array(Workspace) }), ['workspace', 'list']).pipe(Effect.map(({ workspaces }) => workspaces)),
-				createWorkspace: (label: string, cwd: string) =>
+				createWorkspace: (label: string, cwd: string, env: TabEnv = {}) =>
 					write(Schema.Struct({ workspace: Workspace, tab: Tab, rootPane: Pane }).pipe(Schema.encodeKeys({ rootPane: 'root_pane' })), [
 						'workspace',
 						'create',
@@ -257,9 +261,9 @@ export class Herdr extends Context.Service<
 						label,
 						'--cwd',
 						cwd,
-						...blank,
+						...blank(env),
 					]),
-				createTab: (workspaceId: string, label: string, cwd: string) =>
+				createTab: (workspaceId: string, label: string, cwd: string, env: TabEnv = {}) =>
 					write(Schema.Struct({ tab: Tab, rootPane: Pane }).pipe(Schema.encodeKeys({ rootPane: 'root_pane' })), [
 						'tab',
 						'create',
@@ -269,7 +273,7 @@ export class Herdr extends Context.Service<
 						label,
 						'--cwd',
 						cwd,
-						...blank,
+						...blank(env),
 					]),
 				renameTab: (tabId: string, label: string) => call(Schema.Unknown, ['tab', 'rename', tabId, label]).pipe(Effect.asVoid),
 				tabs: (workspaceId: string) => call(Schema.Struct({ tabs: Schema.Array(Tab) }), ['tab', 'list', '--workspace', workspaceId]).pipe(Effect.map(({ tabs }) => tabs)),
@@ -330,10 +334,10 @@ export class Herdr extends Context.Service<
 					find(Schema.Struct({ agent: Pane }), ['agent', 'get', paneId], ['agent_not_found', 'pane_not_found']).pipe(Effect.map(Option.map(({ agent }) => agent))),
 				sendKeys: (paneId, keys) => write(Schema.Unknown, ['agent', 'send-keys', paneId, ...keys]).pipe(Effect.asVoid),
 				prompt: (paneId, text) => write(Schema.Unknown, ['agent', 'prompt', paneId, oneLine(text)]).pipe(Effect.asVoid),
-				startClaude: (paneId, name, prompt) =>
+				startClaude: (paneId, name, prompt, args = []) =>
 					find(
 						Schema.Unknown,
-						['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', String(Duration.toMillis(startWait)), '--', oneLine(prompt)],
+						['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', String(Duration.toMillis(startWait)), '--', ...args, oneLine(prompt)],
 						['timeout'],
 						withWritePolicy(Duration.sum(callTimeouts.herdr, startWait)),
 					).pipe(Effect.map(Option.match({ onNone: (): StartOutcome => 'starting', onSome: (): StartOutcome => 'ready' }))),

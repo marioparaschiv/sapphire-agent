@@ -109,15 +109,17 @@ describe('Herdr', () => {
 		}),
 	);
 
-	it.effect('opens a tab in the existing workspace, without focus and with a blank shell', () =>
+	it.effect('opens a tab in the existing workspace, without focus and with a blank shell plus the variables asked for', () =>
 		Effect.gen(function* () {
 			const { herdr, calls } = yield* liveHerdr({
 				'workspace list': ok('workspace-list.json'),
 				'tab create --workspace w1 --label HL-1 Some epic --cwd /work/hl-1 --env HERDR_BLANK=1 --no-focus': ok('tab-create.json'),
+				'tab create --workspace w1 --label @orchestratorbot CMD-1 --cwd /work/repo --env HERDR_BLANK=1 --env HERDR_PLUGIN_STATE_DIR=/state --no-focus': ok('tab-create.json'),
 			});
 
 			assert.deepStrictEqual(yield* herdr.openTab('HL-1 Some epic', '/work/hl-1'), { tabId: 'w1:t2', paneId: 'w1:p2' });
-			assert.lengthOf(calls, 2);
+			assert.deepStrictEqual(yield* herdr.openTab('@orchestratorbot CMD-1', '/work/repo', { HERDR_PLUGIN_STATE_DIR: '/state' }), { tabId: 'w1:t2', paneId: 'w1:p2' });
+			assert.lengthOf(calls, 4);
 		}),
 	);
 
@@ -205,14 +207,16 @@ describe('Herdr', () => {
 		}),
 	);
 
-	it.effect('treats a herdr start timeout as Claude still starting, and passes the prompt as one line', () =>
+	it.effect('treats a herdr start timeout as Claude still starting, and passes the prompt as one line after the arguments', () =>
 		Effect.gen(function* () {
 			const { herdr } = yield* liveHerdr({
 				'agent start hl-1 --kind claude --pane w1:p2 --timeout 30000 -- Work on HL-1. Read the epic first.': fails('error-timeout.json'),
 				'agent start hl-2 --kind claude --pane w1:p99 --timeout 30000 -- Work on HL-2.': fails('error-pane-not-found.json'),
+				'agent start cmd-1 --kind claude --pane w1:p2 --timeout 30000 -- --restricted --tools Bash,Read Do what was asked.': fails('error-timeout.json'),
 			});
 
 			assert.strictEqual(yield* herdr.startClaude('w1:p2', 'hl-1', 'Work on HL-1.\n\n  Read the epic first.\n'), 'starting');
+			assert.strictEqual(yield* herdr.startClaude('w1:p2', 'cmd-1', 'Do what was asked.', ['--restricted', '--tools', 'Bash,Read']), 'starting');
 			assert.deepStrictEqual(
 				yield* herdr.startClaude('w1:p99', 'hl-2', 'Work on HL-2.').pipe(Effect.flip),
 				new Permanent({ message: 'herdr agent start hl-2 --kind claude --pane w1:p99 --timeout 30000 -- Work on HL-2.: pane_not_found: pane w1:p99 not found' }),
@@ -421,8 +425,8 @@ describe('FakeHerdr', () => {
 
 			assert.strictEqual((yield* herdr.prompt(paneId, 'yes').pipe(Effect.flip))._tag, 'Permanent');
 			assert.deepStrictEqual(fake.starts(), [
-				{ paneId, name: 'hl-5', prompt: 'Work on HL-5. Go.' },
-				{ paneId: other.paneId, name: 'hl-6', prompt: 'Work on HL-6.' },
+				{ paneId, name: 'hl-5', prompt: 'Work on HL-5. Go.', args: [] },
+				{ paneId: other.paneId, name: 'hl-6', prompt: 'Work on HL-6.', args: [] },
 			]);
 			assert.deepStrictEqual(fake.sentKeys(), [{ paneId, keys: ['esc'] }]);
 			assert.deepStrictEqual(fake.prompts(), [{ paneId, text: 'continue' }]);

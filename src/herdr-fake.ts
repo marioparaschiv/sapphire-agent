@@ -14,6 +14,7 @@ import {
 	squeezeTail,
 	type StartOutcome,
 	type Tab,
+	type TabEnv,
 	type Workspace,
 	workspaceTabsOf,
 } from './herdr.ts';
@@ -29,6 +30,9 @@ export type FakeTab = {
 	readonly agentStatus: HerdrAgentStatus;
 	// The pane's full text; readTail returns its last lines, squeezed like the live layer.
 	readonly tail: string;
+	// What the tab was opened with; empty for a seeded tab.
+	readonly cwd: string;
+	readonly env: TabEnv;
 };
 
 // What `startClaude` does: Claude starts working and herdr's wait times out (`starting`, the usual case), Claude
@@ -57,7 +61,7 @@ export type FakeHerdrControls = {
 	readonly sentKeys: () => ReadonlyArray<{ readonly paneId: string; readonly keys: ReadonlyArray<string> }>;
 	// Prompts as herdr received them, lines joined.
 	readonly prompts: () => ReadonlyArray<{ readonly paneId: string; readonly text: string }>;
-	readonly starts: () => ReadonlyArray<{ readonly paneId: string; readonly name: string; readonly prompt: string }>;
+	readonly starts: () => ReadonlyArray<{ readonly paneId: string; readonly name: string; readonly prompt: string; readonly args: ReadonlyArray<string> }>;
 	// Tabs closed through the Herdr service.
 	readonly closedTabs: () => ReadonlyArray<string>;
 	// Delivers an event to the open event connections. State changes never emit events by themselves, so a change
@@ -88,7 +92,7 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 	const tabs: Array<FakeTab> = [];
 	const sentKeys: Array<{ readonly paneId: string; readonly keys: ReadonlyArray<string> }> = [];
 	const prompts: Array<{ readonly paneId: string; readonly text: string }> = [];
-	const starts: Array<{ readonly paneId: string; readonly name: string; readonly prompt: string }> = [];
+	const starts: Array<{ readonly paneId: string; readonly name: string; readonly prompt: string; readonly args: ReadonlyArray<string> }> = [];
 	const closedTabs: Array<string> = [];
 	const failures = new Map<number, { readonly error: CallError; readonly afterApplying: boolean }>();
 	let writes = 0;
@@ -105,9 +109,9 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 		return workspace;
 	};
 
-	const addTabTo = (workspaceId: string, label: string, agent: Option.Option<string>, agentStatus: HerdrAgentStatus, tail: string) => {
+	const addTabTo = (workspaceId: string, label: string, agent: Option.Option<string>, agentStatus: HerdrAgentStatus, tail: string, cwd = '', env: TabEnv = {}) => {
 		const id = nextId();
-		const tab = { tabId: `${workspaceId}:t${id}`, workspaceId, label, paneId: `${workspaceId}:p${id}`, agent, agentStatus, tail };
+		const tab = { tabId: `${workspaceId}:t${id}`, workspaceId, label, paneId: `${workspaceId}:p${id}`, agent, agentStatus, tail, cwd, env };
 
 		tabs.push(tab);
 
@@ -168,22 +172,22 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 
 	const commands = {
 		workspaces: Effect.sync(() => [...workspaces]),
-		createWorkspace: (label: string, _cwd: string) =>
+		createWorkspace: (label: string, cwd: string, env: TabEnv = {}) =>
 			write(() =>
 				Effect.sync(() => {
 					const workspace = addWorkspace(label);
-					const tab = addTabTo(workspace.workspaceId, '1', Option.none(), 'unknown', '');
+					const tab = addTabTo(workspace.workspaceId, '1', Option.none(), 'unknown', '', cwd, env);
 
 					return { workspace, tab: toTab(tab), rootPane: toPane(tab) };
 				}),
 			),
-		createTab: (workspaceId: string, label: string, _cwd: string) =>
+		createTab: (workspaceId: string, label: string, cwd: string, env: TabEnv = {}) =>
 			write(() => {
 				if (!workspaces.some((workspace) => workspace.workspaceId === workspaceId)) {
 					return Effect.fail(notFound('workspace', workspaceId));
 				}
 
-				const tab = addTabTo(workspaceId, label, Option.none(), 'unknown', '');
+				const tab = addTabTo(workspaceId, label, Option.none(), 'unknown', '', cwd, env);
 
 				return Effect.succeed({ tab: toTab(tab), rootPane: toPane(tab) });
 			}),
@@ -233,13 +237,13 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 					? Effect.fail(new Permanent({ message: `herdr: agent_blocked: agent ${paneId} is blocked and requires interactive input` }))
 					: Effect.sync(() => prompts.push({ paneId, text: oneLine(text) })),
 			),
-		startClaude: (paneId, name, prompt) =>
+		startClaude: (paneId, name, prompt, args = []) =>
 			write(() => {
 				if (Option.isNone(byPane(paneId))) {
 					return Effect.fail(notFound('pane', paneId));
 				}
 
-				starts.push({ paneId, name, prompt: oneLine(prompt) });
+				starts.push({ paneId, name, prompt: oneLine(prompt), args: [...args] });
 
 				if (startBehaviour !== 'no-agent') {
 					update(paneId, { agent: Option.some('claude'), agentStatus: 'working' });

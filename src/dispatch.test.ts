@@ -44,6 +44,7 @@ describe('dispatch', () => {
 					paneId: tab.paneId,
 					name: 'test-10',
 					prompt: '/orchestrate the sub-issues of Linear epic TEST-10 (https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync) autonomously, in the worktree you are in.',
+					args: [],
 				},
 			]);
 			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
