@@ -1,7 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Duration, Effect, Exit, Fiber, Ref } from 'effect';
 import { TestClock } from 'effect/testing';
-import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
+import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy, withWritePolicy } from './call-policy.ts';
 
 // A call that fails with the given errors in turn, then succeeds, and counts its attempts.
 const scriptedCall = (failures: ReadonlyArray<CallError>) =>
@@ -85,6 +85,36 @@ describe('withCallPolicy', () => {
 
 			assert.strictEqual(yield* Fiber.join(fiber), 'ok');
 			assert.strictEqual(yield* Ref.get(attempts), 2);
+		}),
+	);
+});
+
+describe('withWritePolicy', () => {
+	it.effect('fails a timed-out write without trying it again', () =>
+		Effect.gen(function* () {
+			const attempts = yield* Ref.make(0);
+			const call = Ref.update(attempts, (n) => n + 1).pipe(Effect.andThen(Effect.never));
+			const fiber = yield* call.pipe(withWritePolicy(callTimeouts.herdr), Effect.forkChild);
+
+			yield* TestClock.adjust('30 seconds');
+
+			const exit = yield* Fiber.await(fiber);
+
+			assert.deepStrictEqual(exit, Exit.fail(new Transient({ message: 'timed out after 30s' })));
+			yield* TestClock.adjust('1 minute');
+			assert.strictEqual(yield* Ref.get(attempts), 1);
+		}),
+	);
+
+	it.effect('retries a write that failed before reaching the server', () =>
+		Effect.gen(function* () {
+			const { attempts, call } = yield* scriptedCall([transient]);
+			const fiber = yield* call.pipe(withWritePolicy(callTimeouts.herdr), Effect.forkChild);
+
+			yield* TestClock.adjust('1200 millis');
+
+			assert.strictEqual(yield* Fiber.join(fiber), 'ok');
+			assert.strictEqual(yield* attempts, 2);
 		}),
 	);
 });

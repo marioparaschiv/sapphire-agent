@@ -28,6 +28,8 @@ Per service:
 
 Each method is one unit under the policy, so a retried write repeats its marker or state check before writing again.
 
+herdr writes that have nothing to check first (creating a workspace or tab, starting Claude, typing into a pane) use the write policy instead: the timeout covers all attempts together and a timeout is never retried, because the timed-out attempt may still have landed. Transient failures before the timeout (herdr's server not running) are still retried. The next tick observes what actually happened.
+
 ## At the epic level
 
 The planner runs every rule's work per epic in its own fiber, so one bad epic never blocks the others, and handles what the work fails with:

@@ -2,7 +2,7 @@ import { NodeSocket } from '@effect/platform-node';
 import { Context, Duration, Effect, Layer, Option, Result, Schedule, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { Socket } from 'effect/socket';
-import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
+import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy, withWritePolicy } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { AgentStatus } from './journal.ts';
 
@@ -227,20 +227,22 @@ export class Herdr extends Context.Service<
 						Effect.mapError((error) => new Permanent({ message: `herdr ${args.join(' ')}: ${error.message}`, cause: error })),
 					);
 
-			const call = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, timeout = callTimeouts.herdr) =>
+			const call = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, policy = withCallPolicy(callTimeouts.herdr)) =>
 				exec(args).pipe(
 					Effect.flatMap(decode(schema, args)),
 					Effect.catchTag('HerdrError', (error) => Effect.fail(classify(error))),
-					withCallPolicy(timeout),
+					policy,
 				);
 
+			const write = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>) => call(schema, args, withWritePolicy(callTimeouts.herdr));
+
 			// The herdr error codes in `missing` give none instead of failing.
-			const find = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, missing: ReadonlyArray<string>, timeout = callTimeouts.herdr) =>
+			const find = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, missing: ReadonlyArray<string>, policy = withCallPolicy(callTimeouts.herdr)) =>
 				exec(args).pipe(
 					Effect.flatMap(decode(schema, args)),
 					Effect.map(Option.some),
 					Effect.catchTag('HerdrError', (error) => (missing.includes(error.code) ? Effect.succeed(Option.none<A>()) : Effect.fail(classify(error)))),
-					withCallPolicy(timeout),
+					policy,
 				);
 
 			const blank = ['--env', 'HERDR_BLANK=1', '--no-focus'];
@@ -248,7 +250,7 @@ export class Herdr extends Context.Service<
 			const commands = {
 				workspaces: call(Schema.Struct({ workspaces: Schema.Array(Workspace) }), ['workspace', 'list']).pipe(Effect.map(({ workspaces }) => workspaces)),
 				createWorkspace: (label: string, cwd: string) =>
-					call(Schema.Struct({ workspace: Workspace, tab: Tab, rootPane: Pane }).pipe(Schema.encodeKeys({ rootPane: 'root_pane' })), [
+					write(Schema.Struct({ workspace: Workspace, tab: Tab, rootPane: Pane }).pipe(Schema.encodeKeys({ rootPane: 'root_pane' })), [
 						'workspace',
 						'create',
 						'--label',
@@ -258,7 +260,7 @@ export class Herdr extends Context.Service<
 						...blank,
 					]),
 				createTab: (workspaceId: string, label: string, cwd: string) =>
-					call(Schema.Struct({ tab: Tab, rootPane: Pane }).pipe(Schema.encodeKeys({ rootPane: 'root_pane' })), [
+					write(Schema.Struct({ tab: Tab, rootPane: Pane }).pipe(Schema.encodeKeys({ rootPane: 'root_pane' })), [
 						'tab',
 						'create',
 						'--workspace',
@@ -326,14 +328,14 @@ export class Herdr extends Context.Service<
 					),
 				agent: (paneId) =>
 					find(Schema.Struct({ agent: Pane }), ['agent', 'get', paneId], ['agent_not_found', 'pane_not_found']).pipe(Effect.map(Option.map(({ agent }) => agent))),
-				sendKeys: (paneId, keys) => call(Schema.Unknown, ['agent', 'send-keys', paneId, ...keys]).pipe(Effect.asVoid),
-				prompt: (paneId, text) => call(Schema.Unknown, ['agent', 'prompt', paneId, oneLine(text)]).pipe(Effect.asVoid),
+				sendKeys: (paneId, keys) => write(Schema.Unknown, ['agent', 'send-keys', paneId, ...keys]).pipe(Effect.asVoid),
+				prompt: (paneId, text) => write(Schema.Unknown, ['agent', 'prompt', paneId, oneLine(text)]).pipe(Effect.asVoid),
 				startClaude: (paneId, name, prompt) =>
 					find(
 						Schema.Unknown,
 						['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', String(Duration.toMillis(startWait)), '--', oneLine(prompt)],
 						['timeout'],
-						Duration.sum(callTimeouts.herdr, startWait),
+						withWritePolicy(Duration.sum(callTimeouts.herdr, startWait)),
 					).pipe(Effect.map(Option.match({ onNone: (): StartOutcome => 'starting', onSome: (): StartOutcome => 'ready' }))),
 				openTab: openTabWith(commands, workspaceLabel),
 				workspaceTabs: workspaceTabsOf(commands, workspaceLabel),

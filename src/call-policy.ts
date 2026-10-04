@@ -31,9 +31,7 @@ const retrySchedule = Schedule.exponential('1 second').pipe(
 	Schedule.modifyDelay(({ input, duration }) => Effect.succeed(input._tag === 'Transient' && input.retryAfter ? input.retryAfter : duration)),
 );
 
-// Every external call goes through this: a timeout per attempt, and up to 3 retries of a Transient failure.
-// Once the retries are used up the Transient fails the call; the next tick tries again.
-export const withCallPolicy =
+const timeoutAsTransient =
 	(timeout: Duration.Duration) =>
 	<A, R>(call: Effect.Effect<A, CallError, R>): Effect.Effect<A, CallError, R> =>
 		call.pipe(
@@ -41,5 +39,21 @@ export const withCallPolicy =
 				duration: timeout,
 				orElse: () => Effect.fail(new Transient({ message: `timed out after ${Duration.format(timeout)}` })),
 			}),
-			Effect.retry({ schedule: retrySchedule, times: maxRetries, while: (error) => error._tag === 'Transient' }),
 		);
+
+const retryTransient = <A, R>(call: Effect.Effect<A, CallError, R>): Effect.Effect<A, CallError, R> =>
+	call.pipe(Effect.retry({ schedule: retrySchedule, times: maxRetries, while: (error) => error._tag === 'Transient' }));
+
+// Every external call goes through this: a timeout per attempt, and up to 3 retries of a Transient failure.
+// Once the retries are used up the Transient fails the call; the next tick tries again.
+export const withCallPolicy =
+	(timeout: Duration.Duration) =>
+	<A, R>(call: Effect.Effect<A, CallError, R>): Effect.Effect<A, CallError, R> =>
+		call.pipe(timeoutAsTransient(timeout), retryTransient);
+
+// For writes with no marker to check first (typing into a pane, opening a tab): a timed-out attempt may still have
+// landed, so the timeout covers all attempts and is never retried. The next tick observes what happened.
+export const withWritePolicy =
+	(timeout: Duration.Duration) =>
+	<A, R>(call: Effect.Effect<A, CallError, R>): Effect.Effect<A, CallError, R> =>
+		call.pipe(retryTransient, timeoutAsTransient(timeout));
