@@ -1,4 +1,4 @@
-import { Schema } from 'effect';
+import { Effect, Schema } from 'effect';
 
 const Text = Schema.NonEmptyString;
 
@@ -10,3 +10,8 @@ export const ResultFile = Schema.Struct({
 });
 
 export type ResultFile = typeof ResultFile.Type;
+
+export class InvalidResultFile extends Schema.TaggedError<InvalidResultFile>()('InvalidResultFile', { message: Schema.String }) {}
+
+export const decodeResultFile = (text: string) =>
+	Schema.decodeEffect(Schema.fromJsonString(ResultFile))(text).pipe(Effect.mapError((error) => new InvalidResultFile({ message: error.message })));

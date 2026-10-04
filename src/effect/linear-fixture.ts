@@ -1,0 +1,508 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { Context, Effect, Layer, Schema, Stream, SubscriptionRef } from 'effect';
+import { FetchHttpClient, HttpClient } from 'effect/http';
+import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
+
+// A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
+// Linear-shaped payloads and applies mutations, so later reads see them.
+
+export type FixtureIssue = {
+	readonly id: string;
+	readonly identifier: string;
+	readonly title: string;
+	readonly teamId: string;
+	stateId: string;
+	readonly parentId: string | null;
+	labelIds: ReadonlyArray<string>;
+	readonly sortOrder: number;
+};
+
+// A label without teamId is a workspace label; parentName is its label group.
+export type FixtureLabel = { readonly id: string; readonly name: string; readonly teamId: string | null; readonly parentName: string | null };
+
+export type FixtureComment = {
+	readonly id: string;
+	readonly issueId: string;
+	readonly body: string;
+	readonly parentId: string | null;
+	readonly createdAt: string;
+	reactions: ReadonlyArray<string>;
+};
+
+export type EpicSeed = {
+	readonly identifier: string;
+	readonly title: string;
+	// Defaults to the Test team.
+	readonly teamId?: string;
+	// A state name of the team; defaults to Ready For Agent.
+	readonly state?: string;
+	readonly labelIds?: ReadonlyArray<string>;
+	readonly sortOrder?: number;
+	// Sub-issues to create in the team's first state; defaults to 2.
+	readonly subIssues?: number;
+};
+
+export type LabelSeed = { readonly name: string; readonly teamId?: string; readonly parentName?: string };
+
+export type CommentSeed = {
+	// Makes the comment a reply in that comment's thread.
+	readonly parentId?: string;
+	// Defaults to one second after the previous comment, from 2026-10-01T00:00:00Z.
+	readonly createdAt?: string;
+	readonly reactions?: ReadonlyArray<string>;
+};
+
+export type LinearFixtureShape = {
+	// The GraphQL endpoint on 127.0.0.1.
+	readonly url: string;
+	// The Test team (named like AppConfig.layerTest's team) is seeded; this adds another.
+	readonly addTeam: (team: Team) => Team;
+	readonly addEpic: (seed: EpicSeed) => FixtureIssue;
+	readonly addLabel: (seed: LabelSeed) => FixtureLabel;
+	// A comment as a user would post it in Linear, e.g. a reply in a question's thread.
+	readonly addComment: (issueId: string, body: string, seed?: CommentSeed) => FixtureComment;
+	readonly issue: (issueId: string) => FixtureIssue;
+	// Sub-issues of the epic, in creation order.
+	readonly subIssues: (epicId: string) => ReadonlyArray<FixtureIssue>;
+	readonly stateName: (issueId: string) => string;
+	readonly labelNames: (issueId: string) => ReadonlyArray<string>;
+	// Every comment on the issue, replies included, in creation order.
+	readonly comments: (issueId: string) => ReadonlyArray<FixtureComment>;
+	// Applied writes in order, e.g. `move <issueId> <stateId>`, `comment <issueId>`, `comment <issueId> in <parentId>`,
+	// `react <commentId> <emoji>`, `create-label <name>`, `add-label <issueId> <labelId>`, `remove-label <issueId> <labelId>`.
+	readonly mutations: ReadonlyArray<string>;
+	// Every authorization header received.
+	readonly authorizations: ReadonlySet<string>;
+	// The nth write request (1-based, counting every mutation request received, failed ones included) is not applied
+	// and answers this status with a GraphQL error, plus Retry-After when given.
+	readonly failWrite: (n: number, status: number, retryAfterSeconds?: number) => void;
+	// The nth write is not applied and is rate limited the way Linear does it: HTTP 400 with a RATELIMITED error code.
+	readonly rateLimitWrite: (n: number, retryAfterSeconds?: number) => void;
+	// The nth write is applied, then the connection is dropped before any answer, like a crash after the post.
+	readonly crashAfterWrite: (n: number) => void;
+	// Completes once the fixture's Linear layer has got n answers (a response or a transport error) in total. A retry
+	// delay that follows an answer is on the clock by then, so TestClock.adjust can be called safely.
+	readonly awaitAnswers: (n: number) => Effect.Effect<void>;
+};
+
+const testTeamId = 'team-test';
+
+export const testTeam: Team = {
+	id: testTeamId,
+	key: 'TEST',
+	name: 'Test',
+	states: {
+		nodes: [
+			{ id: 'state-todo', name: 'To Do', type: 'unstarted' },
+			{ id: 'state-ready', name: 'Ready For Agent', type: 'unstarted' },
+			{ id: 'state-implementing', name: 'Implementing', type: 'started' },
+			{ id: 'state-in-review', name: 'In Review', type: 'started' },
+			{ id: 'state-to-review', name: 'To Review', type: 'started' },
+			{ id: 'state-shipped', name: 'Shipped', type: 'completed' },
+			{ id: 'state-done', name: 'Done', type: 'completed' },
+		],
+	},
+};
+
+const GraphqlRequest = Schema.fromJsonString(Schema.Struct({ query: Schema.String, variables: Schema.Record(Schema.String, Schema.Unknown) }));
+
+const Ids = Schema.Array(Schema.String);
+
+const variableSchemas = {
+	Teams: Schema.Struct({ names: Ids }),
+	ReadyEpics: Schema.Struct({ stateIds: Ids }),
+	Epics: Schema.Struct({ ids: Ids }),
+	Replies: Schema.Struct({ questionIds: Ids }),
+	Comments: Schema.Struct({ issueId: Schema.String, after: Schema.NullOr(Schema.String) }),
+	Reactions: Schema.Struct({ id: Schema.String }),
+	Labels: Schema.Struct({ name: Schema.String }),
+	Move: Schema.Struct({ id: Schema.String, stateId: Schema.String }),
+	Comment: Schema.Struct({ issueId: Schema.String, body: Schema.String, parentId: Schema.optionalKey(Schema.NullOr(Schema.String)) }),
+	React: Schema.Struct({ commentId: Schema.String, emoji: Schema.String }),
+	CreateLabel: Schema.Struct({ name: Schema.String, teamId: Schema.String }),
+	AddLabel: Schema.Struct({ id: Schema.String, labelId: Schema.String }),
+	RemoveLabel: Schema.Struct({ id: Schema.String, labelId: Schema.String }),
+};
+
+type Operation = keyof typeof variableSchemas;
+
+const isOperation = (name: string): name is Operation => Object.hasOwn(variableSchemas, name);
+
+type HttpAnswer = { readonly status: number; readonly body: unknown; readonly headers?: Record<string, string> };
+
+// `crash`: drop the connection without answering.
+type Answer = HttpAnswer | 'crash';
+
+const graphqlError = (status: number, message: string, headers: Record<string, string> = {}, code?: string): HttpAnswer => ({
+	status,
+	body: { errors: [code === undefined ? { message } : { message, extensions: { code } }] },
+	headers,
+});
+
+type WriteFailure = { readonly status: number; readonly retryAfterSeconds?: number; readonly code?: string };
+
+const writeFailure = (status: number, retryAfterSeconds?: number, code?: string): WriteFailure => ({
+	status,
+	...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+	...(code === undefined ? {} : { code }),
+});
+
+class NotFound extends Error {}
+
+const readBody = async (request: IncomingMessage) => {
+	const chunks: Array<Buffer> = [];
+
+	for await (const chunk of request) {
+		chunks.push(Buffer.from(chunk));
+	}
+
+	return Buffer.concat(chunks).toString('utf8');
+};
+
+const make = Effect.gen(function* () {
+	const answers = yield* SubscriptionRef.make(0);
+	const teams: Array<Team> = [testTeam];
+	const issues = new Map<string, FixtureIssue>();
+	const labels: Array<FixtureLabel> = [];
+	const comments: Array<FixtureComment> = [];
+	const mutations: Array<string> = [];
+	const authorizations = new Set<string>();
+	const writeFailures = new Map<number, WriteFailure>();
+	const writeCrashes = new Set<number>();
+	let writes = 0;
+
+	const find = <A>(items: Iterable<A>, predicate: (item: A) => boolean, what: string) => {
+		for (const item of items) {
+			if (predicate(item)) {
+				return item;
+			}
+		}
+
+		throw new NotFound(`Entity not found: ${what}`);
+	};
+
+	const team = (id: string) => find(teams, (candidate) => candidate.id === id, `Team ${id}`);
+	const issue = (id: string) => find(issues.values(), (candidate) => candidate.id === id, `Issue ${id}`);
+	const label = (id: string) => find(labels, (candidate) => candidate.id === id, `IssueLabel ${id}`);
+	const comment = (id: string) => find(comments, (candidate) => candidate.id === id, `Comment ${id}`);
+	const stateOf = (found: FixtureIssue) => find(team(found.teamId).states.nodes, (state) => state.id === found.stateId, `WorkflowState ${found.stateId}`);
+
+	const addComment = (issueId: string, body: string, seed: CommentSeed = {}) => {
+		const created: FixtureComment = {
+			id: `comment-${comments.length + 1}`,
+			issueId: issue(issueId).id,
+			body,
+			parentId: seed.parentId ?? null,
+			createdAt: seed.createdAt ?? new Date(Date.UTC(2026, 9, 1, 0, 0, comments.length)).toISOString(),
+			reactions: seed.reactions ?? [],
+		};
+
+		comments.push(created);
+
+		return created;
+	};
+
+	const toEpic = (found: FixtureIssue): Epic => {
+		const owner = team(found.teamId);
+		const state = stateOf(found);
+		const slug = found.title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+		const child = [...issues.values()].find((candidate) => candidate.parentId === found.id);
+
+		return {
+			id: found.id,
+			identifier: found.identifier,
+			title: found.title,
+			url: `https://linear.app/marioparaschiv/issue/${found.identifier}/${slug}`,
+			branchName: `mario/${found.identifier.toLowerCase()}-${slug}`,
+			sortOrder: found.sortOrder,
+			team: { id: owner.id, name: owner.name },
+			state: { id: state.id, name: state.name },
+			labels: {
+				nodes: found.labelIds.map(label).map(({ id, name, parentName }) => ({ id, name, parent: parentName === null ? null : { name: parentName } })),
+			},
+			children: { nodes: child ? [{ id: child.id }] : [] },
+		};
+	};
+
+	const toComment = (found: FixtureComment): Comment => ({
+		id: found.id,
+		body: found.body,
+		createdAt: found.createdAt,
+		parent: found.parentId === null ? null : { id: found.parentId },
+		reactions: found.reactions.map((emoji) => ({ emoji })),
+	});
+
+	const resolve = (operation: Operation, variables: unknown): unknown => {
+		const issueList = [...issues.values()];
+
+		switch (operation) {
+			case 'Teams': {
+				const { names } = Schema.decodeUnknownSync(variableSchemas.Teams)(variables);
+
+				return { teams: { nodes: teams.filter((candidate) => names.includes(candidate.name)) } };
+			}
+
+			case 'ReadyEpics': {
+				const { stateIds } = Schema.decodeUnknownSync(variableSchemas.ReadyEpics)(variables);
+				const ready = issueList.filter((candidate) => candidate.parentId === null && stateIds.includes(candidate.stateId));
+
+				return { issues: { nodes: ready.slice(0, 50).map(toEpic) } };
+			}
+
+			case 'Epics': {
+				const { ids } = Schema.decodeUnknownSync(variableSchemas.Epics)(variables);
+
+				return { issues: { nodes: issueList.filter((candidate) => ids.includes(candidate.id)).slice(0, MAX_PAGE_SIZE).map(toEpic) } };
+			}
+
+			case 'Replies': {
+				const { questionIds } = Schema.decodeUnknownSync(variableSchemas.Replies)(variables);
+				const replies = comments.filter((candidate) => candidate.parentId !== null && questionIds.includes(candidate.parentId));
+
+				return { comments: { nodes: replies.slice(0, MAX_PAGE_SIZE).map(toComment) } };
+			}
+
+			case 'Comments': {
+				const { issueId, after } = Schema.decodeUnknownSync(variableSchemas.Comments)(variables);
+				const onIssue = comments.filter((candidate) => candidate.issueId === issueId);
+				const start = after === null ? 0 : onIssue.findIndex((candidate) => candidate.id === after) + 1;
+				const page = onIssue.slice(start, start + MAX_PAGE_SIZE);
+				const hasNextPage = start + MAX_PAGE_SIZE < onIssue.length;
+
+				return { comments: { nodes: page.map(toComment), pageInfo: { hasNextPage, endCursor: page.at(-1)?.id ?? null } } };
+			}
+
+			case 'Reactions': {
+				const { id } = Schema.decodeUnknownSync(variableSchemas.Reactions)(variables);
+
+				return { comment: { reactions: comment(id).reactions.map((emoji) => ({ emoji })) } };
+			}
+
+			case 'Labels': {
+				const { name } = Schema.decodeUnknownSync(variableSchemas.Labels)(variables);
+				const named = labels.filter((candidate) => candidate.name === name);
+
+				return { issueLabels: { nodes: named.map((found) => ({ id: found.id, team: found.teamId === null ? null : { id: found.teamId } })) } };
+			}
+
+			case 'Move': {
+				const { id, stateId } = Schema.decodeUnknownSync(variableSchemas.Move)(variables);
+				const found = issue(id);
+
+				find(team(found.teamId).states.nodes, (state) => state.id === stateId, `WorkflowState ${stateId}`);
+				found.stateId = stateId;
+				mutations.push(`move ${id} ${stateId}`);
+
+				return { issueUpdate: { success: true } };
+			}
+
+			case 'Comment': {
+				const { issueId, body, parentId } = Schema.decodeUnknownSync(variableSchemas.Comment)(variables);
+				const parent = parentId ? comment(parentId).id : undefined;
+				const created = addComment(issueId, body, parent ? { parentId: parent } : {});
+
+				mutations.push(`comment ${issueId}${parent ? ` in ${parent}` : ''}`);
+
+				return { commentCreate: { success: true, comment: { id: created.id } } };
+			}
+
+			case 'React': {
+				const { commentId, emoji } = Schema.decodeUnknownSync(variableSchemas.React)(variables);
+				const found = comment(commentId);
+
+				found.reactions = [...found.reactions, emoji];
+				mutations.push(`react ${commentId} ${emoji}`);
+
+				return { reactionCreate: { success: true } };
+			}
+
+			case 'CreateLabel': {
+				const { name, teamId } = Schema.decodeUnknownSync(variableSchemas.CreateLabel)(variables);
+				const created: FixtureLabel = { id: `label-${labels.length + 1}`, name, teamId: team(teamId).id, parentName: null };
+
+				labels.push(created);
+				mutations.push(`create-label ${name}`);
+
+				return { issueLabelCreate: { success: true, issueLabel: { id: created.id } } };
+			}
+
+			case 'AddLabel': {
+				const { id, labelId } = Schema.decodeUnknownSync(variableSchemas.AddLabel)(variables);
+				const found = issue(id);
+
+				label(labelId);
+				found.labelIds = found.labelIds.includes(labelId) ? found.labelIds : [...found.labelIds, labelId];
+				mutations.push(`add-label ${id} ${labelId}`);
+
+				return { issueAddLabel: { success: true } };
+			}
+
+			case 'RemoveLabel': {
+				const { id, labelId } = Schema.decodeUnknownSync(variableSchemas.RemoveLabel)(variables);
+				const found = issue(id);
+
+				found.labelIds = found.labelIds.filter((candidate) => candidate !== labelId);
+				mutations.push(`remove-label ${id} ${labelId}`);
+
+				return { issueRemoveLabel: { success: true } };
+			}
+		}
+	};
+
+	const answer = (text: string): Answer => {
+		const request = Schema.decodeUnknownSync(GraphqlRequest)(text);
+		const [, kind = '', operation = ''] = /^\s*(query|mutation) (\w+)/.exec(request.query) ?? [];
+
+		if (!isOperation(operation)) {
+			return graphqlError(400, `unknown operation ${operation}`);
+		}
+
+		if (kind !== 'mutation') {
+			return { status: 200, body: { data: resolve(operation, request.variables) } };
+		}
+
+		writes += 1;
+		const failure = writeFailures.get(writes);
+
+		if (failure) {
+			const headers: Record<string, string> = failure.retryAfterSeconds === undefined ? {} : { 'retry-after': String(failure.retryAfterSeconds) };
+
+			return graphqlError(failure.status, `injected failure of write ${writes}`, headers, failure.code);
+		}
+
+		const data = resolve(operation, request.variables);
+
+		return writeCrashes.has(writes) ? 'crash' : { status: 200, body: { data } };
+	};
+
+	const handle = async (request: IncomingMessage, response: ServerResponse) => {
+		authorizations.add(request.headers.authorization ?? '');
+
+		let result: Answer;
+
+		try {
+			result = answer(await readBody(request));
+		} catch (error) {
+			if (!(error instanceof NotFound) && !Schema.isSchemaError(error)) {
+				throw error;
+			}
+
+			result = graphqlError(error instanceof NotFound ? 200 : 400, error.message);
+		}
+
+		if (result === 'crash') {
+			request.socket.destroy();
+
+			return;
+		}
+
+		response.writeHead(result.status, { 'content-type': 'application/json', ...result.headers });
+		response.end(JSON.stringify(result.body));
+	};
+
+	const server = yield* Effect.acquireRelease(
+		Effect.callback<ReturnType<typeof createServer>>((resume) => {
+			const created = createServer((request, response) => {
+				handle(request, response).catch((error: unknown) => {
+					response.writeHead(500, { 'content-type': 'application/json' });
+					response.end(JSON.stringify({ errors: [{ message: `fixture bug: ${String(error)}` }] }));
+				});
+			});
+
+			created.listen(0, '127.0.0.1', () => resume(Effect.succeed(created)));
+		}),
+		(created) =>
+			Effect.callback<void>((resume) => {
+				created.closeAllConnections();
+				created.close(() => resume(Effect.void));
+			}),
+	);
+	const address = server.address();
+
+	if (address === null || typeof address === 'string') {
+		return yield* Effect.die(new Error(`fixture server has no TCP address: ${address}`));
+	}
+
+	const fixture: LinearFixtureShape = {
+		url: `http://127.0.0.1:${address.port}/graphql`,
+		addTeam: (added) => {
+			teams.push(added);
+
+			return added;
+		},
+		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, subIssues = 2 }) => {
+			const owner = team(teamId);
+			const epic: FixtureIssue = {
+				id: `issue-${identifier.toLowerCase()}`,
+				identifier,
+				title,
+				teamId,
+				stateId: find(owner.states.nodes, (candidate) => candidate.name === state, `WorkflowState ${state}`).id,
+				parentId: null,
+				labelIds,
+				sortOrder,
+			};
+
+			issues.set(epic.id, epic);
+
+			for (let index = 1; index <= subIssues; index += 1) {
+				const child: FixtureIssue = {
+					id: `${epic.id}-sub-${index}`,
+					identifier: `${owner.key}-${Number(identifier.split('-')[1]) * 10 + index}`,
+					title: `Slice ${index}`,
+					teamId,
+					stateId: owner.states.nodes[0].id,
+					parentId: epic.id,
+					labelIds: [],
+					sortOrder: index,
+				};
+
+				issues.set(child.id, child);
+			}
+
+			return epic;
+		},
+		addLabel: ({ name, teamId, parentName }) => {
+			const added: FixtureLabel = { id: `label-${labels.length + 1}`, name, teamId: teamId ?? null, parentName: parentName ?? null };
+
+			labels.push(added);
+
+			return added;
+		},
+		addComment,
+		issue,
+		subIssues: (epicId) => [...issues.values()].filter((candidate) => candidate.parentId === epicId),
+		stateName: (issueId) => stateOf(issue(issueId)).name,
+		labelNames: (issueId) => issue(issueId).labelIds.map((id) => label(id).name),
+		comments: (issueId) => comments.filter((candidate) => candidate.issueId === issueId),
+		mutations,
+		authorizations,
+		failWrite: (n, status, retryAfterSeconds) => {
+			writeFailures.set(n, writeFailure(status, retryAfterSeconds));
+		},
+		rateLimitWrite: (n, retryAfterSeconds) => {
+			writeFailures.set(n, writeFailure(400, retryAfterSeconds, 'RATELIMITED'));
+		},
+		crashAfterWrite: (n) => {
+			writeCrashes.add(n);
+		},
+		awaitAnswers: (n) =>
+			SubscriptionRef.changes(answers).pipe(
+				Stream.takeUntil((count) => count >= n),
+				Stream.runDrain,
+			),
+	};
+
+	const client = (yield* HttpClient.HttpClient).pipe(HttpClient.transformResponse(Effect.onExit(() => SubscriptionRef.update(answers, (count) => count + 1))));
+
+	return { fixture, client };
+}).pipe(Effect.provide(FetchHttpClient.layer));
+
+export class LinearFixture extends Context.Service<LinearFixture, LinearFixtureShape>()('herdr-linear/LinearFixture') {
+	// A fresh fixture server for the layer's lifetime, and a Linear service talking to it over a real HttpClient.
+	static readonly layer = Layer.unwrap(
+		Effect.map(make, ({ fixture, client }) =>
+			Linear.layer(fixture.url).pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, client)), Layer.merge(Layer.succeed(LinearFixture, fixture))),
+		),
+	);
+}
