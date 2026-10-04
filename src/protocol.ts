@@ -20,6 +20,8 @@ export const jobSchema = z.object({
 	repoPath: z.string(),
 	tabLabel: z.string(),
 	prompt: z.string(),
+	// Set on a follow-up run: the pending review threads it answers. The worker pulls the branch before starting it.
+	threadIds: z.array(z.string()).optional(),
 });
 
 export type Job = z.infer<typeof jobSchema>;

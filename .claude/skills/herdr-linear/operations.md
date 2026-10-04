@@ -56,6 +56,7 @@ sh ~/herdr-linear/scripts/ctl.sh status   # paused?, service state, claims.json
 | `team X not found in Linear` | Config key must equal the team's exact name. |
 | Service crash-loops on startup | `journalctl` shows the reason: key file missing/empty/mode (`chmod 600 ~/.config/herdr-linear/linear-key`), invalid config field, missing env var. |
 | Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` claim or a run still `working` or without a result file after its PR is up? Team skipped? |
+| `/agent` thread on a PR in To Review starts no follow-up | Paused? `maxInFlight` used up? Epic has `agent-stuck`? Thread resolved, or the user's latest comment in it lacks `/agent`? The claim must be `ended` (a `kept` or released claim is not scanned). |
 | Epic has `agent-stuck` | Read the epic comment. Retry rules: `claims-and-lifecycle.md`. |
 | PR is up but the epic stays in Implementing | The agent wrote no result file yet. It is flagged `awaitingInput` once quiet. |
 | `poll failed: ...` from `gh api` | Posting the result failed; it retries every tick without double-posting. A flag whose `line` is outside the diff makes the review fail every time (HTTP 422): post the findings by hand and move the epic to To Review, which ends the run. |

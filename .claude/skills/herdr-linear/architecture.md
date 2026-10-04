@@ -17,7 +17,7 @@ The worker never talks to Linear and the dispatcher never talks to herdr.
 
 Plain JSON, validated with zod on receipt. Shared shapes:
 
-- `Job`: `epicId, identifier, branch, repoPath, tabLabel, prompt`.
+- `Job`: `epicId, identifier, branch, repoPath, tabLabel, prompt, threadIds?`. `threadIds` marks a follow-up run: the pending review threads it answers. The worker pulls the branch before starting it.
 - `Run`: `tabId, paneId, worktreePath, branch, githubRepo`.
 - `AgentStatus`: `working | idle | done | blocked | unknown` (herdr's values).
 - `ResultFile`: `summary, replies[{ threadId, body }], flags[{ path, line, body }]` (`resultFileSchema`, the only definition).
@@ -26,7 +26,7 @@ Dispatcher to worker:
 
 | Message | Meaning |
 | --- | --- |
-| `dispatch { job }` | Start a new run. |
+| `dispatch { job }` | Start a new run (initial or follow-up). |
 | `watch { job, run? }` | Re-attach after a dispatcher restart. With `run`: track that pane. Without: find the tab by label ("adopt"). |
 | `close { job, run }` | The run ended: stop tracking it and close its tab. |
 | `cleanup { job, run }` | Epic shipped or PR merged/closed: close the tab, remove the worktree and local branch unless they hold unpushed work. |
@@ -71,14 +71,14 @@ Note: `Run.worktreePath` and `Job.repoPath` are paths on the worker's machine.
 | --- | --- |
 | `src/main.ts` | Entry point: env, config, key, wiring, timers. |
 | `src/protocol.ts` | zod schemas for `Job`, `Run`, and all messages. |
-| `src/dispatcher.ts` | Poll, reconcile claims, dispatch, flag runs, decide cleanup, build the prompt and comments. |
+| `src/dispatcher.ts` | Poll, reconcile claims, dispatch initial and follow-up runs, flag runs, post results, decide cleanup, build the prompt and comments. |
 | `src/claims.ts` | `ClaimStore`: zod-validated `claims.json`, atomic save on every change. |
 | `src/worker.ts` | Start runs, adopt after restart, track panes via events plus timer, close tabs, clean up worktrees. |
 | `src/herdr.ts` | herdr CLI wrapper and raw-socket event subscription. |
-| `src/git.ts` | Worktree path layout, `prepareWorktree`, `unsavedWork`, `removeWorktree`, GitHub `owner/repo` from origin, result file path and read. |
+| `src/git.ts` | Worktree path layout, `prepareWorktree`, `pullBranch`, `unsavedWork`, `removeWorktree`, GitHub `owner/repo` from origin, result file path and read. |
 | `src/trust.ts` | Pre-accept Claude's folder trust in `~/.claude.json`. |
 | `src/linear.ts` | Linear GraphQL client. |
-| `src/github.ts` | `GitHub` class over the `gh` CLI: `findPullRequest`, summary comment, flags review; the onBehalfOf block. |
+| `src/github.ts` | `GitHub` class over the `gh` CLI: `findPullRequest`, `pendingThreads` (the pending rule), summary comment, flags review, thread reply and resolve; the onBehalfOf block. |
 | `src/config.ts` | Config schema, defaults, `~` expansion, `resolveRepo`. |
 | `src/atomic-write.ts` | Temp file + fsync + rename, mode 600. |
 | `src/fixtures/linear-server.ts` | Fake Linear GraphQL server for tests. |

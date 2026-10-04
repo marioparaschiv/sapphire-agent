@@ -70,6 +70,10 @@ Writes (dispatcher only; the agent never posts to GitHub):
 | --- | --- |
 | `comment(repo, number, body)` | `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. |
 | `review(repo, number, flags)` | `gh api --method POST repos/<repo>/pulls/<n>/reviews --input -` with `{ event: "COMMENT", body, comments: [{ path, line, side: "RIGHT", body }] }`. |
+| `replyToThread(threadId, body)` | `gh api graphql --input -`, mutation `addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId, body })`. |
+| `resolveThread(threadId)` | `gh api graphql --input -`, mutation `resolveReviewThread(input: { threadId })`. |
+
+Thread scan (`pendingThreads(repo, branch)`): `gh api graphql --input -` with `{ query, variables }`, `repository.pullRequests(headRefName, states: OPEN, first: 1) { url reviewThreads(first: 100) { totalCount nodes { id isResolved comments(last: 100) { nodes { body pullRequestReview { body } } } } } }`. Returns the PR URL and the pending thread ids (rule in `claims-and-lifecycle.md`). Linear's public API has no field for PR comments, so this reads GitHub directly; Linear Diffs syncs threads both ways, so `/agent` written in Linear's review UI shows up here. `gh` exits non-zero on GraphQL errors.
 
 - Every body ends with `ON_BEHALF_OF_CLAUDE`, the Linear `onBehalfOf` extension block. Linear shows such comments as written by Claude; it is the only way to tell agent comments from the user's, since both use one GitHub account.
 - A COMMENT review on your own PR is allowed. Requesting review, approving or requesting changes is not, which is why the user's review is not re-requested.

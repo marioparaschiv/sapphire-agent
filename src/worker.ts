@@ -1,5 +1,5 @@
 import { rm } from 'node:fs/promises';
-import { githubRepo, prepareWorktree, readResultFile, removeWorktree, resultFilePath, unsavedWork, worktreePath } from './git.ts';
+import { githubRepo, prepareWorktree, pullBranch, readResultFile, removeWorktree, resultFilePath, unsavedWork, worktreePath } from './git.ts';
 import { type Herdr, HerdrError } from './herdr.ts';
 import type { AgentStatus, DispatcherMessage, Job, Run, Send, WorkerMessage } from './protocol.ts';
 import { trustFolder } from './trust.ts';
@@ -118,6 +118,11 @@ export class Worker {
 	private async dispatch(job: Job) {
 		const { herdr, worktreesDirectory, claudeConfigPath, send, log } = this.options;
 		const path = await prepareWorktree(job.repoPath, job.branch, worktreesDirectory);
+
+		if (job.threadIds) {
+			await pullBranch(path, job.branch);
+		}
+
 		const repo = await githubRepo(job.repoPath);
 
 		// A reused worktree may still hold the result of an earlier run.

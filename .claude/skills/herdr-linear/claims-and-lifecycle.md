@@ -12,20 +12,20 @@ Flagged states use Linear's agent-session names.
 | `running` | Worker sent `started`. | yes |
 | `awaitingInput` | Agent sat `idle`, `done` or `blocked` without a result file for `awaitingInputAfterSeconds`; epic flagged with the question (see Elicitation). | yes |
 | `stale` | herdr says `working`, the pane tail did not change for `staleAfterSeconds`, a nudge did not help within `nudgeGraceSeconds`; epic flagged. | yes |
-| `error` | Agent `exited` or `vanished` without a result file, invalid result file, result file but no open or merged PR, or the run never started (worker `failed`, start timeout, repo label unresolvable); epic flagged. | no |
-| `ended` | Run over (result posted to the PR, or the epic moved on) and its tab closed. Kept only to clean the worktree up later. | no |
+| `error` | Agent `exited` or `vanished` without a result file, invalid result file, result file whose `replies` do not match the dispatched threads, result file but no open or merged PR, or an initial run never started (worker `failed`, start timeout, repo label unresolvable); epic flagged. | no |
+| `ended` | Run over (result posted to the PR, or the epic moved on) and its tab closed, or a follow-up that never started (flagged). Kept to clean the worktree up later and to scan its PR for `/agent` threads. | no |
 | `kept` | Cleanup found work not on origin; worktree kept and the epic told once. | no |
 
-The rule: a claim holds a slot while its Claude process may be alive, so live agents never exceed `maxInFlight` (`IN_FLIGHT_STATUSES`). `error`, `ended` and `kept` are never re-dispatched by themselves; an `ended` or `kept` claim is replaced by a fresh one if its epic is put back in Ready (without `agent-stuck`).
+The rule: a claim holds a slot while its Claude process may be alive, so live agents never exceed `maxInFlight` (`IN_FLIGHT_STATUSES`). `error` and `kept` are never re-dispatched by themselves. An `ended` or `kept` claim is replaced by a fresh one if its epic is put back in Ready (without `agent-stuck`); an `ended` one also by a follow-up when its PR has pending threads (see Follow-up runs).
 
 Older `claims.json` files load unchanged: `stuck` is read as `awaitingInput` and `failed` as `error` (zod preprocess in `claimStatusSchema`).
 
 ## `claims.json`
 
 - Path: `$HERDR_PLUGIN_STATE_DIR/claims.json`, live: `~/.local/state/herdr/plugins/herdr-linear/claims.json`.
-- Shape: `{ "claims": [ { epicId, identifier, teamId, status, claimedAt, job?, run?, agent?, nudgedAt?, overCap?, questionCommentId?, result? } ] }`.
+- Shape: `{ "claims": [ { epicId, identifier, teamId, status, claimedAt, job?, run?, agent?, nudgedAt?, overCap?, questionCommentId?, result? } ] }`. A follow-up's `job.threadIds` holds the thread ids it was dispatched for.
 - `agent` is `{ status, since, tail }`; status is an `AgentStatus` or `exited` / `vanished`. `since` is when the status (or, while `working`, the tail) last changed.
-- `nudgedAt`: the current stale episode's nudge. `overCap`: the cap flag was posted. `questionCommentId`: the current awaitingInput question comment. `result`: `{ file, posted }`, the result file and which of `summary` / `review` are on the PR already.
+- `nudgedAt`: the current stale episode's nudge. `overCap`: the cap flag was posted. `questionCommentId`: the current awaitingInput question comment. `result`: `{ file, posted, replied, resolved }`, the result file, which of `summary` / `review` are on the PR already, and the thread ids already replied to and resolved (`replied` / `resolved` default to `[]` for older files).
 - Written atomically (temp + fsync + rename, mode 600) on every `put` / `delete`. Missing file means no claims. Invalid file fails startup (zod).
 - A released claim is deleted. There is no history; the log has it.
 
@@ -36,7 +36,7 @@ Older `claims.json` files load unchanged: `stuck` is read as `awaitingInput` and
 3. Reconcile each claim, in order (rules below).
 4. Deliver new replies (see Elicitation).
 5. Read the pause file; log on change.
-6. If not paused, dispatch ready epics: resolved team, no claim (or an `ended` / `kept` one), no `agent-stuck` label, has sub-issues, by `sortOrder`, until `maxInFlight`.
+6. If not paused, dispatch follow-ups (below), then ready epics: resolved team, no claim (or an `ended` / `kept` one), no `agent-stuck` label, has sub-issues, by `sortOrder`. Both stop at `maxInFlight`; follow-ups go first.
 
 An exception anywhere aborts the rest of that tick and is logged as `poll failed: ...` (`serial`). The next tick retries.
 
@@ -68,9 +68,18 @@ An open PR alone no longer ends a run: the result file is the completion signal.
 - The agent writes `"$(git rev-parse --git-dir)/herdr-result.json"` as its last step (orchestrate skill). It lives in the worktree's git dir, so it is never committed. The worker deletes a leftover one when it starts a run in a reused worktree.
 - The worker reads it (`readResultFile`, `git.ts`) whenever the agent is not `working`, and before reporting `exited` / `vanished`, so it is never read half-written. It sends `result` or `invalidResult` once per tracked run.
 - `result`: saved on the claim. `invalidResult`: `error` + comment with the zod message.
-- Posting (rule 9, `finishRun`): needs an open or merged PR for the branch, else `error`. Then the summary as a PR comment, then all `flags` as one `COMMENT` review with inline comments (none when `flags` is empty). Each part is saved in `result.posted` right after it posts, so a restart or a failed `gh` call carries on without posting anything twice. A `gh` failure aborts the tick and is retried next tick.
-- `replies` are not posted yet (logged).
+- Posting (rule 9, `finishRun`): first `replies` must hold exactly one entry per id in `job.threadIds` (none for an initial run). Otherwise `error`, a comment naming the missing, unknown and repeated ids, and nothing is posted. Then it needs an open or merged PR for the branch, else `error`. Then the summary as a PR comment, all `flags` as one `COMMENT` review with inline comments (none when `flags` is empty), and for each reply: post it into its thread, then resolve the thread. Each step is saved (`posted`, `replied`, `resolved`) right after it succeeds, so a restart or a failed `gh` call carries on without posting anything twice. A `gh` failure aborts the tick and is retried next tick.
 - Not done: re-requesting the user's review. The PR author is the user's own account (GitHub rejects review requests from the author), and Linear's public API has no review-request mutation.
+
+## Follow-up runs
+
+Pending rule (`isPending`, `github.ts`): a review thread is pending when it is unresolved and its latest comment without the onBehalfOf block contains `/agent`, in its body or in the body of the review it was submitted with. So `/agent` in a review body tags every thread of that review, the agent's own flags and replies never count, a flag the user answered `/agent` counts, and a resolved flag is dismissed.
+
+- Scan (`dispatchFollowUps`, every tick while not paused): every `ended` claim whose epic is in To Review without `agent-stuck`. One `gh api graphql` query per claim reads the branch's open PR and its review threads (up to 100; more aborts the tick). Nothing is stored: pending is read from GitHub each time.
+- Dispatch: all pending threads of the PR in one run. A fresh `claimed` claim with `job.threadIds` and the previous `run` (same worktree; needed for cleanup), then `dispatch`. The epic moves to Implementing on `started`, as for initial runs, and back to To Review when the result is posted.
+- Restart safety: an in-flight claim is never scanned, so a restart mid-run dispatches nothing again; `start` sends `watch` without the old `run` for a `claimed` claim, so the worker adopts the new tab. The ids are on disk in `job.threadIds`, and the threads stay unresolved on GitHub until the dispatcher replies, so a lost run finds them again.
+- Never started (worker `failed` or start timeout): back to `ended` + flag. The label stops the scan; removing it dispatches the follow-up again.
+- Reply mismatch: `error` + flag, nothing posted, tab left open. Remove the label and move the epic to To Review: rule 8 ends the run and the still-pending threads start a new follow-up.
 
 ## Flagging
 
@@ -123,7 +132,7 @@ A re-dispatch reuses the existing worktree if it is on the same branch (see `wor
 
 ## Restart re-attach (`dispatcher.ts:39-47`, `worker.ts`)
 
-On start the dispatcher sends `watch` for every in-flight claim (`claimed`, `running`, `awaitingInput`, `stale`) with a job:
+On start the dispatcher sends `watch` for every in-flight claim (`claimed`, `running`, `awaitingInput`, `stale`) with a job, without `run` for `claimed` ones:
 
 - With `run`: worker tracks the pane again. If herdr restarted, the pane is gone and the worker reports `vanished`.
 - Without `run` (claimed): worker "adopts": finds the tab by `tabLabel` in the `agents` workspace, checks Claude runs there, replies `started`. Otherwise `failed` ("the dispatch was interrupted before the agent was confirmed running").

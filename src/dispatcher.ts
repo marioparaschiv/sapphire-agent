@@ -2,7 +2,7 @@ import type { Claim, ClaimStore } from './claims.ts';
 import { type Config, resolveRepo, type StateRole } from './config.ts';
 import type { GitHub } from './github.ts';
 import type { Epic, LinearClient, LinearTeam, Reply } from './linear.ts';
-import type { DispatcherMessage, Job, Run, Send, WorkerMessage } from './protocol.ts';
+import type { DispatcherMessage, Job, ResultFile, Run, Send, WorkerMessage } from './protocol.ts';
 
 export type DispatcherOptions = {
 	config: Config;
@@ -46,7 +46,8 @@ export class Dispatcher {
 
 		for (const claim of this.options.claims.all()) {
 			if (claim.job && IN_FLIGHT_STATUSES.has(claim.status)) {
-				this.options.send({ type: 'watch', job: claim.job, run: claim.run });
+				// A claimed follow-up still carries the previous run, whose tab is closed.
+				this.options.send({ type: 'watch', job: claim.job, run: claim.status === 'claimed' ? undefined : claim.run });
 			}
 		}
 	}
@@ -77,6 +78,7 @@ export class Dispatcher {
 			}
 
 			if (!paused) {
+				await this.dispatchFollowUps(claimedById);
 				await this.dispatchReady(ready);
 			}
 		});
@@ -180,7 +182,7 @@ export class Dispatcher {
 						return;
 					}
 
-					await claims.put({ ...claim, result: { file: message.result, posted: [] } });
+					await claims.put({ ...claim, result: { file: message.result, posted: [], replied: [], resolved: [] } });
 					log(`${claim.identifier}: agent wrote its result file`);
 
 					return;
@@ -285,9 +287,11 @@ export class Dispatcher {
 		this.options.log(`${claim.identifier}: moved to ${this.options.config.states[role]}`);
 	}
 
+	// A follow-up that never started goes back to ended, so its worktree is still cleaned up and, once the label is
+	// removed, its pending threads are dispatched again.
 	private async failStart(claim: Claim, error: string, tail?: string) {
 		this.options.log(`${claim.identifier}: failed to start: ${error}`);
-		await this.options.claims.put({ ...claim, status: 'error' });
+		await this.options.claims.put({ ...claim, status: claim.job?.threadIds ? 'ended' : 'error' });
 		await this.flag(claim, failureComment(this.options.config, error, tail));
 	}
 
@@ -394,6 +398,16 @@ export class Dispatcher {
 	// restart mid-way carries on without posting anything twice.
 	private async finishRun(claim: Claim, result: ClaimResult, epic: Epic, job: Job, run: Run) {
 		const { github, claims, log } = this.options;
+		const mismatch = replyMismatch(job.threadIds ?? [], result.file.replies);
+
+		if (mismatch) {
+			log(`${claim.identifier}: the result file's replies do not match the dispatched threads: ${mismatch}`);
+			await claims.put({ ...claim, status: 'error' });
+			await this.flag(claim, replyMismatchComment(this.options.config, job, mismatch));
+
+			return;
+		}
+
 		const pullRequest = await github.findPullRequest(run.githubRepo, run.branch);
 
 		if (!pullRequest || pullRequest.state === 'CLOSED') {
@@ -404,24 +418,32 @@ export class Dispatcher {
 			return;
 		}
 
-		let posted = result.posted;
-		const save = async (part: (typeof posted)[number]) => {
-			posted = [...posted, part];
-			await claims.put({ ...claim, result: { ...result, posted } });
+		let saved = result;
+		const save = async (progress: Partial<ClaimResult>) => {
+			saved = { ...saved, ...progress };
+			await claims.put({ ...claim, result: saved });
 		};
 
-		if (!posted.includes('summary')) {
+		if (!saved.posted.includes('summary')) {
 			await github.comment(run.githubRepo, pullRequest.number, result.file.summary);
-			await save('summary');
+			await save({ posted: [...saved.posted, 'summary'] });
 		}
 
-		if (result.file.flags.length > 0 && !posted.includes('review')) {
+		if (result.file.flags.length > 0 && !saved.posted.includes('review')) {
 			await github.review(run.githubRepo, pullRequest.number, result.file.flags);
-			await save('review');
+			await save({ posted: [...saved.posted, 'review'] });
 		}
 
-		if (result.file.replies.length > 0) {
-			log(`${claim.identifier}: the result file has ${result.file.replies.length} thread replies; posting them is not supported yet`);
+		for (const { threadId, body } of result.file.replies) {
+			if (!saved.replied.includes(threadId)) {
+				await github.replyToThread(threadId, body);
+				await save({ replied: [...saved.replied, threadId] });
+			}
+
+			if (!saved.resolved.includes(threadId)) {
+				await github.resolveThread(threadId);
+				await save({ resolved: [...saved.resolved, threadId] });
+			}
 		}
 
 		log(`${claim.identifier}: posted the result to ${pullRequest.url}`);
@@ -433,7 +455,7 @@ export class Dispatcher {
 			await this.options.linear.removeLabel(claim.epicId, stuckLabel.id);
 		}
 
-		await this.endRun({ ...claim, result: { ...result, posted } }, job, run, 'the agent finished');
+		await this.endRun({ ...claim, result: saved }, job, run, 'the agent finished');
 	}
 
 	// Nudges once per stale episode; the status handler clears nudgedAt as soon as the pane changes.
@@ -518,9 +540,51 @@ export class Dispatcher {
 		return QUIET_STATUSES.has(agent.status) && now() - agent.since >= config.awaitingInputAfterSeconds * 1000;
 	}
 
+	private inFlight() {
+		return this.options.claims.all().filter((claim) => IN_FLIGHT_STATUSES.has(claim.status)).length;
+	}
+
+	// One follow-up run per epic in To Review whose open PR has pending review threads, all of them batched. Pending
+	// is read from GitHub every tick; an in-flight claim is never scanned, so a restart mid-run dispatches nothing twice.
+	private async dispatchFollowUps(claimedById: Map<string, Epic>) {
+		const { claims, config, github, send, now, log } = this.options;
+
+		for (const claim of claims.all()) {
+			if (this.inFlight() >= config.maxInFlight) {
+				return;
+			}
+
+			const epic = claimedById.get(claim.epicId);
+
+			if (claim.status !== 'ended' || !claim.job || !claim.run || !epic || this.roleOf(claim, epic) !== 'toReview' || this.stuckLabel(epic)) {
+				continue;
+			}
+
+			const pending = await github.pendingThreads(claim.run.githubRepo, claim.run.branch);
+
+			if (!pending || pending.threadIds.length === 0) {
+				continue;
+			}
+
+			const job = buildJob(epic, claim.job.repoPath, { pullRequestUrl: pending.url, threadIds: pending.threadIds });
+
+			// Keeps the previous run: its worktree and branch are the same, and cleanup needs them if this never starts.
+			await claims.put({
+				epicId: claim.epicId,
+				identifier: claim.identifier,
+				teamId: claim.teamId,
+				status: 'claimed',
+				claimedAt: now(),
+				job,
+				run: claim.run,
+			});
+			send({ type: 'dispatch', job });
+			log(`${claim.identifier}: dispatched a follow-up for ${pending.threadIds.length} review threads on ${pending.url}`);
+		}
+	}
+
 	private async dispatchReady(ready: Epic[]) {
 		const { claims, config, send, now, log } = this.options;
-		let inFlight = claims.all().filter((claim) => IN_FLIGHT_STATUSES.has(claim.status)).length;
 		const runOver = (claim: Claim | undefined) => !claim || claim.status === 'ended' || claim.status === 'kept';
 		const candidates = ready
 			.filter((epic) => this.teams.has(epic.team.id) && runOver(claims.get(epic.id)) && !this.stuckLabel(epic))
@@ -532,7 +596,7 @@ export class Dispatcher {
 				continue;
 			}
 
-			if (inFlight >= config.maxInFlight) {
+			if (this.inFlight() >= config.maxInFlight) {
 				return;
 			}
 
@@ -553,18 +617,20 @@ export class Dispatcher {
 			const job = buildJob(epic, repo.path);
 
 			await claims.put({ ...claim, job });
-			inFlight += 1;
 			send({ type: 'dispatch', job });
 			log(`${epic.identifier}: dispatched to ${repo.path} on ${epic.branchName}`);
 		}
 	}
 }
 
-export function buildJob(epic: Epic, repoPath: string): Job {
+export function buildJob(epic: Epic, repoPath: string, followUp?: { pullRequestUrl: string; threadIds: string[] }): Job {
 	const shortTitle = epic.title.length > 40 ? `${epic.title.slice(0, 39).trimEnd()}…` : epic.title;
 
-	// The orchestrate skill owns the workflow (Linear moves, commits, /pr). herdr refuses newlines in the prompt.
-	const prompt = `/orchestrate the sub-issues of Linear epic ${epic.identifier} (${epic.url}) autonomously, in the worktree you are in.`;
+	// The orchestrate and follow-up skills own the workflow (Linear moves, commits, /pr). herdr refuses newlines in
+	// the prompt.
+	const prompt = followUp
+		? `/follow-up Linear epic ${epic.identifier} (${epic.url}), PR ${followUp.pullRequestUrl}, threads ${followUp.threadIds.join(' ')}, autonomously, in the worktree you are in.`
+		: `/orchestrate the sub-issues of Linear epic ${epic.identifier} (${epic.url}) autonomously, in the worktree you are in.`;
 
 	return {
 		epicId: epic.id,
@@ -573,7 +639,21 @@ export function buildJob(epic: Epic, repoPath: string): Job {
 		repoPath,
 		tabLabel: `${epic.identifier} ${shortTitle}`,
 		prompt,
+		...(followUp && { threadIds: followUp.threadIds }),
 	};
+}
+
+// Why the replies do not answer exactly the dispatched threads, once each, or undefined when they do.
+function replyMismatch(threadIds: string[], replies: ResultFile['replies']) {
+	const replied = replies.map((reply) => reply.threadId);
+	const problems = [
+		['no reply for', threadIds.filter((id) => !replied.includes(id))],
+		['replies to threads it was not given', [...new Set(replied.filter((id) => !threadIds.includes(id)))]],
+		['more than one reply for', [...new Set(replied.filter((id, index) => replied.indexOf(id) !== index))]],
+	] as const;
+	const found = problems.filter(([, ids]) => ids.length > 0);
+
+	return found.length > 0 ? found.map(([problem, ids]) => `${problem} ${ids.join(', ')}`).join('; ') : undefined;
 }
 
 // Claude's spinner glyph, its elapsed timer and the status line's counters tick even while a turn hangs,
@@ -652,6 +732,14 @@ function invalidResultComment(config: Config, error: string) {
 
 function noPullRequestComment(config: Config, branch: string) {
 	return `**herdr-linear** (\`error\`): the agent wrote its result file, but branch \`${branch}\` has no open or merged PR. ${startOver(config)}`;
+}
+
+function replyMismatchComment(config: Config, job: Job, mismatch: string) {
+	const retry = job.threadIds
+		? `Remove the label and move the epic to ${config.states.toReview}; the pending threads start a new follow-up.`
+		: startOver(config);
+
+	return `**herdr-linear** (\`error\`): the agent's result file does not match the review threads it was given: ${mismatch}. Nothing was posted to the PR. ${retry}`;
 }
 
 function replyFailedComment(error: string) {

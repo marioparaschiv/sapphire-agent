@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { parseGithubRepo, prepareWorktree, readResultFile, removeWorktree, resultFilePath, unsavedWork } from './git.ts';
+import { parseGithubRepo, prepareWorktree, pullBranch, readResultFile, removeWorktree, resultFilePath, unsavedWork } from './git.ts';
 
 const git = (cwd: string, ...args: string[]) =>
 	execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], {
@@ -137,6 +137,30 @@ test('checks the branch when its worktree directory was deleted by hand, then re
 	assert.equal(await unsavedWork(repo, branch, path), undefined);
 	await removeWorktree(repo, branch, path);
 	assert.equal(hasBranch(repo, branch), false);
+});
+
+test('a follow-up restores a cleaned-up worktree from origin and pulls a reused one up to date', async (t) => {
+	const { origin, seed, repo, worktrees } = repos(t);
+	const branch = 'mario/unb-19';
+	const path = await prepareWorktree(repo, branch, worktrees);
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 1');
+	git(path, 'push', '--quiet', 'origin', branch);
+	await removeWorktree(repo, branch, path);
+	assert.equal(existsSync(path), false);
+	assert.equal(hasBranch(repo, branch), false);
+
+	assert.equal(await prepareWorktree(repo, branch, worktrees), path);
+	await pullBranch(path, branch);
+	assert.equal(git(path, 'log', '-1', '--format=%s'), 'slice 1');
+
+	git(seed, 'fetch', '--quiet', origin, branch);
+	git(seed, 'checkout', '--quiet', '-b', branch, 'FETCH_HEAD');
+	git(seed, 'commit', '--quiet', '--allow-empty', '-m', 'pushed from elsewhere');
+	git(seed, 'push', '--quiet', origin, branch);
+
+	assert.equal(await prepareWorktree(repo, branch, worktrees), path);
+	await pullBranch(path, branch);
+	assert.equal(git(path, 'log', '-1', '--format=%s'), 'pushed from elsewhere');
 });
 
 test('reads owner/repo from GitHub remotes', () => {

@@ -4,7 +4,7 @@ How the worker starts a Claude Code run (worktree, trust, tab, `herdr agent star
 
 ## Dispatch sequence (`worker.ts:107-138`)
 
-1. `prepareWorktree(repoPath, branch, worktreesDirectory)`.
+1. `prepareWorktree(repoPath, branch, worktreesDirectory)`. Follow-up runs (`job.threadIds`) then run `git pull --ff-only origin <branch>` (`pullBranch`), so they start from what is on the PR.
 2. `githubRepo(repoPath)`: `owner/repo` from `origin` (must be GitHub). Delete a leftover result file from an earlier run.
 3. `trustFolder(~/.claude.json, worktree)`.
 4. `openTab(tabLabel, worktree)`.
@@ -29,7 +29,7 @@ Cleanup (`unsavedWork`, `removeWorktree`):
 - Kept if `git status --porcelain` is non-empty (untracked files count, ignored ones do not): `uncommitted changes`.
 - Kept if the worktree's `HEAD` or the local branch has commits that no `origin/*` ref contains: `N unpushed commits`. A branch never pushed is unpushed once it has commits beyond the default branch. No fetch first: `git push` already updates the remote-tracking ref.
 - Otherwise `git worktree remove <path>` (no `--force`), `git worktree prune` (for a directory deleted by hand), `git branch -D <branch>`. Each step is skipped if already done, so a second cleanup is a no-op.
-- A later run then starts again from `origin/<branch>` through `prepareWorktree`.
+- A later run (e.g. a follow-up) then starts again from `origin/<branch>` through `prepareWorktree`.
 
 Done in git directly rather than `herdr worktree create`, which creates and opens its own workspace; this code needs a tab in the shared `agents` workspace plus the reuse and no-track rules above.
 

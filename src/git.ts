@@ -79,6 +79,11 @@ export async function prepareWorktree(repoPath: string, branch: string, worktree
 	return path;
 }
 
+// Names origin explicitly: a branch created without tracking has no upstream to pull from.
+export async function pullBranch(path: string, branch: string) {
+	await git(path, ['pull', '--ff-only', 'origin', branch]);
+}
+
 // Why the epic's worktree and branch cannot be deleted without losing work, or undefined when everything in them
 // is on origin. A commit counts as pushed when any origin branch contains it, so a branch never pushed is unsaved
 // as soon as it has commits beyond the default branch.

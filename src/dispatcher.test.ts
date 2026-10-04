@@ -38,9 +38,11 @@ async function harness(t: TestContext) {
 		now: 1_791_100_000_000,
 		paused: false,
 		pullRequest: undefined as PullRequest | undefined,
+		// The review threads on the open PR, as GitHub would hold them.
+		threads: [] as FakeThread[],
 		// Every gh call, as the process would receive it.
 		gh: [] as { args: string[]; input?: string }[],
-		// gh calls whose arguments match fail like a GitHub outage.
+		// gh calls whose arguments or stdin match fail like a GitHub outage.
 		ghFails: undefined as RegExp | undefined,
 		onSend: (_message: DispatcherMessage) => {},
 		async dispatcher() {
@@ -55,11 +57,15 @@ async function harness(t: TestContext) {
 				github: new GitHub(async (args, input) => {
 					harness.gh.push({ args, input });
 
-					if (harness.ghFails?.test(args.join(' '))) {
+					if (harness.ghFails?.test(`${args.join(' ')} ${input ?? ''}`)) {
 						throw new Error('gh: HTTP 502');
 					}
 
-					return args[0] === 'pr' ? JSON.stringify(harness.pullRequest ? [harness.pullRequest] : []) : '{}';
+					if (args[0] === 'pr') {
+						return JSON.stringify(harness.pullRequest ? [harness.pullRequest] : []);
+					}
+
+					return args[1] === 'graphql' ? JSON.stringify({ data: fakeGraphql(harness, JSON.parse(input ?? '')) }) : '{}';
 				}),
 				isPaused: async () => harness.paused,
 				now: () => harness.now,
@@ -69,6 +75,42 @@ async function harness(t: TestContext) {
 	};
 
 	return harness;
+}
+
+type FakeThread = { id: string; isResolved: boolean; comments: { body: string; reviewBody?: string }[] };
+
+// Answers the GraphQL operations GitHub.pendingThreads, replyToThread and resolveThread send, like GitHub would.
+function fakeGraphql(
+	h: { pullRequest: PullRequest | undefined; threads: FakeThread[] },
+	{ query, variables }: { query: string; variables: Record<string, string> },
+) {
+	const operation = /^(?:query|mutation) (\w+)/.exec(query)?.[1];
+	const thread = h.threads.find((candidate) => candidate.id === variables.threadId);
+
+	switch (operation) {
+		case 'PendingThreads': {
+			const open = h.pullRequest?.state === 'OPEN' ? [h.pullRequest] : [];
+			const nodes = h.threads.map(({ id, isResolved, comments }) => ({
+				id,
+				isResolved,
+				comments: { nodes: comments.map(({ body, reviewBody }) => ({ body, pullRequestReview: { body: reviewBody ?? '' } })) },
+			}));
+
+			return { repository: { pullRequests: { nodes: open.map(({ url }) => ({ url, reviewThreads: { totalCount: nodes.length, nodes } })) } } };
+		}
+
+		case 'ReplyToThread':
+			thread!.comments.push({ body: variables.body });
+
+			return { addPullRequestReviewThreadReply: { comment: { id: `${thread!.id}-reply` } } };
+
+		case 'ResolveThread':
+			thread!.isResolved = true;
+
+			return { resolveReviewThread: { thread: { isResolved: true } } };
+	}
+
+	throw new Error(`unexpected GraphQL operation: ${query}`);
 }
 
 const runFor = (identifier: string): Run => ({
@@ -82,7 +124,9 @@ const runFor = (identifier: string): Run => ({
 const stateId = (name: string) => unboundStates.find((state) => state.name === name)!.id;
 
 const ghWrites = (h: { gh: { args: string[]; input?: string }[] }) =>
-	h.gh.filter(({ args }) => args[0] === 'api').map(({ args, input }) => ({ args, body: JSON.parse(input ?? '') }));
+	h.gh
+		.filter(({ args, input }) => args[0] === 'api' && !input?.startsWith('{"query":"query'))
+		.map(({ args, input }) => ({ args, body: JSON.parse(input ?? '') }));
 
 const result = (overrides: Partial<ResultFile> = {}): ResultFile => ({
 	summary: 'Added settings sync.\n\n1. Synced plugin settings.',
@@ -647,6 +691,191 @@ test('a merged or closed PR triggers cleanup too', async (t) => {
 
 		assert.deepEqual(h.sent.at(-1), { type: 'cleanup', job, run }, state);
 	}
+});
+
+const asClaude = (body: string) => `${body}\n\n${ON_BEHALF_OF_CLAUDE}`;
+
+const graphqlWrites = (h: { gh: { args: string[]; input?: string }[] }) =>
+	ghWrites(h)
+		.filter(({ args }) => args[1] === 'graphql')
+		.map(({ body }) => [/^mutation (\w+)/.exec(body.query)?.[1], body.variables]);
+
+test('/agent threads start one follow-up run, which replies to and resolves each of them as Claude', async (t) => {
+	const h = await harness(t);
+	const { epic, job: firstJob, run } = await endedRun(h, 'UNB-130');
+	h.threads = [
+		{ id: 'PRRT_inline', isResolved: false, comments: [{ body: 'Rename this to syncSettings. /agent' }] },
+		{ id: 'PRRT_flag', isResolved: false, comments: [{ body: asClaude('This retry loop has no backoff. /agent can fix it.') }] },
+		{
+			id: 'PRRT_accepted_flag',
+			isResolved: false,
+			comments: [{ body: asClaude('The settings type duplicates the schema.') }, { body: '/agent yes, derive it' }],
+		},
+		{ id: 'PRRT_dismissed_flag', isResolved: true, comments: [{ body: asClaude('Unused import.') }, { body: '/agent' }] },
+		{ id: 'PRRT_note', isResolved: false, comments: [{ body: '/agent rename it' }, { body: 'Actually, I will do it myself.' }] },
+	];
+	h.gh.length = 0;
+
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+
+	const followUps = h.sent.filter((message) => message.type === 'dispatch').slice(1);
+	assert.equal(followUps.length, 1);
+	const [{ job }] = followUps;
+	assert.equal(
+		job.prompt,
+		`/follow-up Linear epic UNB-130 (https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship), PR https://github.com/marioparaschiv/unbound/pull/120, threads PRRT_inline PRRT_accepted_flag, autonomously, in the worktree you are in.`,
+	);
+	assert.deepEqual(job, { ...firstJob, prompt: job.prompt, threadIds: ['PRRT_inline', 'PRRT_accepted_flag'] });
+	assert.equal(claimsOnDisk(h)[0].status, 'claimed');
+	assert.deepEqual(ghWrites(h), [], 'scanning only reads');
+
+	const restarted = await h.dispatcher();
+	restarted.start();
+	await restarted.tick();
+
+	assert.deepEqual(h.sent.at(-1), { type: 'watch', job, run: undefined }, 'a restart re-attaches the follow-up');
+	assert.equal(h.sent.filter((message) => message.type === 'dispatch').length, 2, 'a restart does not dispatch it again');
+
+	await restarted.handle({ type: 'started', epicId: epic.id, run });
+	assert.equal(h.linear.stateName(epic.id), 'Implementing');
+
+	await restarted.handle({ type: 'status', epicId: epic.id, status: 'done', tail: 'Pushed the fixes.' });
+	await restarted.handle({
+		type: 'result',
+		epicId: epic.id,
+		result: result({
+			summary: 'Renamed the sync function and derived the settings type.',
+			replies: [
+				{ threadId: 'PRRT_inline', body: 'Renamed it to syncSettings.' },
+				{ threadId: 'PRRT_accepted_flag', body: 'The type is now inferred from the schema.' },
+			],
+		}),
+	});
+	await restarted.tick();
+
+	assert.deepEqual(ghWrites(h)[0], {
+		args: ['api', '--method', 'POST', 'repos/marioparaschiv/unbound/issues/120/comments', '--input', '-'],
+		body: { body: asClaude('Renamed the sync function and derived the settings type.') },
+	});
+	assert.deepEqual(graphqlWrites(h), [
+		['ReplyToThread', { threadId: 'PRRT_inline', body: asClaude('Renamed it to syncSettings.') }],
+		['ResolveThread', { threadId: 'PRRT_inline' }],
+		['ReplyToThread', { threadId: 'PRRT_accepted_flag', body: asClaude('The type is now inferred from the schema.') }],
+		['ResolveThread', { threadId: 'PRRT_accepted_flag' }],
+	]);
+	assert.equal(ghWrites(h).length, 5);
+	assert.equal(h.linear.stateName(epic.id), 'To Review');
+	assert.equal(claimsOnDisk(h)[0].status, 'ended');
+
+	await restarted.tick();
+	assert.equal(h.sent.filter((message) => message.type === 'dispatch').length, 2, 'answered threads are not pending any more');
+	assert.equal(ghWrites(h).length, 5);
+});
+
+test('a review with /agent in its body is one follow-up for all its threads, waiting for a free slot', async (t) => {
+	const h = await harness(t);
+	const { epic } = await endedRun(h, 'UNB-131');
+	const busy = h.linear.addEpic({ identifier: 'UNB-132', title: 'Busy' });
+	await (await h.dispatcher()).tick();
+	h.linear.addEpic({ identifier: 'UNB-133', title: 'Queued' });
+	h.threads = [1, 2, 3, 4, 5].map((index) => ({
+		id: `PRRT_${index}`,
+		isResolved: false,
+		comments: [{ body: `Comment ${index}`, reviewBody: 'A few things to fix. /agent' }],
+	}));
+	const dispatcher = await h.dispatcher();
+
+	await dispatcher.tick();
+	assert.deepEqual(
+		h.sent.filter((message) => message.type === 'dispatch').map((message) => message.job.epicId),
+		[epic.id, busy.id],
+		'maxInFlight is used up by the busy epic',
+	);
+
+	await dispatcher.handle({ type: 'failed', epicId: busy.id, error: 'herdr timeout' });
+	await dispatcher.tick();
+
+	const dispatches = h.sent.filter((message) => message.type === 'dispatch');
+	assert.equal(dispatches.length, 3, 'the follow-up goes before the queued epic');
+	assert.deepEqual(dispatches[2].job.threadIds, ['PRRT_1', 'PRRT_2', 'PRRT_3', 'PRRT_4', 'PRRT_5']);
+});
+
+test('a restart while replying never replies twice', async (t) => {
+	const h = await harness(t);
+	const { epic, run } = await endedRun(h, 'UNB-134');
+	h.threads = ['PRRT_a', 'PRRT_b'].map((id) => ({ id, isResolved: false, comments: [{ body: '/agent fix this' }] }));
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Done.' });
+	await dispatcher.handle({
+		type: 'result',
+		epicId: epic.id,
+		result: result({ replies: [{ threadId: 'PRRT_a', body: 'Fixed.' }, { threadId: 'PRRT_b', body: 'Fixed too.' }] }),
+	});
+	h.gh.length = 0;
+	h.ghFails = /ResolveThread.*PRRT_b/;
+
+	await dispatcher.tick();
+	assert.ok(h.logs.includes('poll failed: gh: HTTP 502'));
+
+	h.ghFails = undefined;
+	await (await h.dispatcher()).tick();
+
+	assert.deepEqual(
+		graphqlWrites(h).map(([operation, variables]) => `${operation} ${variables.threadId}`),
+		['ReplyToThread PRRT_a', 'ResolveThread PRRT_a', 'ReplyToThread PRRT_b', 'ResolveThread PRRT_b', 'ResolveThread PRRT_b'],
+	);
+	assert.equal(ghWrites(h).filter(({ args }) => args[1] !== 'graphql').length, 1, 'one summary');
+	assert.equal(h.linear.stateName(epic.id), 'To Review');
+});
+
+test('replies that do not match the dispatched threads are an error and nothing is posted', async (t) => {
+	const h = await harness(t);
+	const { epic, run } = await endedRun(h, 'UNB-135');
+	h.threads = ['PRRT_a', 'PRRT_b'].map((id) => ({ id, isResolved: false, comments: [{ body: '/agent' }] }));
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Done.' });
+	await dispatcher.handle({
+		type: 'result',
+		epicId: epic.id,
+		result: result({ replies: [{ threadId: 'PRRT_a', body: 'Fixed.' }, { threadId: 'PRRT_z', body: 'Fixed.' }] }),
+	});
+	h.gh.length = 0;
+
+	await dispatcher.tick();
+
+	assert.deepEqual(ghWrites(h), []);
+	assert.equal(claimsOnDisk(h)[0].status, 'error');
+	assert.match(
+		h.linear.comments.at(-1)!.body,
+		/does not match the review threads it was given: no reply for PRRT_b; replies to threads it was not given PRRT_z\. Nothing was posted to the PR\. Remove the label and move the epic to To Review/,
+	);
+	assert.deepEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+	assert.equal(h.linear.stateName(epic.id), 'Implementing');
+});
+
+test('a follow-up that fails to start goes back to ended and is retried once the label is removed', async (t) => {
+	const h = await harness(t);
+	const { epic, run } = await endedRun(h, 'UNB-136');
+	h.threads = [{ id: 'PRRT_a', isResolved: false, comments: [{ body: '/agent' }] }];
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+
+	await dispatcher.handle({ type: 'failed', epicId: epic.id, error: 'git pull --ff-only failed' });
+	await dispatcher.tick();
+
+	assert.equal(claimsOnDisk(h)[0].status, 'ended');
+	assert.deepEqual(JSON.parse(readFileSync(h.statePath, 'utf8')).claims[0].run, run, 'cleanup still knows the worktree');
+	assert.match(h.linear.comments.at(-1)!.body, /couldn't start an agent for this epic: git pull --ff-only failed/);
+	assert.equal(h.sent.filter((message) => message.type === 'dispatch').length, 2, 'not retried while labelled');
+
+	h.linear.issues.get(epic.id)!.labelIds = [];
+	await dispatcher.tick();
+	assert.equal(h.sent.filter((message) => message.type === 'dispatch').length, 3);
 });
 
 test('a failed start is reported on the epic and retried only once the label is removed', async (t) => {
