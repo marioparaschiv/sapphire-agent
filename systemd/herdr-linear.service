@@ -1,0 +1,19 @@
+[Unit]
+Description=herdr-linear dispatcher (Linear epics to Claude Code runs)
+Wants=herdr-server.service
+After=herdr-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/herdr-linear
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HERDR_BIN_PATH=%h/.local/bin/herdr
+Environment=HERDR_SOCKET_PATH=%h/.config/herdr/herdr.sock
+Environment=HERDR_PLUGIN_CONFIG_DIR=%h/.config/herdr/plugins/config/herdr-linear
+Environment=HERDR_PLUGIN_STATE_DIR=%h/.local/state/herdr/plugins/herdr-linear
+ExecStart=%h/.nvm/versions/node/v24.21.0/bin/node src/main.ts
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

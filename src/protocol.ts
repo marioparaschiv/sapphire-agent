@@ -1,0 +1,54 @@
+import { z } from 'zod';
+
+// The only contract between the dispatcher and a worker. Messages are plain JSON so a remote worker
+// can later exchange them over a WebSocket without either side changing.
+
+export const runSchema = z.object({
+	tabId: z.string(),
+	paneId: z.string(),
+	worktreePath: z.string(),
+	branch: z.string(),
+	githubRepo: z.string(),
+});
+
+export type Run = z.infer<typeof runSchema>;
+
+export const jobSchema = z.object({
+	epicId: z.string(),
+	identifier: z.string(),
+	branch: z.string(),
+	repoPath: z.string(),
+	tabLabel: z.string(),
+	prompt: z.string(),
+});
+
+export type Job = z.infer<typeof jobSchema>;
+
+export const agentStatusSchema = z.enum(['working', 'idle', 'done', 'blocked', 'unknown']);
+
+export type AgentStatus = z.infer<typeof agentStatusSchema>;
+
+export const dispatcherMessageSchema = z.discriminatedUnion('type', [
+	z.object({ type: z.literal('dispatch'), job: jobSchema }),
+	// Re-attach to a run after a dispatcher restart. Without a run, the dispatch was interrupted before
+	// the worker confirmed it, so the worker looks for the job's tab instead.
+	z.object({ type: z.literal('watch'), job: jobSchema, run: runSchema.optional() }),
+]);
+
+export type DispatcherMessage = z.infer<typeof dispatcherMessageSchema>;
+
+export const workerMessageSchema = z.discriminatedUnion('type', [
+	z.object({ type: z.literal('started'), epicId: z.string(), run: runSchema }),
+	z.object({ type: z.literal('status'), epicId: z.string(), status: agentStatusSchema, tail: z.string() }),
+	z.object({
+		type: z.literal('finished'),
+		epicId: z.string(),
+		reason: z.enum(['exited', 'vanished']),
+		tail: z.string(),
+	}),
+	z.object({ type: z.literal('failed'), epicId: z.string(), error: z.string(), tail: z.string().optional() }),
+]);
+
+export type WorkerMessage = z.infer<typeof workerMessageSchema>;
+
+export type Send<T> = (message: T) => void;

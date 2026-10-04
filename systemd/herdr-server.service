@@ -1,0 +1,16 @@
+[Unit]
+Description=herdr server
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+# herdr also starts its server on demand when a client attaches; never start a second one.
+ExecCondition=/bin/sh -c '! %h/.local/bin/herdr status server | grep -q "^status: running"'
+ExecStart=%h/.local/bin/herdr server
+ExecStop=%h/.local/bin/herdr server stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
