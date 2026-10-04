@@ -1,23 +1,72 @@
-import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { z } from 'zod';
+import { join, normalize } from 'node:path';
+import { Config, Context, Effect, FileSystem, Layer, Predicate, Redacted, Result, Schema, SchemaGetter, SchemaIssue } from 'effect';
 
-export const expandHome = (path: string) => (path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path);
+const expandHome = (path: string) => (path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path);
 
-const pathSchema = z.string().min(1).transform(expandHome);
+// Without a trailing slash, so a path compares equal to the paths git and herdr report.
+const toPath = (path: string) => normalize(expandHome(path)).replace(/(.)\/$/, '$1');
 
-const teamSchema = z.strictObject({
-	repo: pathSchema,
+const Path = Schema.NonEmptyString.pipe(Schema.decode({ decode: SchemaGetter.transform(toPath), encode: SchemaGetter.passthrough() }));
+
+const withDefault = <S extends Schema.Constraint>(value: S['Encoded']) => Schema.withDecodingDefaultKey<S>(Effect.succeed(value));
+
+const IntAtLeast = (minimum: number, fallback: number) => Schema.Int.check(Schema.isGreaterThanOrEqualTo(minimum)).pipe(withDefault(fallback));
+
+const Name = (fallback: string) => Schema.NonEmptyString.pipe(withDefault(fallback));
+
+const Team = Schema.Struct({
+	repo: Path,
 	// An epic labelled `<repoPrefix><name>` runs in `<labelReposDirectory>/<name>` instead of `repo`.
-	labelReposDirectory: pathSchema.optional(),
+	labelReposDirectory: Schema.optionalKey(Path),
 });
 
-export type TeamConfig = z.infer<typeof teamSchema>;
+const Settings = Schema.Struct({
+	pollSeconds: IntAtLeast(5, 30),
+	maxInFlight: IntAtLeast(1, 1),
+	// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
+	awaitingInputAfterSeconds: IntAtLeast(30, 180),
+	// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
+	// one at a time, so this covers waiting behind other starts as well as the fetch and herdr's 30 s start wait.
+	startTimeoutSeconds: IntAtLeast(60, 300),
+	// How long herdr may report working while the pane tail stays the same before the agent is nudged.
+	staleAfterSeconds: IntAtLeast(60, 600),
+	// How long after the nudge the tail may stay the same before the epic is flagged as stale.
+	nudgeGraceSeconds: IntAtLeast(60, 600),
+	// How long a run may go, in any state, before the epic is flagged once.
+	maxRunSeconds: IntAtLeast(600, 5400),
+	// How long an epic may keep failing with transient errors before it is flagged once.
+	flagTransientAfterSeconds: IntAtLeast(60, 600),
+	worktreesDirectory: Path.pipe(withDefault('~/.herdr/worktrees')),
+	workspaceLabel: Name('agents'),
+	states: Schema.Struct({
+		ready: Name('Ready For Agent'),
+		implementing: Name('Implementing'),
+		inReview: Name('In Review'),
+		toReview: Name('To Review'),
+		shipped: Name('Shipped'),
+	}).pipe(withDefault({})),
+	labels: Schema.Struct({
+		stuck: Name('agent-stuck'),
+		repoPrefix: Name('repo:'),
+	}).pipe(withDefault({})),
+	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
+	// The GitHub account whose @mention by one of `allowedUsers` starts a command run, and that answers it.
+	// `ghConfigDirectory` is a gh config dir logged in as it.
+	bot: Schema.Struct({
+		login: Schema.NonEmptyString,
+		ghConfigDirectory: Path,
+		allowedUsers: Schema.Array(Schema.NonEmptyString).check(Schema.makeFilter((users) => users.length > 0 || 'no allowed users configured')),
+	}),
+});
 
-// Renames the key older versions used.
+export type Settings = typeof Settings.Type;
+
+export type StateRole = keyof Settings['states'];
+
+// Older versions called awaitingInputAfterSeconds stuckAfterSeconds.
 const renameStuckAfterSeconds = (config: unknown) => {
-	if (typeof config !== 'object' || config === null || !('stuckAfterSeconds' in config)) {
+	if (!Predicate.isObject(config) || !('stuckAfterSeconds' in config)) {
 		return config;
 	}
 
@@ -26,99 +75,124 @@ const renameStuckAfterSeconds = (config: unknown) => {
 	return { awaitingInputAfterSeconds: stuckAfterSeconds, ...rest };
 };
 
-export const configSchema = z.preprocess(
-	renameStuckAfterSeconds,
-	z.strictObject({
-		pollSeconds: z.number().int().min(5).default(30),
-		maxInFlight: z.number().int().min(1).default(1),
-		// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
-		awaitingInputAfterSeconds: z.number().int().min(30).default(180),
-		// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
-		// one at a time, so this covers waiting behind other starts as well as the fetch and herdr's 30 s start wait.
-		startTimeoutSeconds: z.number().int().min(60).default(300),
-		// How long herdr may report working while the pane tail stays the same before the agent is nudged.
-		staleAfterSeconds: z.number().int().min(60).default(600),
-		// How long after the nudge the tail may stay the same before the epic is flagged as stale.
-		nudgeGraceSeconds: z.number().int().min(60).default(600),
-		// How long a run may go, in any state, before the epic is flagged once.
-		maxRunSeconds: z.number().int().min(600).default(5400),
-		worktreesDirectory: pathSchema.default(join(homedir(), '.herdr/worktrees')),
-		workspaceLabel: z.string().min(1).default('agents'),
-		states: z
-			.strictObject({
-				ready: z.string().min(1).default('Ready For Agent'),
-				implementing: z.string().min(1).default('Implementing'),
-				inReview: z.string().min(1).default('In Review'),
-				toReview: z.string().min(1).default('To Review'),
-				shipped: z.string().min(1).default('Shipped'),
-			})
-			.prefault({}),
-		labels: z
-			.strictObject({
-				stuck: z.string().min(1).default('agent-stuck'),
-				repoPrefix: z.string().min(1).default('repo:'),
-			})
-			.prefault({}),
-		teams: z.record(z.string().min(1), teamSchema).refine((teams) => Object.keys(teams).length > 0, 'no teams configured'),
-	}),
+const SettingsFile = Schema.fromJsonString(
+	Schema.Unknown.pipe(
+		Schema.decode({ decode: SchemaGetter.transform(renameStuckAfterSeconds), encode: SchemaGetter.passthrough() }),
+		Schema.decodeTo(Settings),
+	),
 );
 
-export type Config = z.infer<typeof configSchema>;
+const env = {
+	herdrBinPath: Config.NonEmptyString('HERDR_BIN_PATH'),
+	herdrSocketPath: Config.NonEmptyString('HERDR_SOCKET_PATH'),
+	configDirectory: Config.NonEmptyString('HERDR_PLUGIN_CONFIG_DIR'),
+	stateDirectory: Config.NonEmptyString('HERDR_PLUGIN_STATE_DIR'),
+	linearKeyFile: Config.NonEmptyString('HERDR_LINEAR_KEY_FILE').pipe(Config.withDefault(join(homedir(), '.config/herdr-linear/linear-key'))),
+	claudeConfigPath: Config.NonEmptyString('CLAUDE_CONFIG_PATH').pipe(Config.withDefault(join(homedir(), '.claude.json'))),
+};
 
-export type StateRole = keyof Config['states'];
+export type Env = { readonly [K in keyof typeof env]: Config.Success<(typeof env)[K]> };
 
-export async function loadConfig(path: string): Promise<Config> {
-	const text = await readFile(path, 'utf8');
-	const result = configSchema.safeParse(JSON.parse(text));
+export type AppConfigShape = Settings & { readonly env: Env; readonly linearApiKey: Redacted.Redacted<string> };
 
-	if (!result.success) {
-		throw new Error(`invalid config ${path}:\n${z.prettifyError(result.error)}`);
+export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
+	override get message() {
+		return `cannot start, fix these and restart:\n${this.problems.map((problem) => `- ${problem}`).join('\n')}`;
 	}
-
-	return result.data;
 }
 
-export type IssueLabel = { name: string; parent: { name: string } | null };
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 
-export type RepoResolution = { ok: true; path: string } | { ok: false; error: string };
+// One problem per issue, e.g. `/x/config.json pollSeconds: Expected a value greater than or equal to 5`.
+const schemaProblems = (source: string, error: Schema.SchemaError) =>
+	formatIssues(error.issue).issues.map(({ path = [], message }) => {
+		const where = [source, path.map((segment) => String(Predicate.isObject(segment) ? segment.key : segment)).join('.')].filter(Boolean).join(' ');
 
-const repoNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-export function resolveRepo(config: Config, teamName: string, labels: IssueLabel[]): RepoResolution {
-	const team = config.teams[teamName];
-
-	if (!team) {
-		return { ok: false, error: `team ${teamName} has no repo in the config` };
-	}
-
-	const prefix = config.labels.repoPrefix;
-	// Linear shows a label inside a group named `repo` as `repo/<name>`, so accept both spellings.
-	const group = prefix.replace(/:$/, '');
-	const repoNames = labels.flatMap((label) => {
-		if (label.name.startsWith(prefix)) {
-			return [label.name.slice(prefix.length)];
-		}
-
-		return label.parent?.name === group ? [label.name] : [];
+		return `${where}: ${message}`;
 	});
 
-	if (repoNames.length === 0) {
-		return { ok: true, path: team.repo };
+const readSettings = (path: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem;
+		const text = yield* fs.readFileString(path);
+
+		return yield* Schema.decodeEffect(SettingsFile)(text, { errors: 'all', onExcessProperty: 'error' });
+	}).pipe(
+		Effect.catchTags({
+			PlatformError: (error) => Effect.fail([`${path}: ${error.message}`]),
+			SchemaError: (error) => Effect.fail(schemaProblems(path, error)),
+		}),
+	);
+
+const readApiKey = (path: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem;
+		const info = yield* fs.stat(path);
+
+		if (info.mode & 0o077) {
+			return yield* Effect.fail([`${path} is readable by other users; run chmod 600 ${path}`]);
+		}
+
+		const key = (yield* fs.readFileString(path)).trim();
+
+		if (!key) {
+			return yield* Effect.fail([`${path} is empty`]);
+		}
+
+		return Redacted.make(key);
+	}).pipe(
+		Effect.catchTag('PlatformError', (error) =>
+			Effect.fail([error.reason._tag === 'NotFound' ? `no Linear API key: create ${path} with mode 600` : `${path}: ${error.message}`]),
+		),
+	);
+
+const configProblems = (error: Config.ConfigError) => (Schema.isSchemaError(error.cause) ? schemaProblems('', error.cause) : [error.message]);
+
+// A file whose path comes from a failed env var is not read; that env var is already reported.
+const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effect.Effect<A, ReadonlyArray<string>, FileSystem.FileSystem>) =>
+	Result.isSuccess(path) ? Effect.result(read(path.success)) : Effect.succeed(Result.fail([]));
+
+const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
+
+// Reads env, the config file and the Linear API key, and reports every problem in one StartupError.
+export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
+	const envResults = yield* Effect.all(env, { mode: 'result' });
+	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
+	const linearApiKey = yield* readWhen(envResults.linearKeyFile, readApiKey);
+	const problems = [
+		...Object.values(envResults).flatMap((result) => (Result.isFailure(result) ? configProblems(result.failure) : [])),
+		...problemsOf(settings),
+		...problemsOf(linearApiKey),
+	];
+	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey });
+
+	if (problems.length > 0 || Result.isFailure(loaded)) {
+		return yield* new StartupError({ problems });
 	}
 
-	if (repoNames.length > 1) {
-		return { ok: false, error: `the epic has more than one repo label: ${repoNames.join(', ')}` };
-	}
+	return { ...loaded.success.settings, env: loaded.success.env, linearApiKey: loaded.success.linearApiKey };
+});
 
-	const [name] = repoNames;
+export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('herdr-linear/AppConfig') {
+	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
-	if (!team.labelReposDirectory) {
-		return { ok: false, error: `the epic is labelled ${prefix}${name}, but team ${teamName} has no labelReposDirectory` };
-	}
-
-	if (!repoNamePattern.test(name)) {
-		return { ok: false, error: `${JSON.stringify(name)} is not a valid repo name` };
-	}
-
-	return { ok: true, path: join(team.labelReposDirectory, name) };
+	// Defaults plus one team and the bot, with every path under `directory`.
+	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
+		Layer.succeed(AppConfig, {
+			...Schema.decodeUnknownSync(Settings)({
+				teams: { Test: { repo: join(directory, 'repo') } },
+				worktreesDirectory: join(directory, 'worktrees'),
+				bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), allowedUsers: ['marioparaschiv'] },
+				...settings,
+			}),
+			env: {
+				herdrBinPath: 'herdr',
+				herdrSocketPath: join(directory, 'herdr.sock'),
+				configDirectory: directory,
+				stateDirectory: directory,
+				linearKeyFile: join(directory, 'linear-key'),
+				claudeConfigPath: join(directory, 'claude.json'),
+			},
+			linearApiKey: Redacted.make('lin_api_test'),
+		});
 }

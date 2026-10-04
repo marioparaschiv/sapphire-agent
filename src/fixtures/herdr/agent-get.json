@@ -1,0 +1,1 @@
+{"id":"cli:agent:get","result":{"agent":{"agent":"claude","agent_status":"working","cwd":"/tmp","focused":false,"foreground_cwd":"/tmp","pane_id":"w1:p4","revision":0,"state_change_seq":7,"tab_id":"w1:t4","terminal_id":"term_65d000def02dc4","workspace_id":"w1"},"type":"agent_info"}}
