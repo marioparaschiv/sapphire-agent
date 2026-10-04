@@ -4,7 +4,6 @@ import { Clock, Effect } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import { Refused } from './ctl.ts';
-import { ON_BEHALF_OF_CLAUDE } from './github.ts';
 import type { Epic } from './linear.ts';
 import { git, type Harness, makeHarness, markerKeys } from './test-harness.ts';
 
@@ -139,7 +138,7 @@ describe('follow-ups', () => {
 				h.github.thread(rename).comments.map((comment) => comment.body.split('\n\n')[0]),
 				['Rename this to syncSettings.', 'Renamed it to syncSettings.'],
 			);
-			assert.isTrue(h.github.thread(backoff).comments[1].body.endsWith(ON_BEHALF_OF_CLAUDE));
+			assert.strictEqual(h.github.thread(backoff).comments[1].author, 'orchestratorbot[bot]');
 			assert.deepStrictEqual([h.github.thread(note).isResolved, h.github.thread(note).comments.length], [false, 1]);
 			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[1].startsWith('Renamed the sync function and added backoff.\n\nReady for review, @marioparaschiv.'));
 			assert.strictEqual(h.herdr.starts().length, 1);

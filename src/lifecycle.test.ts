@@ -2,10 +2,11 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Fiber, Option, Random } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
+import type { WebhookDelivery } from './github-app-fixture.ts';
 import type { Command, Run } from './journal.ts';
 import { parseMarker } from './markers.ts';
 import { deliveredEmoji } from './monitoring.ts';
-import { git, type Harness, makeHarness } from './test-harness.ts';
+import { deliveries, git, type Harness, makeHarness } from './test-harness.ts';
 
 const writeKinds = ['journal', 'linear', 'github', 'herdr'] as const;
 
@@ -93,7 +94,20 @@ const makeDriver = (h: Harness, crash: Option.Option<CrashPoint>) => {
 			assert.fail(`${what} was not reached${Option.match(crash, { onNone: () => '', onSome: (point) => ` after a ${describePoint(point)}` })}`);
 		});
 
-	return { tickUntil, crashed: () => Option.isSome(crash) && Option.isNone(pending), retypes: () => retypes };
+	// A delivery the crash failed is redelivered once the service is back, as GitHub's delivery log allows.
+	const deliver = (delivery: WebhookDelivery) =>
+		Effect.gen(function* () {
+			if ((yield* h.deliver(delivery)) === 204) {
+				return;
+			}
+
+			assert.isTrue(Option.exists(pending, (point) => writesSoFar(h)[point.kind] >= point.nth), 'a delivery failed without a crash');
+			pending = Option.none();
+			yield* h.restart;
+			assert.strictEqual(yield* h.deliver(delivery), 204);
+		});
+
+	return { tickUntil, deliver, crashed: () => Option.isSome(crash) && Option.isNone(pending), retypes: () => retypes };
 };
 
 const runOf = (runs: ReadonlyArray<Run>) => Option.fromUndefinedOr(runs[0]);
@@ -141,7 +155,7 @@ const currentRun = (h: Harness) =>
 const lifecycle = (crash: Option.Option<CrashPoint>) =>
 	Effect.gen(function* () {
 		const h = yield* makeHarness();
-		const { tickUntil, crashed, retypes } = makeDriver(h, crash);
+		const { tickUntil, deliver, crashed, retypes } = makeDriver(h, crash);
 
 		// The workspace exists already, as in production.
 		h.herdr.addTab({ label: 'notes', agent: null });
@@ -185,13 +199,14 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 		yield* tickUntil('the posted result', (runs) => isRun(runs, (run) => run.status === 'ended'));
 		assert.deepStrictEqual([h.linear.stateName(epic.id), ownTabs(h)], ['To Review', []]);
 
-		// Command: a minute later the reviewer asks the bot for a change in a review thread. Its agent replies, hands the
-		// thread to a follow-up and says it is done.
+		// Command: a minute later the reviewer asks the bot for a change in a review thread, and GitHub delivers it to the
+		// webhook. Its agent replies, hands the thread to a follow-up and says it is done.
 		yield* TestClock.adjust('1 minute');
 
 		const threadId = h.github.addThread(h.githubRepo, pullRequest.number, { comments: [{ body: 'Rename this to syncSettings. @orchestratorbot' }] });
 		const [mention] = h.github.thread(threadId).comments;
 
+		yield* deliver(deliveries.reviewComment(h.githubRepo, pullRequest.number, mention));
 		yield* tickUntil('the command start', (_, commands) => commands.some((command) => command.status === 'running'));
 		yield* h.ctl('reply', mention.url, 'On it: a follow-up renames it.');
 		yield* h.ctl('follow-up', 'TEST-10', '--threads', threadId);
@@ -235,7 +250,6 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 					comments: h.github.comments(h.githubRepo, pullRequest.number).map(markerOrFirstLine),
 					reviews: h.github.reviews(h.githubRepo, pullRequest.number).map((review) => [markerOrFirstLine(review.body), review.comments.map((comment) => `${comment.path}:${comment.line}`)]),
 					thread: [thread.isResolved, thread.comments.map((comment) => markerOrFirstLine(comment.body))],
-					unread: h.github.unread(h.githubRepo, pullRequest.number),
 				},
 				herdr: {
 					ownedTabs: ownTabs(h).length,
@@ -275,7 +289,6 @@ describe('lifecycle', () => {
 						comments: ['summary:0', 'commandReply:1', `summary:${followUpAt}`],
 						reviews: [['flags:0', ['src/sync/merge.ts:3']]],
 						thread: [true, ['Rename this to syncSettings. @orchestratorbot', `reply:PRRT_1.${followUpAt}`]],
-						unread: false,
 					},
 					herdr: { ownedTabs: 0, openTabs: 0, starts: ['/orchestrate', 'You', '/follow-up'], prompts: ['Remote wins. Keep a backup of local.'] },
 					commands: ['ended marioparaschiv'],

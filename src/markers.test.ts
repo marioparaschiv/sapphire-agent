@@ -1,6 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Option } from 'effect';
-import { ON_BEHALF_OF_CLAUDE } from './github.ts';
 import { hasMarker, type Marker, parseMarker, renderMarker, withMarker } from './markers.ts';
 
 describe('markers', () => {
@@ -11,9 +10,9 @@ describe('markers', () => {
 		);
 	});
 
-	it('reads back a key holding a path, from a PR comment that ends with the onBehalfOf block', () => {
+	it('reads back a key holding a path', () => {
 		const marker: Marker = { identifier: 'UNB-12', purpose: 'keptWorktree', key: '/home/dev/.herdr/worktrees/unbound/my work:tree' };
-		const body = `${withMarker('**herdr-linear:** kept the worktree.', marker).body}\n\n${ON_BEHALF_OF_CLAUDE}`;
+		const { body } = withMarker('**herdr-linear:** kept the worktree.', marker);
 
 		assert.deepStrictEqual(parseMarker(body), Option.some(marker));
 		assert.isTrue(hasMarker(body, marker));

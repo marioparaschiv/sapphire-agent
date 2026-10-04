@@ -4,7 +4,7 @@ What herdr-linear does end to end, the Linear column flow, and who moves an issu
 
 ## In one paragraph
 
-A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeconds`, and right away when herdr reports an agent change or `scripts/ctl.sh` records a request, it observes Linear, herdr, git and GitHub and acts on the difference. Top-level issues ("epics") in "Ready For Agent" that have sub-issues are claimed in the local journal; then a git worktree is created on the epic's Linear branch, a herdr tab is opened in the `agents` workspace and Claude Code is started there with a one-line `/orchestrate` prompt. The reconciler then watches the agent and the GitHub PR, and updates Linear. On GitHub, the user talks to the reconciler by mentioning the bot account in plain language; a command agent works out what they want and does it through `scripts/ctl.sh`.
+A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeconds`, and right away when herdr reports an agent change or `scripts/ctl.sh` records a request, it observes Linear, herdr, git and GitHub and acts on the difference. Top-level issues ("epics") in "Ready For Agent" that have sub-issues are claimed in the local journal; then a git worktree is created on the epic's Linear branch, a herdr tab is opened in the `agents` workspace and Claude Code is started there with a one-line `/orchestrate` prompt. The reconciler then watches the agent and the GitHub PR, and updates Linear. On GitHub, the user talks to the reconciler by mentioning the bot in plain language; the GitHub App's webhook delivers the comment to the service, and a command agent works out what they want and does it through `scripts/ctl.sh`.
 
 ## End-to-end steps
 
@@ -12,9 +12,9 @@ A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeco
 2. The dispatch rule claims it (a journal row with status `claimed`).
 3. The start rule prepares the worktree, trusts it for Claude, opens a tab, starts Claude and moves the epic to **Implementing** (status `running`).
 4. The agent works through the sub-issues, moves the epic to **In Review** when it starts `/sreview`, runs `/pr`, reviews its own diff, then writes its result file.
-5. Once the agent stops, the results rule reads the result file, posts the summary as a PR comment and the self-review flags as one review (both shown as Claude), removes `agent-stuck` if present, moves the epic to **To Review**, closes the tab and ends the run (status `ended`).
+5. Once the agent stops, the results rule reads the result file, posts the summary as a PR comment and the self-review flags as one review (both by the GitHub App), removes `agent-stuck` if present, moves the epic to **To Review**, closes the tab and ends the run (status `ended`).
 6. Human reviews the PR (on GitHub or in Linear's review UI) and mentions the bot (`@<bot.login>`, e.g. `@orchestratorbot`) in a comment, a review or a review thread, in plain language: "fix the naming in these threads", "use the existing helper instead".
-7. Next tick, the mentions rule reads the bot's notification and records the comment as a command; the commands rule starts the command agent in a herdr tab. It reads the PR and the threads, replies as the bot, and asks for a follow-up (`ctl.sh follow-up <EPIC> <instruction> --threads <id>...`), then says it is done and its tab closes.
+7. GitHub delivers the comment to the service's webhook server, which records it as a command and wakes the reconciler; the commands rule starts the command agent in a herdr tab. It reads the PR and the threads, replies as the GitHub App, and asks for a follow-up (`ctl.sh follow-up <EPIC> <instruction> --threads <id>...`), then says it is done and its tab closes.
 8. The follow-up rule claims one follow-up run for the request; the start rule pulls the branch, opens a tab and starts `/follow-up` with the threads and the instruction. The epic goes to **Implementing**.
 9. The follow-up agent changes, commits and pushes, self-reviews, and writes a result file with one reply per thread. The results rule posts the new summary and any flags, posts each reply into its thread and resolves it, moves the epic back to **To Review** and closes the tab.
 10. When the PR is merged or closed (or the epic reaches Shipped), the cleanup rule removes the worktree and local branch and drops the run from the journal.
@@ -49,7 +49,7 @@ Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.m
 - Epics without sub-issues are ignored with a one-time log line.
 - Only issues with no parent count as epics.
 - Order is Linear board order (`sortOrder` ascending); at most `maxInFlight` runs at once, follow-ups first.
-- Everything on GitHub about the work (PRs, summaries, thread replies, flags) is written as the user's account. The bot account is mentioned to ask for something, and comments only to answer such a mention: its command agent's replies, or a notice that the command failed.
+- The agent opens and pushes the PR as the user's account. Every comment herdr-linear writes on GitHub (summaries, flags, thread replies and resolves, the command agent's replies, notices that a command failed) is the GitHub App's (`<slug>[bot]`). The bot (`@<bot.login>`) is mentioned to ask for something.
 - Linear and GitHub are the source of truth. The journal only holds what cannot be observed (see `journal-and-markers.md`), and every comment carries a hidden marker so it is never posted twice.
 
 ## The prompts the agent gets

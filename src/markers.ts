@@ -13,7 +13,7 @@ import { Option, Schema } from 'effect';
 // - replyFailed: `<replyCommentId>`, the user's reply that could not be typed; posted under the question.
 // - transientFailure: `<streakStartedAt>` from `Journal.recordTransient`, once per streak of transient failures.
 // - workingOrphan: `<tabId>`, once per untracked tab whose agent is working.
-// On the GitHub PR:
+// On the GitHub PR, as the bot:
 // - summary, flags: `<claimedAt>`, once per run (flags is the review holding every flag).
 // - reply: `<threadId>.<claimedAt>`, once per thread per run; found among the thread's comments.
 // On the issue or PR a command came from, as the bot:

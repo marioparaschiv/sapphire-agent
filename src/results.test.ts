@@ -2,7 +2,6 @@ import { existsSync } from 'node:fs';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { Transient } from './call-policy.ts';
-import { ON_BEHALF_OF_CLAUDE } from './github.ts';
 import type { Epic } from './linear.ts';
 import type { StartedRun } from './observation.ts';
 import { type Harness, makeHarness, markerKeys } from './test-harness.ts';
@@ -52,11 +51,10 @@ describe('results', () => {
 
 			assert.deepStrictEqual(yield* outcome(h, epic, run, pullRequest.number), finished);
 
-			const [summary] = h.github.comments(h.githubRepo, pullRequest.number);
+			const [summary] = h.github.botComments(h.githubRepo, pullRequest.number);
 			const [review] = h.github.reviews(h.githubRepo, pullRequest.number);
 
 			assert.isTrue(summary.startsWith(`${resultFile.summary}\n\nReady for review, @marioparaschiv.\n\n`));
-			assert.isTrue(summary.endsWith(ON_BEHALF_OF_CLAUDE));
 			assert.deepStrictEqual(
 				review.comments.map(({ path, line, side }) => [path, line, side]),
 				[['src/sync/merge.ts', 12, 'RIGHT']],

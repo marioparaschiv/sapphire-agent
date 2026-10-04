@@ -6,16 +6,17 @@ import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import { commandClaudeArgs, ctlPath } from './commands.ts';
 import { Refused } from './ctl.ts';
-import { type Harness, makeHarness, markerKeys } from './test-harness.ts';
+import { deliveries, type Harness, makeHarness, markerKeys } from './test-harness.ts';
 
 const branch = 'mario/test-10-plugin-settings-sync';
 
-// A PR on `repo` with a comment of the user's that mentions the bot, and one tick.
+// A PR on `repo` with a comment of the user's that mentions the bot, delivered to the webhook, and one tick.
 const mention = (h: Harness, body: string, repo = h.githubRepo) =>
 	Effect.gen(function* () {
 		const { number } = h.github.addPullRequest({ repo, branch, author: 'marioparaschiv' });
 		const comment = h.github.addComment(repo, number, body);
 
+		yield* h.deliver(deliveries.issueComment(repo, number, comment));
 		yield* h.tick;
 
 		return { number, comment };
@@ -39,7 +40,7 @@ describe('commands', () => {
 			const h = yield* makeHarness();
 			const { number, comment } = yield* mention(h, '@orchestratorbot stop TEST-12 and start TEST-14');
 
-			h.github.addComment(h.githubRepo, number, '@orchestratorbot pause everything');
+			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, h.github.addComment(h.githubRepo, number, '@orchestratorbot pause everything')));
 			yield* h.tick;
 
 			const tab = commandTab(h, 'CMD-1');

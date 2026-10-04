@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Context, Effect, FileSystem, Layer, Option } from 'effect';
@@ -93,11 +94,9 @@ describe('Journal', () => {
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
 
-	it.effect('records a comment as a command once, and keeps when mentions were first read', () =>
+	it.effect('records a comment as a command once', () =>
 		Effect.gen(function* () {
-			yield* TestClock.setTime(42_000);
-
-			const journal = yield* Layer.build(Journal.layer(':memory:')).pipe(Effect.map(Context.get(Journal)));
+			const journal = yield* Journal;
 			const mention: NewCommand = {
 				commentId: 'IC_kwDO1',
 				url: 'https://github.com/acme/web/pull/7#issuecomment-1',
@@ -133,22 +132,6 @@ describe('Journal', () => {
 				[1, 'running', 'w1:t2'],
 				[2, 'ignored', null],
 			]);
-			assert.strictEqual(yield* journal.mentionFloor, 42_000);
-		}),
-	);
-
-	it.effect('keeps the first since of a mention thread until the thread is scanned', () =>
-		Effect.gen(function* () {
-			const journal = yield* Journal;
-
-			yield* journal.addMentionThread({ threadId: '18', repo: 'acme/web', number: 7, since: 2_000 });
-			yield* journal.addMentionThread({ threadId: '18', repo: 'acme/web', number: 7, since: 9_000 });
-			yield* journal.addMentionThread({ threadId: '19', repo: 'acme/api', number: 3, since: 1_000 });
-
-			assert.deepStrictEqual(yield* journal.listMentionThreads(1), [{ threadId: '19', repo: 'acme/api', number: 3, since: 1_000 }]);
-
-			yield* journal.deleteMentionThread('19');
-			assert.deepStrictEqual(yield* journal.listMentionThreads(50), [{ threadId: '18', repo: 'acme/web', number: 7, since: 2_000 }]);
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
 
@@ -187,8 +170,15 @@ describe('Journal', () => {
 
 			yield* Journal.use((journal) => journal.putRun(followUp)).pipe(Effect.provide(Journal.layer(filename)));
 			const reopened = yield* Journal.use((journal) => journal.listRuns).pipe(Effect.provide(Journal.layer(filename)));
+			const database = new DatabaseSync(filename, { readOnly: true });
+			const tables = database.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all();
 
+			database.close();
 			assert.deepStrictEqual(reopened, [followUp]);
+			assert.deepStrictEqual(
+				tables.map(({ name }) => name),
+				['commands', 'delivery_mark', 'effect_sql_migrations', 'requests', 'runs', 'transient_failures'],
+			);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);
 });

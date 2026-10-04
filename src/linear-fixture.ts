@@ -1,6 +1,7 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Context, Effect, Layer, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
+import { serveFixture } from './fixture-server.ts';
 import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
@@ -413,31 +414,15 @@ const make = Effect.gen(function* () {
 		response.end(JSON.stringify(result.body));
 	};
 
-	const server = yield* Effect.acquireRelease(
-		Effect.callback<ReturnType<typeof createServer>>((resume) => {
-			const created = createServer((request, response) => {
-				handle(request, response).catch((error: unknown) => {
-					response.writeHead(500, { 'content-type': 'application/json' });
-					response.end(JSON.stringify({ errors: [{ message: `fixture bug: ${String(error)}` }] }));
-				});
-			});
-
-			created.listen(0, '127.0.0.1', () => resume(Effect.succeed(created)));
-		}),
-		(created) =>
-			Effect.callback<void>((resume) => {
-				created.closeAllConnections();
-				created.close(() => resume(Effect.void));
-			}),
-	);
-	const address = server.address();
-
-	if (address === null || typeof address === 'string') {
-		return yield* Effect.die(new Error(`fixture server has no TCP address: ${address}`));
-	}
+	const url = yield* serveFixture((request, response) => {
+		handle(request, response).catch((error: unknown) => {
+			response.writeHead(500, { 'content-type': 'application/json' });
+			response.end(JSON.stringify({ errors: [{ message: `fixture bug: ${String(error)}` }] }));
+		});
+	});
 
 	const fixture: LinearFixtureShape = {
-		url: `http://127.0.0.1:${address.port}/graphql`,
+		url: `${url}/graphql`,
 		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, subIssues = 2 }) => {
 			const owner = team(teamId);
 			const epic: FixtureIssue = {

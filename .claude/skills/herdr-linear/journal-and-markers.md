@@ -4,7 +4,7 @@ What herdr-linear stores locally and why, and how markers on its comments make e
 
 ## Reality first
 
-Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, and what `ctl.sh` asked for.
+Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, what `ctl.sh` asked for, and how far back the App's webhook deliveries were checked.
 
 Idempotency comes from markers on external writes, not from the journal: before a write, look for its marker (or its effect) and skip it when present.
 
@@ -39,7 +39,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 
 ### `commands`
 
-One row per comment that mentioned the bot, written before anything else happens for it, so a comment is handled at most once. `id` numbers them (`CMD-<id>`); `comment_id` (the comment's GitHub node id) is unique, and recording a comment again does nothing.
+One row per comment that mentioned the bot, written by the webhook server before it answers the delivery and before anything else happens for it, so a comment is handled at most once. `id` numbers them (`CMD-<id>`); `comment_id` (the comment's GitHub node id, the delivery's `node_id`) is unique, and recording a comment again does nothing, so a duplicated or redelivered delivery starts no second run.
 
 | Column | What and why |
 | --- | --- |
@@ -51,17 +51,17 @@ One row per comment that mentioned the bot, written before anything else happens
 | `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
 | `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
 
-### `mention_threads` and `mention_floor`
-
-`mention_threads`: notification threads of the bot's that are read but not scanned yet (`thread_id`, `repo`, `number`, `since`). A thread is added before its notification is marked read and dropped once its comments are recorded, so a crash in between never loses a mention (`rules.md`). `mention_floor`: one row, when the journal was created; mentions written before it are never run.
-
 ### `requests`
 
 What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
+### `delivery_mark`
+
+At most one row: `delivered_at` (ms), when the newest App webhook delivery the last complete scan saw was delivered. Every delivery listed before it either succeeded, has a later successful attempt of the same event, or was redelivered as a newer attempt. GitHub can list a slow attempt after a newer one was scanned; the next scan pages back to 10 minutes before the mark (and never more than 3 days, GitHub's retention). It is moved only after every redelivery request of the scan succeeded; without a row, a scan goes back the full 3 days (`rules.md`, Missed deliveries).
+
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `mentionFloor`, `listMentionThreads`, `addMentionThread` (keeps the earlier `since`), `deleteMentionThread`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction); `deliveryMark`, `setDeliveryMark`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
 The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, worktree), the commands in flight and the requests waiting.
 
@@ -87,7 +87,7 @@ On the Linear epic:
 | `transientFailure` | `<streakStartedAt>` | Once per streak of transient failures. |
 | `workingOrphan` | `<tabId>` | Once per untracked tab whose agent is working. |
 
-On the GitHub PR:
+On the GitHub PR, as the GitHub App:
 
 | Purpose | Key | Posted |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ On the GitHub PR:
 | `flags` | `<claimedAt>` | Once per run, as the COMMENT review holding every flag. |
 | `reply` | `<threadId>.<claimedAt>` | Once per thread per run, among the thread's comments. |
 
-On the issue or PR a command came from, as the bot:
+On the issue or PR a command came from, as the GitHub App:
 
 | Purpose | Key | Posted |
 | --- | --- | --- |
@@ -110,7 +110,8 @@ Every multi-step action is ordered so that a crash at any step leaves something 
 
 - Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, and Claude found in the pane is not started again. Commands start the same way.
 - A follow-up claim and the drop of its request are one transaction.
-- A mention's thread is recorded before its notification is marked read, its comments as commands before the thread is dropped; a command is keyed by its comment.
+- A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, and the next delivery scan redelivers it; a command is keyed by its comment, so a redelivery records nothing twice.
+- The delivery scan requests every redelivery before it moves the delivery mark, so a crash mid-scan leaves the mark where it was and the next scan looks at the same deliveries again; a redelivery that already went through shows as a later success and is not repeated.
 - A reply or a failure notice of a command is posted before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
 - Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
 - Flags put the label on first, then the comment, then the journal update.

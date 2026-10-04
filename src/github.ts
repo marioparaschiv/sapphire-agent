@@ -1,7 +1,7 @@
-import { Context, Effect, Layer, Option, Schema, Stream } from 'effect';
+import { Context, Effect, Layer, Option, Redacted, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
-import { AppConfig } from './config.ts';
+import { GitHubApp } from './github-app.ts';
 import { hasMarker, type MarkedComment, type Marker } from './markers.ts';
 import type { ResultFile } from './result-file.ts';
 
@@ -23,47 +23,7 @@ export const Bodies = Schema.Struct({ totalCount: Schema.Int, nodes: Schema.Arra
 
 export type Bodies = typeof Bodies.Type;
 
-// An unread notification of the bot's, about an issue or PR. `lastReadAt` is when the bot last read the thread.
-export type Notification = { readonly threadId: string; readonly repo: string; readonly number: number; readonly lastReadAt: Option.Option<number> };
-
-const NotificationJson = Schema.Struct({
-	id: Schema.String,
-	lastReadAt: Schema.NullOr(Schema.String),
-	subject: Schema.Struct({ type: Schema.String, url: Schema.NullOr(Schema.String) }),
-	repository: Schema.Struct({ fullName: Schema.String }).pipe(Schema.encodeKeys({ fullName: 'full_name' })),
-}).pipe(Schema.encodeKeys({ lastReadAt: 'last_read_at' }));
-
-// A comment on an issue or PR, a review, or a review comment. The author is null for a deleted account.
-export const GitHubComment = Schema.Struct({
-	id: Schema.String,
-	url: Schema.String,
-	body: Schema.String,
-	createdAt: Schema.String,
-	author: Schema.NullOr(Schema.Struct({ login: Schema.String })),
-});
-
-export type GitHubComment = typeof GitHubComment.Type;
-
-const Conversation = Schema.Struct({
-	comments: Schema.Struct({ nodes: Schema.Array(GitHubComment) }),
-	reviews: Schema.optionalKey(Schema.Struct({ nodes: Schema.Array(Schema.Struct({ ...GitHubComment.fields, comments: Schema.Struct({ nodes: Schema.Array(GitHubComment) }) })) })),
-});
-
-export type Conversation = typeof Conversation.Type;
-
-const commentFields = 'id url body createdAt author { login }';
-
 export type Flags = ResultFile['flags'];
-
-type Account = 'user' | 'bot';
-
-// Linear shows a GitHub comment carrying this block as written by Claude. The agent and the user share one GitHub
-// account, so it is the only way to tell the agent's comments from the user's.
-export const ON_BEHALF_OF_CLAUDE = '<!-- linear:extension {"version":1,"plugins":[{"plugin":"onBehalfOf","agent":"claude"}]} -->';
-
-export const asClaude = (body: string) => `${body}\n\n${ON_BEHALF_OF_CLAUDE}`;
-
-export const isClaude = (body: string) => body.includes(ON_BEHALF_OF_CLAUDE);
 
 // `@<login>` as a whole word, so neither `@<login>x` nor an email address like `a@<login>` counts. GitHub logins are
 // case-insensitive.
@@ -72,29 +32,9 @@ export const mentions = (login: string, body: string) => new RegExp(`(?<![\\w@-]
 // GitHub caps a connection page at 100 nodes.
 export const maxNodes = 100;
 
-// How many unread notifications one tick reads.
-export const notificationsPerTick = 50;
-
-// Every comment of an issue or PR, flattened: its comments, then each review and the review's comments.
-export const conversationComments = (conversation: Conversation): ReadonlyArray<GitHubComment> => [
-	...conversation.comments.nodes,
-	...(conversation.reviews?.nodes ?? []).flatMap(({ comments, ...review }) => [review, ...comments.nodes]),
-];
-
 // The open PR for the branch if there is one, else a merged one, else a closed one.
 export const preferredPullRequest = (pullRequests: ReadonlyArray<PullRequest>) =>
 	Option.fromUndefinedOr(pullRequests.find((pr) => pr.state === 'OPEN') ?? pullRequests.find((pr) => pr.state === 'MERGED') ?? pullRequests[0]);
-
-// The API URL of the thread's subject ends in the issue or PR number.
-const notificationOf = ({ id, lastReadAt, subject, repository }: typeof NotificationJson.Type): Option.Option<Notification> => {
-	const number = Number(/\/(?:issues|pulls)\/(\d+)$/.exec(subject.url ?? '')?.[1]);
-
-	if (!Number.isInteger(number)) {
-		return Option.none();
-	}
-
-	return Option.some({ threadId: id, repo: repository.fullName, number, lastReadAt: Option.map(Option.fromNullishOr(lastReadAt), Date.parse) });
-};
 
 // `bodies` holds the latest nodes; past the cap, a missing marker could be on an earlier page.
 export const containsMarker = (bodies: Bodies, marker: Marker, where: string): Effect.Effect<boolean, Permanent> => {
@@ -123,38 +63,31 @@ export class GitHub extends Context.Service<
 	{
 		// See preferredPullRequest.
 		readonly findPullRequest: (repo: string, branch: string) => Effect.Effect<Option.Option<PullRequest>, CallError>;
-		readonly postSummary: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 		// One COMMENT review holding every flag as an inline comment on the PR's new code.
 		readonly postFlagsReview: (repo: string, number: number, comment: MarkedComment, flags: Flags) => Effect.Effect<void, CallError>;
-		readonly replyToThread: (threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
-		readonly resolveThread: (threadId: string) => Effect.Effect<void, CallError>;
-		// The bot's newest unread notifications about issues and PRs it takes part in or was mentioned on, at most
-		// notificationsPerTick. The reason is left out: it can change with later comments on the thread.
-		readonly notifications: Effect.Effect<ReadonlyArray<Notification>, CallError>;
-		// Marks the bot's notification thread read; a thread read already stays read.
-		readonly markNotificationRead: (threadId: string) => Effect.Effect<void, CallError>;
-		// The newest comments of the issue or PR (see conversationComments), up to maxNodes of each kind.
-		readonly conversation: (repo: string, number: number) => Effect.Effect<ReadonlyArray<GitHubComment>, CallError>;
-		// A comment on the issue or PR as the bot.
-		readonly postAsBot: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		readonly replyToThread: (repo: string, threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		readonly resolveThread: (repo: string, threadId: string) => Effect.Effect<void, CallError>;
+		// A conversation comment on the issue or PR.
+		readonly postComment: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 	}
 >()('herdr-linear/GitHub') {
 	static readonly layer = Layer.effect(
 		GitHub,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-			const { bot } = yield* AppConfig;
+			const app = yield* GitHubApp;
 			const encoder = new TextEncoder();
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
-			// The user's account is gh's default login; the bot's is its own gh config dir.
-			const run = (args: ReadonlyArray<string>, input: string, account: Account) => {
+			// The user's account is gh's default login, for reads. Every write passes `token`, the installation token of the
+			// GitHub App on the repo it lands on.
+			const run = (args: ReadonlyArray<string>, input: string, token?: Redacted.Redacted<string>) => {
 				const command = `gh ${args.join(' ')}`;
-				const env = account === 'bot' ? { env: { GH_CONFIG_DIR: bot.ghConfigDirectory }, extendEnv: true } : {};
+				const options = token ? { env: { GH_TOKEN: Redacted.value(token) }, extendEnv: true } : {};
 
 				return Effect.scoped(
 					Effect.gen(function* () {
-						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)), ...env }));
+						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)), ...options }));
 						const [stdout, stderr, exitCode] = yield* Effect.all([text(handle.stdout), text(handle.stderr), handle.exitCode], { concurrency: 'unbounded' });
 
 						if (exitCode !== 0) {
@@ -166,18 +99,18 @@ export class GitHub extends Context.Service<
 				).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))));
 			};
 
-			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', account: Account = 'user') =>
-				run(args, input, account).pipe(
+			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', token?: Redacted.Redacted<string>) =>
+				run(args, input, token).pipe(
 					Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(schema))),
 					Effect.catchTag('SchemaError', (error) => Effect.fail(new Permanent({ message: `gh ${args.join(' ')}: ${error.message}`, cause: error }))),
 				);
 
 			// gh exits non-zero when the response carries GraphQL errors.
-			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>) =>
-				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables })).pipe(Effect.map(({ data }) => data));
+			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>, token?: Redacted.Redacted<string>) =>
+				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }), token).pipe(Effect.map(({ data }) => data));
 
-			const post = (endpoint: string, body: Record<string, unknown>, account: Account = 'user') =>
-				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), account).pipe(Effect.asVoid);
+			const post = (endpoint: string, body: Record<string, unknown>, token?: Redacted.Redacted<string>) =>
+				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), token).pipe(Effect.asVoid);
 
 			const ownerAndName = (repo: string) => {
 				const [owner, name] = repo.split('/');
@@ -185,16 +118,16 @@ export class GitHub extends Context.Service<
 				return { owner, name };
 			};
 
-			const pullRequestBodies = (repo: string, number: number, connection: 'comments' | 'reviews') =>
+			const reviewBodies = (repo: string, number: number) =>
 				graphql(
-					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ [connection]: Bodies }) }) }),
-					`query PullRequestBodies($owner: String!, $name: String!, $number: Int!) {
+					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ reviews: Bodies }) }) }),
+					`query ReviewBodies($owner: String!, $name: String!, $number: Int!) {
 						repository(owner: $owner, name: $name) {
-							pullRequest(number: $number) { ${connection}(last: ${maxNodes}) { totalCount nodes { body } } }
+							pullRequest(number: $number) { reviews(last: ${maxNodes}) { totalCount nodes { body } } }
 						}
 					}`,
 					{ ...ownerAndName(repo), number },
-				).pipe(Effect.map(({ repository }) => repository.pullRequest[connection]));
+				).pipe(Effect.map(({ repository }) => repository.pullRequest.reviews));
 
 			const reviewThread = (threadId: string) =>
 				graphql(
@@ -247,89 +180,60 @@ export class GitHub extends Context.Service<
 						withPolicy,
 					),
 
-				postSummary: (repo, number, { marker, body }) =>
-					unlessMarked(
-						pullRequestBodies(repo, number, 'comments'),
-						marker,
-						`${repo}#${number} comments`,
-						post(`repos/${repo}/issues/${number}/comments`, { body: asClaude(body) }),
-					),
-
 				postFlagsReview: (repo, number, { marker, body }, flags) =>
-					unlessMarked(
-						pullRequestBodies(repo, number, 'reviews'),
-						marker,
-						`${repo}#${number} reviews`,
-						post(`repos/${repo}/pulls/${number}/reviews`, {
-							event: 'COMMENT',
-							body: asClaude(body),
-							comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body: asClaude(body) })),
-						}),
-					),
-
-				replyToThread: (threadId, { marker, body }) =>
-					unlessMarked(
-						Effect.map(reviewThread(threadId), ({ comments }) => comments),
-						marker,
-						`review thread ${threadId}`,
-						graphql(
-							Schema.Struct({ addPullRequestReviewThreadReply: Schema.Struct({ comment: Schema.Struct({ id: Schema.String }) }) }),
-							`mutation ReplyToThread($threadId: ID!, $body: String!) {
-								addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
-							}`,
-							{ threadId, body: asClaude(body) },
-						).pipe(Effect.asVoid),
-					),
-
-				resolveThread: (threadId) =>
-					reviewThread(threadId).pipe(
-						Effect.flatMap(({ isResolved }) =>
-							isResolved
-								? Effect.void
-								: graphql(
-										Schema.Struct({ resolveReviewThread: Schema.Struct({ thread: Schema.Struct({ isResolved: Schema.Literal(true) }) }) }),
-										`mutation ResolveThread($threadId: ID!) {
-											resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
-										}`,
-										{ threadId },
-									).pipe(Effect.asVoid),
+					Effect.flatMap(app.installationToken(repo), (token) =>
+						unlessMarked(
+							reviewBodies(repo, number),
+							marker,
+							`${repo}#${number} reviews`,
+							post(
+								`repos/${repo}/pulls/${number}/reviews`,
+								{ event: 'COMMENT', body, comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body })) },
+								token,
+							),
 						),
-						withPolicy,
 					),
 
-				notifications: gh(Schema.Array(NotificationJson), ['api', `notifications?participating=true&per_page=${notificationsPerTick}`], '', 'bot').pipe(
-					Effect.map((found) => found.flatMap((notification) => Option.toArray(notificationOf(notification)))),
-					withPolicy,
-				),
-
-				markNotificationRead: (threadId) => run(['api', '--method', 'PATCH', `notifications/threads/${threadId}`], '', 'bot').pipe(Effect.asVoid, withPolicy),
-
-				conversation: (repo, number) =>
-					graphql(
-						Schema.Struct({ repository: Schema.Struct({ issueOrPullRequest: Schema.NullOr(Conversation) }) }),
-						`query Conversation($owner: String!, $name: String!, $number: Int!) {
-							repository(owner: $owner, name: $name) {
-								issueOrPullRequest(number: $number) {
-									... on Issue { comments(last: ${maxNodes}) { nodes { ${commentFields} } } }
-									... on PullRequest {
-										comments(last: ${maxNodes}) { nodes { ${commentFields} } }
-										reviews(last: ${maxNodes}) { nodes { ${commentFields} comments(first: ${maxNodes}) { nodes { ${commentFields} } } } }
-									}
-								}
-							}
-						}`,
-						{ ...ownerAndName(repo), number },
-					).pipe(
-						Effect.flatMap(({ repository }) =>
-							repository.issueOrPullRequest === null
-								? Effect.fail(new Permanent({ message: `${repo}#${number} is no issue or PR` }))
-								: Effect.succeed(conversationComments(repository.issueOrPullRequest)),
+				replyToThread: (repo, threadId, { marker, body }) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
+						unlessMarked(
+							Effect.map(reviewThread(threadId), ({ comments }) => comments),
+							marker,
+							`review thread ${threadId}`,
+							graphql(
+								Schema.Struct({ addPullRequestReviewThreadReply: Schema.Struct({ comment: Schema.Struct({ id: Schema.String }) }) }),
+								`mutation ReplyToThread($threadId: ID!, $body: String!) {
+									addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
+								}`,
+								{ threadId, body },
+								token,
+							).pipe(Effect.asVoid),
 						),
-						withPolicy,
 					),
 
-				postAsBot: (repo, number, { marker, body }) =>
-					unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, 'bot')),
+				resolveThread: (repo, threadId) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
+						reviewThread(threadId).pipe(
+							Effect.flatMap(({ isResolved }) =>
+								isResolved
+									? Effect.void
+									: graphql(
+											Schema.Struct({ resolveReviewThread: Schema.Struct({ thread: Schema.Struct({ isResolved: Schema.Literal(true) }) }) }),
+											`mutation ResolveThread($threadId: ID!) {
+												resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
+											}`,
+											{ threadId },
+											token,
+										).pipe(Effect.asVoid),
+							),
+							withPolicy,
+						),
+					),
+
+				postComment: (repo, number, { marker, body }) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
+						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, token)),
+					),
 			});
 		}),
 	);

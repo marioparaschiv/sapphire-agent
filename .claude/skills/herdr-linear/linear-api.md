@@ -50,7 +50,16 @@ Repo labels (`resolveRepo`), read from the epic's labels:
 
 ## GitHub (`GitHub` service)
 
-Wraps the `gh` CLI through `ChildProcess`, each call under the call policy (20 s timeout, retries). It needs `gh` on the service `PATH`, authenticated as the user (the default gh config), plus a gh config dir logged in as the bot account (`bot.ghConfigDirectory`). `notifications`, `markNotificationRead` and `postAsBot` run as the bot, with `GH_CONFIG_DIR` set on top of the service's env. Tests use `FakeGitHub`.
+Wraps the `gh` CLI through `ChildProcess`, each call under the call policy (20 s timeout, retries). It needs `gh` on the service `PATH`, authenticated as the user (the default gh config), for reads. Every write runs as the GitHub App, with the repo's installation token as `GH_TOKEN` on top of the service's env. Tests use `FakeGitHub`.
+
+## GitHub App (`GitHubApp` service)
+
+`github-app.ts`, over `HttpClient` against `https://api.github.com` (the base URL is the layer's argument), each call under the call policy (20 s timeout, retries; 429 and 5xx are Transient, other non-2xx Permanent with GitHub's `message`). Every call authenticates as the App with a fresh RS256 JWT signed by `bot.app.privateKeyFile` (`iss` the App ID, `iat` 60 s back, `exp` 10 min after `iat`).
+
+- At startup, `GET /app` gives the slug; `login` is `<slug>[bot]`, how the App's comments are recognised. A failure here stops startup.
+- `installationToken(repo)`: `GET /repos/<owner>/<name>/installation` for the installation id, then the cached token of that installation, or `POST /app/installations/<id>/access_tokens` for a new one. A token is reused until 5 min before its `expires_at`, in memory only. A repo without the App installed fails Permanently (HTTP 404).
+
+Tests use `GitHubAppFixture` (`development.md`).
 
 PR detection (`findPullRequest`):
 
@@ -58,26 +67,18 @@ PR detection (`findPullRequest`):
 - Prefers an `OPEN` PR, else a `MERGED` one, else a `CLOSED` one. A `CLOSED` PR does not take a result; it only triggers cleanup.
 - `owner/repo` comes from the repo's `origin` URL (`Git.githubRepo`).
 
-Mentions (rule in `rules.md`):
+Mentions are not read through `gh`: they arrive as the App's webhook deliveries (`rules.md`, Mentions). Linear's review UI syncs threads both ways, so a mention of the bot written there lands on GitHub and is delivered like any other.
 
-- `notifications`: as the bot, `gh api notifications?participating=true&per_page=50`: unread notifications of threads the bot takes part in or was mentioned on. Each gives its thread id, `owner/name`, the issue or PR number (from the subject's API URL; other subjects are left out) and `last_read_at`.
-- `markNotificationRead`: as the bot, `gh api --method PATCH notifications/threads/<id>`. Marking a read thread again changes nothing.
-- `conversation`: `gh api graphql`, `repository.issueOrPullRequest(number)`: the newest 100 comments, and for a PR the newest 100 reviews with the first 100 comments of each (review comments, thread replies included), each with id, url, body, createdAt and author login (null for a deleted account). A number that is neither fails Permanently.
-
-Linear's public API has no field for PR comments, so this reads GitHub directly; Linear's review UI syncs threads both ways, so a mention of the bot written there shows up here.
-
-Writes (only the reconciler writes to GitHub; the agents never do). Each first looks for its marker and skips when present:
+Writes (only the reconciler writes to GitHub, always as the GitHub App; the agents never do). Each first looks for its marker and skips when present:
 
 | Method | Call |
 | --- | --- |
-| `postSummary` | `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. |
-| `postAsBot` | As the bot, on an issue or PR: `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`, no onBehalfOf block. The marker is looked for among its newest 100 comments (`issueOrPullRequest`). |
+| `postComment` | On an issue or PR (the summary, a command reply or failure): `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. The marker is looked for among its newest 100 comments (`issueOrPullRequest`). |
 | `postFlagsReview` | `gh api --method POST repos/<repo>/pulls/<n>/reviews --input -` with `{ event: "COMMENT", body, comments: [{ path, line, side: "RIGHT", body }] }`. The caller skips it when there are no flags. |
 | `replyToThread` | `gh api graphql`, mutation `addPullRequestReviewThreadReply`. |
 | `resolveThread` | `gh api graphql`, mutation `resolveReviewThread`; skipped when already resolved. |
 
-- Every body the user's account posts ends with `ON_BEHALF_OF_CLAUDE`, Linear's `onBehalfOf` block, after the marker. Linear shows such comments as written by Claude; it is the only way to tell the agent's comments from the user's, since both use one GitHub account.
-- A COMMENT review on your own PR is allowed. Requesting review, approving or requesting changes is not, so the summary ends with `Ready for review, @<PR author>.`, which notifies the user.
+- The summary ends with `Ready for review, @<PR author>.`, which notifies the user.
 - A flag whose `line` is outside the diff makes GitHub reject the review (HTTP 422, Permanent): the epic is flagged with `permanentFailure`.
 
 ## Branch name

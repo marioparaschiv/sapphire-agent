@@ -1,3 +1,4 @@
+import { createPrivateKey, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { Config, Context, Effect, FileSystem, Layer, Predicate, Redacted, Result, Schema, SchemaGetter, SchemaIssue } from 'effect';
@@ -37,6 +38,8 @@ const Settings = Schema.Struct({
 	maxRunSeconds: IntAtLeast(600, 5400),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
+	// How often the App's failed webhook deliveries are looked for and redelivered.
+	deliveryScanSeconds: IntAtLeast(60, 300),
 	worktreesDirectory: Path.pipe(withDefault('~/.herdr/worktrees')),
 	workspaceLabel: Name('agents'),
 	states: Schema.Struct({
@@ -51,11 +54,16 @@ const Settings = Schema.Struct({
 		repoPrefix: Name('repo:'),
 	}).pipe(withDefault({})),
 	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
-	// The GitHub account whose @mention by one of `allowedUsers` starts a command run, and that answers it.
-	// `ghConfigDirectory` is a gh config dir logged in as it.
+	// The handle whose @mention by one of `allowedUsers` starts a command run. The GitHub App answers, and its webhook
+	// deliveries bring the mentions to a server on 127.0.0.1:webhookPort.
 	bot: Schema.Struct({
 		login: Schema.NonEmptyString,
-		ghConfigDirectory: Path,
+		app: Schema.Struct({
+			id: Schema.Int.check(Schema.isGreaterThan(0)),
+			privateKeyFile: Path,
+			webhookSecretFile: Path,
+			webhookPort: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65_535 })).pipe(withDefault(3790)),
+		}),
 		allowedUsers: Schema.Array(Schema.NonEmptyString).check(Schema.makeFilter((users) => users.length > 0 || 'no allowed users configured')),
 	}),
 });
@@ -93,7 +101,12 @@ const env = {
 
 export type Env = { readonly [K in keyof typeof env]: Config.Success<(typeof env)[K]> };
 
-export type AppConfigShape = Settings & { readonly env: Env; readonly linearApiKey: Redacted.Redacted<string> };
+export type AppConfigShape = Settings & {
+	readonly env: Env;
+	readonly linearApiKey: Redacted.Redacted<string>;
+	readonly appPrivateKey: KeyObject;
+	readonly webhookSecret: Redacted.Redacted<string>;
+};
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
 	override get message() {
@@ -124,7 +137,8 @@ const readSettings = (path: string) =>
 		}),
 	);
 
-const readApiKey = (path: string) =>
+// The trimmed contents of a file only its owner may read.
+const readSecretFile = (path: string, what: string) =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem;
 		const info = yield* fs.stat(path);
@@ -133,17 +147,26 @@ const readApiKey = (path: string) =>
 			return yield* Effect.fail([`${path} is readable by other users; run chmod 600 ${path}`]);
 		}
 
-		const key = (yield* fs.readFileString(path)).trim();
+		const contents = (yield* fs.readFileString(path)).trim();
 
-		if (!key) {
+		if (!contents) {
 			return yield* Effect.fail([`${path} is empty`]);
 		}
 
-		return Redacted.make(key);
+		return contents;
 	}).pipe(
 		Effect.catchTag('PlatformError', (error) =>
-			Effect.fail([error.reason._tag === 'NotFound' ? `no Linear API key: create ${path} with mode 600` : `${path}: ${error.message}`]),
+			Effect.fail([error.reason._tag === 'NotFound' ? `no ${what}: create ${path} with mode 600` : `${path}: ${error.message}`]),
 		),
+	);
+
+const readApiKey = (path: string) => readSecretFile(path, 'Linear API key').pipe(Effect.map(Redacted.make));
+
+const readWebhookSecret = (path: string) => readSecretFile(path, 'GitHub App webhook secret').pipe(Effect.map(Redacted.make));
+
+const readPrivateKey = (path: string) =>
+	readSecretFile(path, 'GitHub App private key').pipe(
+		Effect.flatMap((pem) => Effect.try({ try: () => createPrivateKey(pem), catch: () => [`${path} is not a PEM private key`] })),
 	);
 
 const configProblems = (error: Config.ConfigError) => (Schema.isSchemaError(error.cause) ? schemaProblems('', error.cause) : [error.message]);
@@ -154,35 +177,51 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
-// Reads env, the config file and the Linear API key, and reports every problem in one StartupError.
+// Reads env, the config file, the Linear API key and the GitHub App's private key and webhook secret, and reports every
+// problem in one StartupError.
 export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
 	const linearApiKey = yield* readWhen(envResults.linearKeyFile, readApiKey);
+	const appPrivateKey = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.privateKeyFile), readPrivateKey);
+	const webhookSecret = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.webhookSecretFile), readWebhookSecret);
 	const problems = [
 		...Object.values(envResults).flatMap((result) => (Result.isFailure(result) ? configProblems(result.failure) : [])),
 		...problemsOf(settings),
 		...problemsOf(linearApiKey),
+		...problemsOf(appPrivateKey),
+		...problemsOf(webhookSecret),
 	];
-	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey });
+	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret });
 
 	if (problems.length > 0 || Result.isFailure(loaded)) {
 		return yield* new StartupError({ problems });
 	}
 
-	return { ...loaded.success.settings, env: loaded.success.env, linearApiKey: loaded.success.linearApiKey };
+	return {
+		...loaded.success.settings,
+		env: loaded.success.env,
+		linearApiKey: loaded.success.linearApiKey,
+		appPrivateKey: loaded.success.appPrivateKey,
+		webhookSecret: loaded.success.webhookSecret,
+	};
 });
 
 export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('herdr-linear/AppConfig') {
 	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
-	// Defaults plus one team and the bot, with every path under `directory`.
+	// Defaults plus one team and the bot, with every path under `directory`, a freshly generated App key and the webhook
+	// server on a free port.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
-		Layer.succeed(AppConfig, {
+		Layer.sync(AppConfig, () => ({
 			...Schema.decodeUnknownSync(Settings)({
 				teams: { Test: { repo: join(directory, 'repo') } },
 				worktreesDirectory: join(directory, 'worktrees'),
-				bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), allowedUsers: ['marioparaschiv'] },
+				bot: {
+					login: 'orchestratorbot',
+					app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
+					allowedUsers: ['marioparaschiv'],
+				},
 				...settings,
 			}),
 			env: {
@@ -194,5 +233,7 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('her
 				claudeConfigPath: join(directory, 'claude.json'),
 			},
 			linearApiKey: Redacted.make('lin_api_test'),
-		});
+			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
+			webhookSecret: Redacted.make('test-webhook-secret'),
+		}));
 }

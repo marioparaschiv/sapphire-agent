@@ -1,8 +1,11 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, FileSystem, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
+
+const appPem = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey;
 
 describe('main', () => {
 	it.live('reports every config error in one message and exits non-zero', () =>
@@ -11,8 +14,10 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), allowedUsers: ['marioparaschiv'] } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'app.pem'), appPem, { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
 
 			const handle = yield* spawner.spawn(
 				ChildProcess.make(process.execPath, [join(import.meta.dirname, 'main.ts')], {
@@ -43,8 +48,10 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), allowedUsers: ['marioparaschiv'] } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'app.pem'), appPem, { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'claims.json'), JSON.stringify({ claims: [{ epicId: 'b1c2d3', identifier: 'UNB-12', status: 'running' }] }));
 
 			const handle = yield* spawner.spawn(
