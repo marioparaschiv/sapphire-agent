@@ -42,8 +42,8 @@ Tests sit beside the code as `src/*.test.ts` and use `@effect/vitest` (`it.effec
 
 | Module | Provides | Controls |
 | --- | --- | --- |
-| `linear-fixture.ts` | `LinearFixture.layer`: a real HTTP server speaking Linear's GraphQL operations, plus the real `Linear` layer pointed at it. Seeded team `Test` with every workflow state. | Seed: `addTeam`, `addEpic`, `addLabel`, `addComment`. Inspect: `issue`, `stateName`, `labelNames`, `comments`, `mutations`. Inject: `failWrite`, `rateLimitWrite`, `crashAfterWrite` (applies the write, then drops the connection), `awaitAnswers`, `awaitCrash`. |
-| `github-fake.ts` | `FakeGitHub.layer`: a `GitHub` in memory, with the live layer's marker and pending rules. | `addPullRequest`, `addThread`, `setPullRequestState`; inspect `comments`, `reviews`, `thread`, `writes`; inject `failWrite`, `crashAfterWrite`. |
+| `linear-fixture.ts` | `LinearFixture.layer`: a real HTTP server speaking Linear's GraphQL operations, plus the real `Linear` layer pointed at it. Seeded team `Test` with every workflow state. | Seed: `addEpic`, `addLabel`, `addComment`. Inspect: `issue`, `stateName`, `labelNames`, `comments`, `mutations`. Inject: `failWrite`, `rateLimitWrite`, `crashAfterWrite` (applies the write, then drops the connection), `awaitAnswers`, `awaitCrash`. |
+| `github-fake.ts` | `FakeGitHub.layer`: a `GitHub` in memory, with the live layer's marker and pending rules. | `addPullRequest`, `addThread`, `setPullRequestState`; inspect `comments`, `reviews`, `thread`, `writes`; inject `crashAfterWrite`. |
 | `herdr-fake.ts` | `FakeHerdr.layer`: a `Herdr` in memory, with the live layer's tab and ownership logic and an event stream. | `addTab`, `setAgentStatus`, `setAgent`, `setTail`, `removeTab`, `setStartBehaviour`; inspect `tabs`, `starts`, `prompts`, `sentKeys`, `closedTabs`, `writes`; `emit` (a state change without `emit` is a dropped event), `disconnect`, `awaitConnections`; inject `failWrite`, `crashAfterWrite`. |
 | `fixtures/herdr/` | Real herdr JSON output and socket events, recorded from a named session. | Used by the herdr service tests, through a fake process spawner that answers each herdr command with them. |
 
@@ -53,11 +53,11 @@ Inject fake crashes with a `Transient` error, so the epic's work stops without a
 
 `makeHarness(settings?)` (needs a `Scope`) wires the production rules to real temp git repos (a bare origin whose path ends in `github.com/test/repo.git`, so `githubRepo` is `test/repo`, and a clone), a temp `claude.json`, the Linear fixture, the GitHub and herdr fakes and a SQLite journal file. It returns:
 
-- `tick`, `pausedTick`, `reconciler`: drive the planner as the service does.
+- `tick`, `pausedTick`: drive the planner as the service does.
 - `restart`: a process restart. The planner, rules and journal connection are built again on the same journal file, while Linear, GitHub, herdr and the repos keep their state.
 - `crashAtJournalWrite(n)`, `crashed()`, `journalWrites()`: the nth journal write from now dies before it is applied.
 - `startedRun(seed)`: an epic in Implementing with a real worktree, a tab running Claude and a `running` row.
-- `runs`, `putRun`, `moveEpic`, `renameTab`, `writeResultFile`, `worktrees()`, `hasBranch`, plus `git(cwd, ...args)` for test commits and pushes.
+- `runs`, `epicMarkers(issueId)` (the `<purpose>:<key>` of each marked comment, as `markerKeys` gives for any bodies), `moveEpic`, `renameTab`, `writeResultFile`, `worktrees()`, `hasBranch`, plus `git(cwd, ...args)` for test commits and pushes.
 
 For lifecycle-style tests: advance `TestClock` before a follow-up claim (its summary marker is keyed by the claim time) and push the branch to origin first, so `pull --ff-only` works.
 

@@ -30,7 +30,7 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 ## The Herdr service
 
 - Every command runs `$HERDR_BIN_PATH <args>` through `ChildProcess`; JSON stdout is `{ result }`, decoded with a `Schema`. A failed command writes `{ error: { code, message } }` to stderr, classified as in `failure-policy.md`.
-- `pane_not_found`, `agent_not_found` and `tab_not_found` mean "not there": `pane`, `agent` and `tab` return none, `readTail` returns none, and `closeTab` returns false.
+- `pane_not_found`, `agent_not_found` and `tab_not_found` mean "not there": `pane` and `agent` return none, `readTail` returns none, and `closeTab` returns false.
 - `readTail`: `herdr pane read <pane> --source recent-unwrapped --lines <n>` (40 by default), with runs of blank lines squeezed to one.
 - `prompt`: `herdr agent prompt <pane> <text>`, lines joined with spaces since herdr refuses newlines. herdr refuses it with `agent_blocked` while the agent sits at a dialog.
 - `sendKeys`: `herdr agent send-keys <pane> <keys>` (the nudge sends `esc`).
