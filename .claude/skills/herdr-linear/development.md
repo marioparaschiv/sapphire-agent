@@ -43,8 +43,8 @@ Tests sit beside the code as `src/*.test.ts` and use `@effect/vitest` (`it.effec
 | Module | Provides | Controls |
 | --- | --- | --- |
 | `linear-fixture.ts` | `LinearFixture.layer`: a real HTTP server speaking Linear's GraphQL operations, plus the real `Linear` layer pointed at it. Seeded team `Test` with every workflow state. | Seed: `addEpic`, `addLabel`, `addComment`. Inspect: `issue`, `stateName`, `labelNames`, `comments`, `mutations`. Inject: `failWrite`, `rateLimitWrite`, `crashAfterWrite` (applies the write, then drops the connection), `awaitAnswers`, `awaitCrash`. |
-| `github-fake.ts` | `FakeGitHub.layer`: a `GitHub` in memory, with the live layer's marker and pending rules. | `addPullRequest`, `addComment`, `addThread`, `setPullRequestState`; inspect `comments`, `reviews`, `thread`, `writes`; inject `crashAfterWrite`. Comments posted by `postInProgress` are authored by `bot.login`, the rest by the PR's author. |
-| `herdr-fake.ts` | `FakeHerdr.layer`: a `Herdr` in memory, with the live layer's tab and ownership logic and an event stream. | `addTab`, `setAgentStatus`, `setAgent`, `setTail`, `removeTab`, `setStartBehaviour`; inspect `tabs`, `starts`, `prompts`, `sentKeys`, `closedTabs`, `writes`; `emit` (a state change without `emit` is a dropped event), `disconnect`, `awaitConnections`; inject `failWrite`, `crashAfterWrite`. |
+| `github-fake.ts` | `FakeGitHub.layer`: a `GitHub` in memory, with the live layer's marker and cap rules and GitHub's mention notifications: a comment, review or review comment that mentions the bot, by anyone but the bot, makes the bot's notification about the PR unread. | `addPullRequest`, `addComment`, `addReview`, `addThread` (each returns what it made, with id, url and creation time), `setPullRequestState`, `setTime`; inspect `comments`, `botComments`, `reviews`, `thread`, `unread`, `writes`; inject `crashAfterWrite`. Comments posted by `postAsBot` are authored by `bot.login`, the rest by the PR's author unless given. |
+| `herdr-fake.ts` | `FakeHerdr.layer`: a `Herdr` in memory, with the live layer's tab and ownership logic and an event stream. | `addTab`, `setAgentStatus`, `setAgent`, `setTail`, `removeTab`, `setStartBehaviour`; inspect `tabs` (with the cwd and variables each was opened with), `starts` (with the arguments), `prompts`, `sentKeys`, `closedTabs`, `writes`; `emit` (a state change without `emit` is a dropped event), `disconnect`, `awaitConnections`; inject `failWrite`, `crashAfterWrite`. |
 | `fixtures/herdr/` | Real herdr JSON output and socket events, recorded from a named session. | Used by the herdr service tests, through a fake process spawner that answers each herdr command with them. |
 
 Inject fake crashes with a `Transient` error, so the epic's work stops without a failure comment. When a Linear write fails or crashes, the call policy waits on the clock before retrying: call `awaitAnswers` (or `awaitCrash`) before `TestClock.adjust`.
@@ -55,15 +55,16 @@ Inject fake crashes with a `Transient` error, so the epic's work stops without a
 
 - `tick`, `pausedTick`: drive the planner as the service does.
 - `restart`: a process restart. The planner, rules and journal connection are built again on the same journal file, while Linear, GitHub, herdr and the repos keep their state.
-- `crashAtJournalWrite(n)`, `crashed()`, `journalWrites()`: the nth journal write from now dies before it is applied.
+- `crashAtJournalWrite(n)`, `crashed()`, `journalWrites()`: the nth journal write of the reconciler from now dies before it is applied.
 - `startedRun(seed)`: an epic in Implementing with a real worktree, a tab running Claude and a `running` row.
-- `runs`, `epicMarkers(issueId)` (the `<purpose>:<key>` of each marked comment, as `markerKeys` gives for any bodies), `moveEpic`, `renameTab`, `writeResultFile`, `worktrees()`, `hasBranch`, plus `git(cwd, ...args)` for test commits and pushes.
+- `ctl(...args)`: runs `ctl.sh <args>` in process, as a command's agent would, through its own journal connection; returns the lines it printed or fails with its refusal.
+- `runs`, `commands`, `epicMarkers(issueId)` (the `<purpose>:<key>` of each marked comment, as `markerKeys` gives for any bodies), `moveEpic`, `renameTab`, `writeResultFile`, `worktrees()`, `hasBranch`, plus `git(cwd, ...args)` for test commits and pushes.
 
 For lifecycle-style tests: advance `TestClock` before a follow-up claim (its summary marker is keyed by the claim time) and push the branch to origin first, so `pull --ff-only` works.
 
 ### The lifecycle test
 
-`lifecycle.test.ts` runs one epic through everything on the harness: dispatch, a question and a relayed reply, results with a flags review, a follow-up that replies to and resolves a thread that mentions the bot, and cleanup once the PR is merged. Each step does what the user or agent does, then ticks until the reconciler got there. It first runs without a crash and asserts the end state, while counting the writes of each kind (journal, Linear, GitHub, herdr). Then it runs once per write with a crash injected at it, in an order shuffled by a seeded PRNG, restarting the reconciler right after the crash, and asserts the same end state and no double posts. Add a step there when a rule gains a write.
+`lifecycle.test.ts` runs one epic through everything on the harness: dispatch, a question and a relayed reply, results with a flags review, a review thread that mentions the bot, whose command replies, asks for a follow-up and says it is done, the follow-up that replies to and resolves the thread, and cleanup once the PR is merged. Each step does what the user or agent does, then ticks until the reconciler got there. It first runs without a crash and asserts the end state, while counting the writes of each kind (journal, Linear, GitHub, herdr). Then it runs once per write with a crash injected at it, in an order shuffled by a seeded PRNG, restarting the reconciler right after the crash, and asserts the same end state and no double posts. Add a step there when a rule gains a write.
 
 ## Style
 
@@ -88,6 +89,7 @@ HERDR_SOCKET_PATH=~/.config/herdr/sessions/hl-test/herdr.sock herdr workspace li
 - `HERDR_SESSION=<name>` in the env is not enough: CLI commands ignore it and talk to the default session.
 - Use separate temp dirs for `HERDR_PLUGIN_CONFIG_DIR` and `HERDR_PLUGIN_STATE_DIR`. Set `worktreesDirectory` in that config and `CLAUDE_CONFIG_PATH` to a copy, or the dev run writes the real `~/.herdr/worktrees` and `~/.claude.json`.
 - Use a scratch Linear team or the fixture server, and a throwaway repo; a dev run against the real team claims real epics alongside the live service. Never run `gh` writes against real repos.
+- Point `bot.ghConfigDirectory` at a scratch account, never the live bot's: a dev run reads the bot's notifications and marks them read, so it would take mentions away from the live service.
 - Clean up with `herdr --session hl-test server stop` (only that session).
 
 ## Git

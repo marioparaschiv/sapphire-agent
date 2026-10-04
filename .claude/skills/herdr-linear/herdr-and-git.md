@@ -38,14 +38,14 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 ### Tabs
 
 - `openTab` looks for the workspace labelled `workspaceLabel` (default `agents`). Found: `herdr tab create --workspace <id> --label <label> --cwd <worktree> --env HERDR_BLANK=1 --no-focus`. Missing: `herdr workspace create --label agents` with the same flags, then `tab rename` of its first tab to the run's label.
-- `HERDR_BLANK=1` makes the pane's shell skip its automatic Claude launch, so `agent start` gets a plain prompt; `--no-focus` keeps the user where they are.
-- Tab label (`Prompts.tabLabel`): `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>`. Starting with the identifier is how herdr-linear recognises the tabs it owns (`rules.md`).
+- `HERDR_BLANK=1` makes the pane's shell skip its automatic Claude launch, so `agent start` gets a plain prompt; `--no-focus` keeps the user where they are. A caller can set more variables, each another `--env KEY=VALUE`: a command's tab gets the service's `HERDR_*`, `HERDR_LINEAR_KEY_FILE` and `CLAUDE_CONFIG_PATH`.
+- Tab label (`Prompts.tabLabel`): `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>`. Starting with the identifier is how herdr-linear recognises the tabs it owns (`rules.md`). A command's tab is `@bot CMD-<n>` (`Prompts.commandTabLabel`), which no epic rule takes for an epic's.
 - `workspaceTabs` lists every tab in that workspace with its root pane, agent and status; `identifier` is none for a tab whose label does not start with one. herdr's `agent_status` for a tab sums up the agents in all of its panes.
 - `closeTab`: `herdr tab close <tabId>`. The rules only close a tab whose tab id and pane id both match the run.
 
 ### Starting Claude
 
-`startClaude`: `herdr agent start <identifier lowercased> --kind claude --pane <pane> --timeout 30000 -- <prompt>`.
+`startClaude`: `herdr agent start <identifier lowercased> --kind claude --pane <pane> --timeout 30000 -- [args...] <prompt>`. herdr quotes each argument for the shell it types the command into; a command's agent gets its lockdown arguments this way (`rules.md`).
 
 - It returns only when the agent is ready for input, which with an initial prompt means after that prompt's whole turn. So it nearly always times out, which means Claude is still starting.
 - The start rule then reads `herdr agent get <pane>`: it must show `claude` with a status other than `blocked`, or the start fails with the pane tail.

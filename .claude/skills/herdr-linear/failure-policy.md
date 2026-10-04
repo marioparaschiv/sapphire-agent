@@ -40,6 +40,8 @@ The planner runs every rule's work per epic in its own fiber, so one bad epic ne
 - Permanent: logged as `failed`, and the epic is flagged once with `permanentFailure` and `agent-stuck`, keyed by the run's claim time (or, without a run, by the streak start).
 - Anything else (a defect, a journal error) is logged with the rule and epic and dropped; the next tick tries again. Interruption (shutdown) still stops the tick.
 
+Work that is not about an epic (`TaskWork`: the mentions, a command, a request whose epic has no run) has nothing to flag, so the planner only logs its failures with its `task`. A command handles its own: a Transient failure is logged and tried again next tick, a Permanent one while starting fails the command with a reply on GitHub (`rules.md`). Reading a thread of the bot's notifications that fails Permanently (e.g. the issue was deleted) drops that thread.
+
 A failure while observing or planning skips that tick or that rule and is logged; nothing is written.
 
 Rule code may handle a failure itself where that is the behaviour: a Permanent while starting becomes `startFailed`, a refused reply becomes a `replyFailed` notice, a failed nudge is only logged (the stale flag follows anyway), and a repo whose worktrees cannot be listed only skips its orphan worktrees.
@@ -47,5 +49,5 @@ Rule code may handle a failure itself where that is the behaviour: a Permanent w
 ## Concurrency
 
 - Rules run one after another; within a rule, epics run in parallel.
-- Starts share one semaphore: they race on `~/.claude.json` and on creating the workspace.
+- Starts share one semaphore: they race on `~/.claude.json` and on creating the workspace. A command starts in a later rule, so never at the same time as a run.
 - git calls share one semaphore per repo: git takes lock files in the main repo for operations in any of its worktrees.

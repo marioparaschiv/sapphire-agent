@@ -21,7 +21,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | Field | Default | Notes |
 | --- | --- | --- |
 | `pollSeconds` | `30` | int, min 5. Tick interval; herdr events trigger extra ticks in between. |
-| `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` runs, follow-ups included. |
+| `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` runs, follow-ups included. Command runs do not count (`rules.md`). |
 | `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle`, `done`, `blocked`) time without a result file before the epic is flagged `awaitingInput`. The old name `stuckAfterSeconds` is still read as this key. |
 | `startTimeoutSeconds` | `300` | int, min 60. Time from the claim (or the process start, if later) for Claude to be confirmed started before the start fails. Covers waiting behind other starts, the fetch and herdr's 30 s start wait. |
 | `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane output has not changed for this long: nudge once. |
@@ -34,8 +34,9 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; the label group name is this without the trailing `:`. |
 | `teams` | required | At least one team. |
-| `bot.login` | required | GitHub login of the bot account. Mentioning `@<login>` hands threads to the agent (`rules.md`); its comments answer PR-level requests. |
-| `bot.ghConfigDirectory` | required | `~` expanded. A `gh` config dir logged in as the bot, passed as `GH_CONFIG_DIR` when it posts the in-progress comment. Every other GitHub call uses the default `gh` login (the user). |
+| `bot.login` | required | GitHub login of the bot account. A comment mentioning `@<login>` starts a command run (`rules.md`). |
+| `bot.ghConfigDirectory` | required | `~` expanded. A `gh` config dir logged in as the bot, passed as `GH_CONFIG_DIR` when the bot's notifications are read and marked read and when it comments. Every other GitHub call uses the default `gh` login (the user). |
+| `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
@@ -54,10 +55,10 @@ Keyed by exact Linear team name:
 - `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
 - Paths accept `~`. Repo label rules: `linear-api.md`.
 
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/herdr-linear`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs a `bot` entry before this version starts, e.g.:
+Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/herdr-linear`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs this `bot` entry before this version starts:
 
 ```json
-"bot": { "login": "orchestratorbot", "ghConfigDirectory": "~/.config/gh-orchestratorbot" }
+"bot": { "login": "orchestratorbot", "ghConfigDirectory": "~/.config/gh-orchestratorbot", "allowedUsers": ["marioparaschiv"] }
 ```
 
 ## API key
@@ -68,7 +69,7 @@ Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemin
 
 ## Env vars
 
-Read with Effect `Config`; set by `systemd/herdr-linear.service`.
+Read with Effect `Config`; set by `systemd/herdr-linear.service`. `scripts/ctl.sh` defaults the four required ones to the same values, and a command's tab gets the service's own values (`rules.md`).
 
 | Var | Required | Value in the unit |
 | --- | --- | --- |

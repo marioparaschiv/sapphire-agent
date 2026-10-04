@@ -4,7 +4,7 @@ What herdr-linear stores locally and why, and how markers on its comments make e
 
 ## Reality first
 
-Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, and the ids that tie a run to its tab and question.
+Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, and what `ctl.sh` asked for.
 
 Idempotency comes from markers on external writes, not from the journal: before a write, look for its marker (or its effect) and skip it when present.
 
@@ -20,7 +20,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 | --- | --- |
 | `epic_id`, `identifier`, `team_id` | Which epic, for lookups, log annotations and flags. |
 | `status` | `claimed`, `running`, `awaitingInput`, `stale`, `error`, `ended`, `kept` (see `rules.md`). |
-| `job` | JSON: `{ "_tag": "orchestrate" }` or `{ "_tag": "follow-up", "threadIds": [...] }`. The thread ids a follow-up answers; the threads stay unresolved on GitHub until it is posted. |
+| `job` | JSON: `{ "_tag": "orchestrate" }` or `{ "_tag": "follow-up", "threadIds": [...], "instruction": "..." or null }`. What a follow-up was asked for; the threads stay unresolved on GitHub until it is posted. |
 | `repo`, `branch` | The local clone and the epic's branch, so cleanup finds the worktree and PR even once the epic is gone from the ready list. |
 | `worktree_path` | Set once the worktree exists. |
 | `tab_id`, `pane_id` | Set once the tab exists. Both must match herdr for the tab to count as the run's. |
@@ -37,21 +37,43 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 
 `epic_id` and `first_seen_at`: when the epic's current streak of Transient failures started. Recorded on every Transient failure of the epic's work (keeping the first time), cleared on its next success. It drives the `flagTransientAfterSeconds` flag and keys its marker (`failure-policy.md`).
 
+### `commands`
+
+One row per comment that mentioned the bot, written before anything else happens for it, so a comment is handled at most once. `id` numbers them (`CMD-<id>`); `comment_id` (the comment's GitHub node id) is unique, and recording a comment again does nothing.
+
+| Column | What and why |
+| --- | --- |
+| `comment_id`, `url`, `author`, `body` | The comment: what the agent is asked, and where its replies go. |
+| `repo`, `number` | The issue or PR it is on, as `owner/name` and number. |
+| `status` | `ignored`, `queued`, `claimed`, `running`, `ended`, `error` (see `rules.md`). |
+| `cwd` | The directory the agent runs in, once found. |
+| `tab_id`, `pane_id` | Set once the tab exists. |
+| `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
+| `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
+
+### `mention_threads` and `mention_floor`
+
+`mention_threads`: notification threads of the bot's that are read but not scanned yet (`thread_id`, `repo`, `number`, `since`). A thread is added before its notification is marked read and dropped once its comments are recorded, so a crash in between never loses a mention (`rules.md`). `mention_floor`: one row, when the journal was created; mentions written before it are never run.
+
+### `requests`
+
+What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
+
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `mentionFloor`, `listMentionThreads`, `addMentionThread` (keeps the earlier `since`), `deleteMentionThread`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
-`node src/status.ts` (via `scripts/ctl.sh status`) prints the runs: identifier, status, job, claim time, tab and worktree.
+The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, worktree), the commands in flight and the requests waiting.
 
 ## Markers
 
-Every comment herdr-linear writes, on Linear or on the PR, ends with a hidden marker on a line of its own:
+Every comment herdr-linear writes, on Linear or on GitHub, ends with a hidden marker on a line of its own:
 
 ```
 <!-- herdr-linear:<IDENTIFIER>:<purpose>:<key> -->
 ```
 
-The key is URI-encoded. A marker inside a quote (`> <!-- ... -->`) does not count, so a user quoting one of our comments is not mistaken for it. Purpose and key together name one comment: a retry or restart finds it and skips, while a later occurrence (a new question in the same run, a new summary from a follow-up run) has a new key and is posted. The `Comments` service builds every body and key; `claimedAt` is the run's claim time.
+`<IDENTIFIER>` is the epic's, or the command's (`CMD-<n>`) for what the bot posts. The key is URI-encoded. A marker inside a quote (`> <!-- ... -->`) does not count, so a user quoting one of our comments is not mistaken for it. Purpose and key together name one comment: a retry or restart finds it and skips, while a later occurrence (a new question in the same run, a new summary from a follow-up run) has a new key and is posted. The `Comments` service builds every body and key; `claimedAt` is the run's claim time.
 
 On the Linear epic:
 
@@ -71,8 +93,14 @@ On the GitHub PR:
 | --- | --- | --- |
 | `summary` | `<claimedAt>` | Once per run, as a PR comment. |
 | `flags` | `<claimedAt>` | Once per run, as the COMMENT review holding every flag. |
-| `inProgress` | `<claimedAt>` | Once per follow-up run, as the bot's PR comment when it starts. |
 | `reply` | `<threadId>.<claimedAt>` | Once per thread per run, among the thread's comments. |
+
+On the issue or PR a command came from, as the bot:
+
+| Purpose | Key | Posted |
+| --- | --- | --- |
+| `commandReply` | `<requestId>` | Once per `ctl.sh reply`. |
+| `commandFailed` | `<claimedAt>` of the command | Once per failed command. |
 
 Writes without a marker are idempotent by their effect: a move is skipped when the epic is already in that state, a label is added only if missing, a reaction only if the comment lacks that emoji, a thread is resolved only if unresolved, a tab close of a missing tab is a no-op, and worktree removal skips what is already gone.
 
@@ -80,9 +108,12 @@ Writes without a marker are idempotent by their effect: a move is skipped when t
 
 Every multi-step action is ordered so that a crash at any step leaves something the next tick finishes, without posting twice or skipping a step:
 
-- Claim before start; record the worktree, then the tab, then post the bot's in-progress comment for a follow-up, then `running`. An unrecorded tab is adopted, Claude found in the pane is not started again, a marked in-progress comment is not posted again.
+- Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, and Claude found in the pane is not started again. Commands start the same way.
+- A follow-up claim and the drop of its request are one transaction.
+- A mention's thread is recorded before its notification is marked read, its comments as commands before the thread is dropped; a command is keyed by its comment.
+- A reply or a failure notice of a command is posted before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
 - Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
 - Flags put the label on first, then the comment, then the journal update.
 - Cleanup closes the tab, removes the worktree and branch, and only then drops the row.
 
-`src/lifecycle.test.ts` proves it: it runs one epic through dispatch, a relayed question, results, a follow-up and cleanup, and repeats that with a crash injected at every journal, Linear, GitHub and herdr write, asserting the same end state and no double posts (`development.md`). The one known exception is a reply typed into the pane right before a crash, which is typed again (`rules.md`).
+`src/lifecycle.test.ts` proves it: it runs one epic through dispatch, a relayed question, results, a mention whose command asks for a follow-up, the follow-up and cleanup, and repeats that with a crash injected at every journal, Linear, GitHub and herdr write, asserting the same end state and no double posts (`development.md`). The known exceptions are a question reply or a `send` typed into the pane right before a crash, which is typed again (`rules.md`).
