@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { parseGithubRepo, prepareWorktree } from './git.ts';
+import { parseGithubRepo, prepareWorktree, pullBranch, readResultFile, removeWorktree, resultFilePath, unsavedWork } from './git.ts';
 
 const git = (cwd: string, ...args: string[]) =>
 	execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], {
@@ -80,9 +80,114 @@ test('finds the default branch when origin/HEAD was never set', async (t) => {
 	await assert.rejects(prepareWorktree(join(repo, '..', 'missing'), 'mario/unb-15', worktrees));
 });
 
+const hasBranch = (repo: string, branch: string) => git(repo, 'branch', '--list', branch) !== '';
+
+test('removes a worktree whose work is all on origin, ignored files included, and does nothing the second time', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const branch = 'mario/unb-16';
+	const path = await prepareWorktree(repo, branch, worktrees);
+	writeFileSync(join(path, '.gitignore'), 'node_modules/\n');
+	git(path, 'add', '.gitignore');
+	git(path, 'commit', '--quiet', '-m', 'ignore deps');
+	git(path, 'push', '--quiet', '-u', 'origin', branch);
+	mkdirSync(join(path, 'node_modules'));
+	writeFileSync(join(path, 'node_modules', 'dep.js'), '');
+
+	assert.equal(await unsavedWork(repo, branch, path), undefined);
+	await removeWorktree(repo, branch, path);
+
+	assert.equal(existsSync(path), false);
+	assert.equal(hasBranch(repo, branch), false);
+	assert.equal(await unsavedWork(repo, branch, path), undefined);
+	await removeWorktree(repo, branch, path);
+	assert.equal(await prepareWorktree(repo, branch, worktrees), path, 'a later run restores it from origin');
+	assert.equal(git(path, 'log', '-1', '--format=%s'), 'ignore deps');
+});
+
+test('reports uncommitted changes and unpushed commits, including on a branch never pushed', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const branch = 'mario/unb-17';
+	const path = await prepareWorktree(repo, branch, worktrees);
+
+	assert.equal(await unsavedWork(repo, branch, path), undefined, 'a new branch with nothing on it');
+
+	writeFileSync(join(path, 'notes.md'), 'draft');
+	assert.equal(await unsavedWork(repo, branch, path), 'uncommitted changes');
+
+	git(path, 'add', 'notes.md');
+	git(path, 'commit', '--quiet', '-m', 'slice 1');
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 2');
+	assert.equal(await unsavedWork(repo, branch, path), '2 unpushed commits');
+
+	git(path, 'push', '--quiet', '-u', 'origin', branch);
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 3');
+	assert.equal(await unsavedWork(repo, branch, path), '1 unpushed commit');
+});
+
+test('checks the branch when its worktree directory was deleted by hand, then removes it', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const branch = 'mario/unb-18';
+	const path = await prepareWorktree(repo, branch, worktrees);
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 1');
+	rmSync(path, { recursive: true, force: true });
+
+	assert.equal(await unsavedWork(repo, branch, path), '1 unpushed commit');
+
+	git(repo, 'push', '--quiet', 'origin', branch);
+	assert.equal(await unsavedWork(repo, branch, path), undefined);
+	await removeWorktree(repo, branch, path);
+	assert.equal(hasBranch(repo, branch), false);
+});
+
+test('a follow-up restores a cleaned-up worktree from origin and pulls a reused one up to date', async (t) => {
+	const { origin, seed, repo, worktrees } = repos(t);
+	const branch = 'mario/unb-19';
+	const path = await prepareWorktree(repo, branch, worktrees);
+	git(path, 'commit', '--quiet', '--allow-empty', '-m', 'slice 1');
+	git(path, 'push', '--quiet', 'origin', branch);
+	await removeWorktree(repo, branch, path);
+	assert.equal(existsSync(path), false);
+	assert.equal(hasBranch(repo, branch), false);
+
+	assert.equal(await prepareWorktree(repo, branch, worktrees), path);
+	await pullBranch(path, branch);
+	assert.equal(git(path, 'log', '-1', '--format=%s'), 'slice 1');
+
+	git(seed, 'fetch', '--quiet', origin, branch);
+	git(seed, 'checkout', '--quiet', '-b', branch, 'FETCH_HEAD');
+	git(seed, 'commit', '--quiet', '--allow-empty', '-m', 'pushed from elsewhere');
+	git(seed, 'push', '--quiet', origin, branch);
+
+	assert.equal(await prepareWorktree(repo, branch, worktrees), path);
+	await pullBranch(path, branch);
+	assert.equal(git(path, 'log', '-1', '--format=%s'), 'pushed from elsewhere');
+});
+
 test('reads owner/repo from GitHub remotes', () => {
 	assert.equal(parseGithubRepo('https://github.com/marioparaschiv/unbound.git'), 'marioparaschiv/unbound');
 	assert.equal(parseGithubRepo('https://github.com/marioparaschiv/hivemind.ts'), 'marioparaschiv/hivemind.ts');
 	assert.equal(parseGithubRepo('git@github.com:unbound-app/loader-ios.git'), 'unbound-app/loader-ios');
 	assert.throws(() => parseGithubRepo('https://gitlab.com/someone/thing.git'), /not a GitHub repository/);
+});
+
+test('reads the result file from the worktree\'s git dir, where it can never be committed', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const path = await prepareWorktree(repo, 'mario/unb-14', worktrees);
+	const resultPath = await resultFilePath(path);
+
+	assert.equal(resultPath, join(repo, '.git', 'worktrees', 'mario-unb-14', 'herdr-result.json'));
+	assert.equal(await readResultFile(path), undefined);
+
+	writeFileSync(resultPath, JSON.stringify({ summary: 'Done.', flags: [] }));
+	const missingReplies = await readResultFile(path);
+	assert.ok(missingReplies && !missingReplies.ok && /replies/.test(missingReplies.error), JSON.stringify(missingReplies));
+
+	writeFileSync(resultPath, '{ "summary": ');
+	const notJson = await readResultFile(path);
+	assert.ok(notJson && !notJson.ok && notJson.error.startsWith('not JSON'), JSON.stringify(notJson));
+
+	const result = { summary: 'Done.', replies: [], flags: [{ path: 'src/a.ts', line: 3, body: 'Rename this.' }] };
+	writeFileSync(resultPath, JSON.stringify(result));
+	assert.deepEqual(await readResultFile(path), { ok: true, result });
+	assert.equal(git(path, 'status', '--porcelain', '--ignored'), '');
 });

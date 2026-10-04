@@ -5,7 +5,7 @@ description: Use when working on, debugging, or operating the herdr-linear plugi
 
 # herdr-linear
 
-A herdr plugin plus systemd user service that polls Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses.
+A herdr plugin plus systemd user service that polls Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses. `/agent` review threads on the PR start `/follow-up` runs that reply to and resolve them.
 
 Repo: `~/herdr-linear`. Read only the files you need.
 
@@ -13,11 +13,11 @@ Repo: `~/herdr-linear`. Read only the files you need.
 | --- | --- | --- |
 | `overview.md` | End-to-end flow, Linear columns, who moves what (plugin, agent, human, GitHub integration). | First time on the project, or changing how epics move between Linear states. |
 | `architecture.md` | Dispatcher vs worker split, protocol messages, in-process wiring in `main.ts`, remote-worker seam, file map. | Adding a message, touching `main.ts`, planning the remote worker, or finding which file owns what. |
-| `claims-and-lifecycle.md` | Claim statuses, `claims.json`, per-tick reconcile rules, stuck detection, failure path, retry, restart re-attach. | Changing dispatch/reconcile logic, or debugging why an epic was (not) picked up, flagged or released. |
-| `worker-and-herdr.md` | Worktree creation, Claude trust pre-accept, tab/workspace creation, `herdr agent start` quirks, event subscription. | Changing how runs start or are watched, or debugging a run that failed to start or went unnoticed. |
-| `linear-api.md` | GraphQL queries and mutations, per-team state resolution, labels and repo labels, PR detection via `gh`. | Touching `linear.ts` or `github.ts`, or debugging Linear errors, missing states, labels or PR detection. |
+| `claims-and-lifecycle.md` | Claim statuses, `maxInFlight` accounting, `claims.json`, per-tick reconcile rules, result file and posting it to the PR, follow-up runs and the `/agent` pending rule, flagging (awaitingInput/stale/error, nudge, wall-clock cap, start timeout), elicitation replies, retry, tab and worktree cleanup, restart re-attach. | Changing dispatch/reconcile logic, or debugging why an epic was (not) picked up, flagged or released. |
+| `worker-and-herdr.md` | Worktree creation and removal, Claude trust pre-accept, tab/workspace creation and closing, `herdr agent start` quirks, event subscription. | Changing how runs start or are watched, or debugging a run that failed to start or went unnoticed. |
+| `linear-api.md` | GraphQL queries and mutations, per-team state resolution, labels and repo labels, PR detection and GitHub writes via `gh`. | Touching `linear.ts` or `github.ts`, or debugging Linear errors, missing states, labels or PR detection. |
 | `config.md` | Config file location, every field and default, team-to-repo mapping, API key file, env vars. | Editing config, adding a team or repo, or a startup failure about config or the key. |
-| `operations.md` | systemd units, install, plugin manifest, pause/resume/status, logs, state dir, troubleshooting. | Operating the live service, reading logs, retrying a stuck epic, or fixing a skipped team. |
+| `operations.md` | systemd units, install, plugin manifest, pause/resume/status, logs, state dir, troubleshooting. | Operating the live service, reading logs, retrying a flagged epic, or fixing a skipped team. |
 | `development.md` | Node 24 type stripping, tests, typecheck, code style, safe herdr testing, commit rules. | Before changing any code or running anything against herdr. |
 
 Rules that apply everywhere:

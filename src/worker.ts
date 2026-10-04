@@ -1,4 +1,5 @@
-import { githubRepo, prepareWorktree, worktreePath } from './git.ts';
+import { rm } from 'node:fs/promises';
+import { githubRepo, prepareWorktree, pullBranch, readResultFile, removeWorktree, resultFilePath, unsavedWork, worktreePath } from './git.ts';
 import { type Herdr, HerdrError } from './herdr.ts';
 import type { AgentStatus, DispatcherMessage, Job, Run, Send, WorkerMessage } from './protocol.ts';
 import { trustFolder } from './trust.ts';
@@ -13,10 +14,12 @@ export type WorkerOptions = {
 	log: (line: string) => void;
 };
 
-type Tracked = { run: Run; status?: AgentStatus; unsubscribe?: () => void };
+type Tracked = { run: Run; status?: AgentStatus; tail?: string; resultReported?: boolean; unsubscribe?: () => void };
 
 const TAIL_LINES = 40;
 const START_TIMEOUT_MS = 30_000;
+
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 class StartError extends Error {
 	readonly tail?: string;
@@ -33,7 +36,7 @@ export class Worker {
 	private readonly runs = new Map<string, Tracked>();
 	private timer: NodeJS.Timeout | undefined;
 	private reconciling = Promise.resolve();
-	private starting = Promise.resolve();
+	private queue = Promise.resolve();
 
 	constructor(options: WorkerOptions) {
 		this.options = options;
@@ -59,26 +62,55 @@ export class Worker {
 	async handle(message: DispatcherMessage) {
 		const { job } = message;
 
+		switch (message.type) {
+			case 'dispatch':
+				return this.startRun(job, () => this.dispatch(job));
+
+			case 'watch':
+				return message.run ? this.track(job.epicId, message.run) : this.startRun(job, () => this.adopt(job));
+
+			case 'close':
+				return this.closeRun(job, message.run).catch((error: unknown) => this.logError(`closing ${job.identifier}'s tab`, error));
+
+			case 'cleanup':
+				return this.serial(() => this.cleanup(job, message.run)).catch((error: unknown) =>
+					this.logError(`cleaning up ${job.identifier}`, error),
+				);
+
+			case 'nudge':
+				return this.nudge(job, message.run).catch((error: unknown) => this.logError(`nudging ${job.identifier}`, error));
+
+			case 'reply':
+				return this.options.herdr.prompt(message.run.paneId, message.text).then(
+					() => this.options.log(`${job.identifier}: typed reply ${message.commentId} into ${message.run.paneId}`),
+					(error: unknown) =>
+						this.options.send({ type: 'replyFailed', epicId: job.epicId, commentId: message.commentId, error: errorMessage(error) }),
+				);
+		}
+	}
+
+	private async startRun(job: Job, start: () => Promise<void>) {
 		try {
-			if (message.type === 'watch' && message.run) {
-				this.track(job.epicId, message.run);
-			} else {
-				await this.serialStart(() => (message.type === 'dispatch' ? this.dispatch(job) : this.adopt(job)));
-			}
+			await this.serial(start);
 		} catch (error) {
 			this.options.send({
 				type: 'failed',
 				epicId: job.epicId,
-				error: error instanceof Error ? error.message : String(error),
+				error: errorMessage(error),
 				tail: error instanceof StartError ? error.tail : undefined,
 			});
 		}
 	}
 
-	// Starts run one at a time: concurrent ones would race on ~/.claude.json and on creating the workspace.
-	private serialStart(start: () => Promise<void>) {
-		const result = this.starting.then(start);
-		this.starting = result.catch(() => {});
+	private logError(action: string, error: unknown) {
+		this.options.log(`${action} failed: ${errorMessage(error)}`);
+	}
+
+	// Starts and cleanups run one at a time: concurrent starts would race on ~/.claude.json and on creating the
+	// workspace, and git worktree commands on one repo would race on its lock files.
+	private serial(task: () => Promise<void>) {
+		const result = this.queue.then(task);
+		this.queue = result.catch(() => {});
 
 		return result;
 	}
@@ -86,7 +118,15 @@ export class Worker {
 	private async dispatch(job: Job) {
 		const { herdr, worktreesDirectory, claudeConfigPath, send, log } = this.options;
 		const path = await prepareWorktree(job.repoPath, job.branch, worktreesDirectory);
+
+		if (job.threadIds) {
+			await pullBranch(path, job.branch);
+		}
+
 		const repo = await githubRepo(job.repoPath);
+
+		// A reused worktree may still hold the result of an earlier run.
+		await rm(await resultFilePath(path), { force: true });
 
 		await trustFolder(claudeConfigPath, path);
 
@@ -98,7 +138,7 @@ export class Worker {
 			await herdr.startAgent(job.identifier.toLowerCase(), paneId, job.prompt, START_TIMEOUT_MS);
 		} catch (error) {
 			if (!(error instanceof HerdrError && error.code === 'timeout')) {
-				throw new StartError(error instanceof Error ? error.message : String(error), await herdr.readPane(paneId, TAIL_LINES));
+				throw new StartError(errorMessage(error), await herdr.readPane(paneId, TAIL_LINES));
 			}
 		}
 
@@ -156,8 +196,55 @@ export class Worker {
 		this.track(job.epicId, run);
 	}
 
-	private track(epicId: string, run: Run) {
+	// Only closes the tab it opened: after a herdr restart the same id can belong to another tab.
+	private async closeRun(job: Job, run: Run) {
+		const { herdr, log } = this.options;
+
+		this.untrack(job.epicId);
+
+		const tab = await herdr.tab(run.tabId);
+
+		if (tab?.label !== job.tabLabel) {
+			return;
+		}
+
+		await herdr.closeTab(run.tabId);
+		log(`${job.identifier}: closed tab ${run.tabId}`);
+	}
+
+	private async nudge(job: Job, run: Run) {
+		const { herdr, log } = this.options;
+
+		await herdr.sendKeys(run.paneId, ['esc']);
+		await herdr.prompt(run.paneId, 'continue');
+		log(`${job.identifier}: nudged ${run.paneId}`);
+	}
+
+	private async cleanup(job: Job, run: Run) {
+		const { send, log } = this.options;
+
+		await this.closeRun(job, run);
+
+		const reason = await unsavedWork(job.repoPath, job.branch, run.worktreePath);
+
+		if (reason) {
+			send({ type: 'kept', epicId: job.epicId, worktreePath: run.worktreePath, reason });
+
+			return;
+		}
+
+		await removeWorktree(job.repoPath, job.branch, run.worktreePath);
+		log(`${job.identifier}: removed ${run.worktreePath} and branch ${job.branch}`);
+		send({ type: 'cleaned', epicId: job.epicId });
+	}
+
+	private untrack(epicId: string) {
 		this.runs.get(epicId)?.unsubscribe?.();
+		this.runs.delete(epicId);
+	}
+
+	private track(epicId: string, run: Run) {
+		this.untrack(epicId);
 		this.runs.set(epicId, { run });
 		this.subscribe(epicId);
 		void this.reconcile(epicId);
@@ -190,7 +277,7 @@ export class Worker {
 		this.reconciling = this.reconciling
 			.then(() => this.reconcileNow(epicId))
 			.catch((error: unknown) => {
-				this.options.log(`reconciling ${epicId} failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.logError(`reconciling ${epicId}`, error);
 			});
 
 		return this.reconciling;
@@ -209,8 +296,8 @@ export class Worker {
 		const agent = pane && (await herdr.agent(paneId));
 
 		if (!pane || agent?.agent !== 'claude') {
-			tracked.unsubscribe?.();
-			this.runs.delete(epicId);
+			this.untrack(epicId);
+			await this.reportResult(epicId, tracked);
 			send({
 				type: 'finished',
 				epicId,
@@ -221,13 +308,35 @@ export class Worker {
 			return;
 		}
 
-		if (agent.agent_status === tracked.status) {
+		// The tail is sent while working too: the dispatcher tells a hung agent by its tail not changing.
+		const tail = await herdr.readPane(paneId, TAIL_LINES);
+
+		if (agent.agent_status !== tracked.status || tail !== tracked.tail) {
+			tracked.status = agent.agent_status;
+			tracked.tail = tail;
+			send({ type: 'status', epicId, status: agent.agent_status, tail });
+		}
+
+		// The agent writes the file as its last step, so it is only read once the agent stops; never half-written.
+		if (agent.agent_status !== 'working') {
+			await this.reportResult(epicId, tracked);
+		}
+	}
+
+	private async reportResult(epicId: string, tracked: Tracked) {
+		if (tracked.resultReported) {
 			return;
 		}
 
-		tracked.status = agent.agent_status;
-		const tail = agent.agent_status === 'working' ? '' : await herdr.readPane(paneId, TAIL_LINES);
+		const read = await readResultFile(tracked.run.worktreePath);
 
-		send({ type: 'status', epicId, status: agent.agent_status, tail });
+		if (!read) {
+			return;
+		}
+
+		tracked.resultReported = true;
+		this.options.send(
+			read.ok ? { type: 'result', epicId, result: read.result } : { type: 'invalidResult', epicId, error: read.error },
+		);
 	}
 }

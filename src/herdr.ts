@@ -108,6 +108,22 @@ export class Herdr {
 		await this.exec(['tab', 'rename', tabId, label]);
 	}
 
+	async tab(tabId: string) {
+		try {
+			return (await this.call(z.object({ tab: tabSchema }), ['tab', 'get', tabId])).tab;
+		} catch (error) {
+			if (error instanceof HerdrError && error.code === 'tab_not_found') {
+				return undefined;
+			}
+
+			throw error;
+		}
+	}
+
+	async closeTab(tabId: string) {
+		await this.exec(['tab', 'close', tabId]);
+	}
+
 	async tabs(workspaceId: string) {
 		return (await this.call(z.object({ tabs: z.array(tabSchema) }), ['tab', 'list', '--workspace', workspaceId])).tabs;
 	}
@@ -145,6 +161,16 @@ export class Herdr {
 	// prompt's turn ends; callers treat a timeout as "still starting" and confirm with agent().
 	async startAgent(name: string, paneId: string, prompt: string, timeoutMs: number) {
 		await this.exec(['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', String(timeoutMs), '--', prompt]);
+	}
+
+	async sendKeys(paneId: string, keys: string[]) {
+		await this.exec(['agent', 'send-keys', paneId, ...keys]);
+	}
+
+	// herdr rejects newlines in a prompt, so lines are joined with spaces. It also rejects a prompt while the agent
+	// sits at an approval or question dialog (agent_blocked).
+	async prompt(paneId: string, text: string) {
+		await this.exec(['agent', 'prompt', paneId, text.trim().replace(/\s*[\r\n]+\s*/g, ' ')]);
 	}
 
 	// Runs of blank lines are squeezed to one; a TUI pads its screen with them.

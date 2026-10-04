@@ -30,8 +30,9 @@ Run both before calling work done.
 
 | File | Covers | How |
 | --- | --- | --- |
-| `dispatcher.test.ts` | Claim/dispatch/reconcile/stuck/fail/retry/pause/skip | Real `Dispatcher` + `LinearClient` against `FakeLinear`, real `ClaimStore` in a temp dir, fake `now`, fake `findPullRequest`, `send` captured. |
-| `git.test.ts` | `prepareWorktree`, `parseGithubRepo` | Real git: bare origin, seed and clone in a temp dir. |
+| `dispatcher.test.ts` | Claim/dispatch/reconcile, awaitingInput/stale/error/start timeout, nudge, wall-clock cap, result posting, follow-up runs (thread scan, dispatch, reply mismatch, replies and resolves), elicitation replies, `maxInFlight` accounting, retry, run end and cleanup decisions, pause/skip | Real `Dispatcher` + `LinearClient` against `FakeLinear`, real `ClaimStore` in a temp dir, fake `now`, real `GitHub` with a fake `gh` runner (records args and stdin, answers `pr list` and the GraphQL thread query, reply and resolve against in-memory `harness.threads`), `send` captured. |
+| `git.test.ts` | `prepareWorktree`, `pullBranch` (also after cleanup), `unsavedWork`, `removeWorktree`, `parseGithubRepo`, result file path and read | Real git: bare origin, seed and clone in a temp dir. |
+| `claims.test.ts` | Loading old `stuck` / `failed` statuses | Real temp file. |
 | `trust.test.ts` | `trustFolder` | Real temp files. |
 | `config.test.ts` | Defaults, errors, `resolveRepo` | Real files and pure calls. |
 

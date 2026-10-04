@@ -21,6 +21,8 @@ export type FakeIssue = {
 
 type FakeLabel = { id: string; name: string; teamId: string | null; parentName: string | null };
 
+export type FakeComment = { id: string; issueId: string; body: string; parentId: string | null; createdAt: string; reactions: string[] };
+
 const requestSchema = z.object({ query: z.string(), variables: z.record(z.string(), z.unknown()) });
 
 export const UNBOUND_TEAM_ID = '2f1a5c4e-9b7d-4e0a-8c1f-6d2b3a4e5f60';
@@ -39,7 +41,7 @@ export class FakeLinear {
 	readonly teams = [{ id: UNBOUND_TEAM_ID, key: 'UNB', name: 'Unbound', states: unboundStates }];
 	readonly issues = new Map<string, FakeIssue>();
 	readonly labels: FakeLabel[] = [{ id: 'lbl-loader', name: 'loader-ios', teamId: null, parentName: 'repo' }];
-	readonly comments: { issueId: string; body: string }[] = [];
+	readonly comments: FakeComment[] = [];
 	readonly mutations: string[] = [];
 	readonly authorizations = new Set<string>();
 	private server: Server | undefined;
@@ -104,6 +106,21 @@ export class FakeLinear {
 		return unboundStates.find((state) => state.id === issue.stateId)?.name;
 	}
 
+	// A comment as the user would post it in Linear, e.g. a reply in a question's thread.
+	addComment(issueId: string, body: string, parentId: string | null = null) {
+		const comment: FakeComment = {
+			id: `comment-${this.comments.length + 1}`,
+			issueId,
+			body,
+			parentId,
+			createdAt: new Date(Date.UTC(2026, 9, 1, 0, 0, this.comments.length)).toISOString(),
+			reactions: [],
+		};
+		this.comments.push(comment);
+
+		return comment;
+	}
+
 	labelNames(issueId: string) {
 		return this.issues.get(issueId)!.labelIds.map((id) => this.labels.find((label) => label.id === id)?.name);
 	}
@@ -159,6 +176,17 @@ export class FakeLinear {
 							.map((issue) => this.toEpic(issue)),
 					},
 					claimed: { nodes: issues.filter((issue) => strings('claimedIds').includes(issue.id)).map((issue) => this.toEpic(issue)) },
+					replies: {
+						nodes: this.comments
+							.filter((comment) => comment.parentId !== null && strings('questionIds').includes(comment.parentId))
+							.map((comment) => ({
+								id: comment.id,
+								body: comment.body,
+								createdAt: comment.createdAt,
+								parent: { id: comment.parentId },
+								reactions: comment.reactions.map((emoji) => ({ emoji })),
+							})),
+					},
 				};
 			}
 
@@ -170,10 +198,18 @@ export class FakeLinear {
 			}
 
 			case 'Comment': {
-				this.mutations.push(`comment ${string('issueId')}`);
-				this.comments.push({ issueId: string('issueId'), body: string('body') });
+				const parentId = z.string().nullish().parse(variables.parentId) ?? null;
+				this.mutations.push(`comment ${string('issueId')}${parentId ? ` in ${parentId}` : ''}`);
+				const comment = this.addComment(string('issueId'), string('body'), parentId);
 
-				return { commentCreate: { success: true } };
+				return { commentCreate: { success: true, comment: { id: comment.id } } };
+			}
+
+			case 'React': {
+				this.mutations.push(`react ${string('commentId')} ${string('emoji')}`);
+				this.comments.find((comment) => comment.id === string('commentId'))!.reactions.push(string('emoji'));
+
+				return { reactionCreate: { success: true } };
 			}
 
 			case 'Labels':
