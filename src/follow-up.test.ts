@@ -1,14 +1,11 @@
 import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
-import { Clock, Effect, Option } from 'effect';
+import { Clock, Effect } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import { ON_BEHALF_OF_CLAUDE } from './github.ts';
 import type { Epic } from './linear.ts';
-import { parseMarker } from './markers.ts';
-import { git, type Harness, makeHarness } from './test-harness.ts';
-
-const markers = (bodies: ReadonlyArray<string>) => bodies.flatMap((body) => Option.toArray(Option.map(parseMarker(body), (marker) => `${marker.purpose}:${marker.key}`)));
+import { git, type Harness, makeHarness, markerKeys } from './test-harness.ts';
 
 // An epic whose first run posted its result and went to To Review, with the branch on origin. A minute passes, so the
 // follow-up's claim (at `followUpAt`) has markers of its own. `push: false` leaves the branch local only, so pulling it fails.
@@ -62,13 +59,13 @@ const outcome = (h: Harness, epic: Epic, number: number, threadIds: ReadonlyArra
 			threads: threadIds.map((threadId) => {
 				const thread = h.github.thread(threadId);
 
-				return [thread.isResolved, markers(thread.comments.nodes.map((comment) => comment.body))];
+				return [thread.isResolved, markerKeys(thread.comments.nodes.map((comment) => comment.body))];
 			}),
-			summaries: markers(h.github.comments(h.githubRepo, number)),
+			summaries: markerKeys(h.github.comments(h.githubRepo, number)),
 			state: h.linear.stateName(epic.id),
 			openTabs: h.herdr.tabs().filter((tab) => tab.label.startsWith(`${epic.identifier} `)).length,
 			runs: (yield* h.runs).map((run) => `${run.status} ${run.job._tag}`),
-			linearComments: markers(h.linear.comments(epic.id).map((comment) => comment.body)),
+			linearComments: h.epicMarkers(epic.id),
 		};
 	});
 
@@ -254,7 +251,7 @@ describe('follow-ups', () => {
 				[['ended', 'follow-up', worktreePath]],
 			);
 			assert.deepStrictEqual(h.worktrees(), [worktreePath]);
-			assert.deepStrictEqual(markers(h.linear.comments(epic.id).map((comment) => comment.body)), [`startFailed:${followUpAt}`]);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), [`startFailed:${followUpAt}`]);
 			assert.match(h.linear.comments(epic.id)[0].body, /pull --ff-only/);
 			assert.strictEqual(h.linear.stateName(epic.id), 'To Review');
 			assert.deepStrictEqual(h.herdr.starts(), []);

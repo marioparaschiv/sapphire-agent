@@ -55,8 +55,6 @@ export type CommentSeed = {
 export type LinearFixtureShape = {
 	// The GraphQL endpoint on 127.0.0.1.
 	readonly url: string;
-	// The Test team (named like AppConfig.layerTest's team) is seeded; this adds another.
-	readonly addTeam: (team: Team) => Team;
 	readonly addEpic: (seed: EpicSeed) => FixtureIssue;
 	readonly addLabel: (seed: LabelSeed) => FixtureLabel;
 	// A comment as a user would post it in Linear, e.g. a reply in a question's thread.
@@ -440,11 +438,6 @@ const make = Effect.gen(function* () {
 
 	const fixture: LinearFixtureShape = {
 		url: `http://127.0.0.1:${address.port}/graphql`,
-		addTeam: (added) => {
-			teams.push(added);
-
-			return added;
-		},
 		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, subIssues = 2 }) => {
 			const owner = team(teamId);
 			const epic: FixtureIssue = {

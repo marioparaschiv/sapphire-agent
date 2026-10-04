@@ -33,7 +33,7 @@ export type FakeTab = {
 
 // What `startClaude` does: Claude starts working and herdr's wait times out (`starting`, the usual case), Claude
 // starts and finishes its first turn within the wait (`ready`), or herdr's wait times out with no agent (`no-agent`).
-export type FakeStartBehaviour = 'starting' | 'ready' | 'no-agent';
+export type FakeStartBehaviour = 'starting' | 'no-agent';
 
 export type FakeHerdrControls = {
 	// Seeds a tab in the workspace labelled `workspace` (default: the configured workspaceLabel), creating it if needed.
@@ -54,7 +54,6 @@ export type FakeHerdrControls = {
 	readonly setStartBehaviour: (behaviour: FakeStartBehaviour) => void;
 	readonly tab: (tabId: string) => Option.Option<FakeTab>;
 	readonly tabs: () => ReadonlyArray<FakeTab>;
-	readonly workspaces: () => ReadonlyArray<Workspace>;
 	readonly sentKeys: () => ReadonlyArray<{ readonly paneId: string; readonly keys: ReadonlyArray<string> }>;
 	// Prompts as herdr received them, lines joined.
 	readonly prompts: () => ReadonlyArray<{ readonly paneId: string; readonly text: string }>;
@@ -243,10 +242,10 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 				starts.push({ paneId, name, prompt: oneLine(prompt) });
 
 				if (startBehaviour !== 'no-agent') {
-					update(paneId, { agent: Option.some('claude'), agentStatus: startBehaviour === 'ready' ? 'idle' : 'working' });
+					update(paneId, { agent: Option.some('claude'), agentStatus: 'working' });
 				}
 
-				return Effect.succeed<StartOutcome>(startBehaviour === 'ready' ? 'ready' : 'starting');
+				return Effect.succeed<StartOutcome>('starting');
 			}),
 		openTab: openTabWith(commands, workspaceLabel),
 		workspaceTabs: workspaceTabsOf(commands, workspaceLabel),
@@ -283,7 +282,6 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 		},
 		tab: byTab,
 		tabs: () => [...tabs],
-		workspaces: () => [...workspaces],
 		sentKeys: () => [...sentKeys],
 		prompts: () => [...prompts],
 		starts: () => [...starts],

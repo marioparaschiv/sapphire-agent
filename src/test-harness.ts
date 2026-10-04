@@ -14,12 +14,15 @@ import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
 import { Journal, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
+import { parseMarker } from './markers.ts';
 import { type Observation, Observer, type StartedRun } from './observation.ts';
-import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
-import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
+
+// `<purpose>:<key>` of each marked body, in order; unmarked bodies are left out.
+export const markerKeys = (bodies: ReadonlyArray<string>) =>
+	bodies.flatMap((body) => Option.toArray(Option.map(parseMarker(body), (marker) => `${marker.purpose}:${marker.key}`)));
 
 // Runs git in `cwd` with a test identity.
 export const git = (cwd: string, ...args: Array<string>) =>
@@ -39,8 +42,6 @@ export type Harness = {
 	// One tick of the current planner, with every rule in production order.
 	readonly tick: Effect.Effect<void>;
 	readonly pausedTick: Effect.Effect<void>;
-	// The current reconciler, for tests that need its poll loop.
-	readonly reconciler: Effect.Effect<Reconciler['Service']>;
 	// A process restart: the planner, its rules and the journal connection are built again on the same journal file,
 	// while Linear, GitHub, herdr and the repos keep their state.
 	readonly restart: Effect.Effect<void>;
@@ -56,7 +57,8 @@ export type Harness = {
 	// Journal writes (putRun or deleteRun) so far, the crashed one included.
 	readonly journalWrites: () => number;
 	readonly runs: Effect.Effect<ReadonlyArray<Run>>;
-	readonly putRun: (run: Run) => Effect.Effect<void>;
+	// markerKeys of the issue's comments.
+	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
 	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
 	// row claimed at the current TestClock time.
 	readonly startedRun: (seed: EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string }) => Effect.Effect<{ readonly epic: Epic; readonly run: StartedRun }>;
@@ -125,9 +127,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
 
-		const stack = Reconciler.layer.pipe(
-			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
-			Layer.provide(Pause.layer),
+		const stack = Planner.layer(rules).pipe(
+			Layer.provide(Observer.layer),
 			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, Comments.layer, Prompts.layer)),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
@@ -206,7 +207,6 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			herdr,
 			tick: tick(false),
 			pausedTick: tick(true),
-			reconciler: Effect.map(services, Context.get(Reconciler)),
 			restart,
 			crashAtJournalWrite: (nth) => {
 				crashAt = Option.some(journalWrites + nth);
@@ -226,7 +226,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 				issue.stateId = found.id;
 			},
 			runs: journal.pipe(Effect.flatMap((found) => found.listRuns), Effect.orDie),
-			putRun: (run) => journal.pipe(Effect.flatMap((found) => found.putRun(run)), Effect.orDie),
+			epicMarkers: (issueId) => markerKeys(linear.comments(issueId).map((comment) => comment.body)),
 			startedRun,
 			writeResultFile: (run, contents) => {
 				if (run.worktreePath === null) {

@@ -4,17 +4,14 @@ import { Effect, Option } from 'effect';
 import { Transient } from './call-policy.ts';
 import { ON_BEHALF_OF_CLAUDE } from './github.ts';
 import type { Epic } from './linear.ts';
-import { parseMarker } from './markers.ts';
 import type { StartedRun } from './observation.ts';
-import { type Harness, makeHarness } from './test-harness.ts';
+import { type Harness, makeHarness, markerKeys } from './test-harness.ts';
 
 const resultFile = {
 	summary: 'Plugin settings now sync across devices; conflicts keep the newest change.',
 	replies: [],
 	flags: [{ path: 'src/sync/merge.ts', line: 12, body: 'A tie keeps the local value; confirm that is wanted.' }],
 };
-
-const markers = (bodies: ReadonlyArray<string>) => bodies.flatMap((body) => Option.toArray(Option.map(parseMarker(body), (marker) => `${marker.purpose}:${marker.key}`)));
 
 // A run whose agent finished its turn after writing a valid result file, with the PR the agent opened.
 const finishedRun = (h: Harness, result: object = resultFile) =>
@@ -33,8 +30,8 @@ const outcome = (h: Harness, epic: Epic, run: StartedRun, number: number) =>
 		const [stored] = yield* h.runs;
 
 		return {
-			summaries: markers(h.github.comments(h.githubRepo, number)),
-			reviews: markers(h.github.reviews(h.githubRepo, number).map((review) => review.body)),
+			summaries: markerKeys(h.github.comments(h.githubRepo, number)),
+			reviews: markerKeys(h.github.reviews(h.githubRepo, number).map((review) => review.body)),
 			state: h.linear.stateName(epic.id),
 			tabOpen: Option.isSome(h.herdr.tab(run.tabId)),
 			run: stored ? [stored.status, stored.result?.summary] : null,
@@ -168,7 +165,7 @@ describe('results', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h.linear.comments(epic.id).map((comment) => comment.body)), ['invalidResult:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['invalidResult:0']);
 			assert.match(h.linear.comments(epic.id)[0].body, /the agent's result file is invalid/);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
 			assert.deepStrictEqual(
@@ -188,7 +185,7 @@ describe('results', () => {
 			yield* h.tick;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h.linear.comments(epic.id).map((comment) => comment.body)), ['noPullRequest:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['noPullRequest:0']);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((found) => found.status),
 				['error'],

@@ -4,9 +4,6 @@ import { TestClock } from 'effect/testing';
 import { parseMarker } from './markers.ts';
 import { type Harness, makeHarness } from './test-harness.ts';
 
-const markers = (h: Harness, issueId: string) =>
-	h.linear.comments(issueId).flatMap((comment) => Option.toArray(Option.map(parseMarker(comment.body), (marker) => `${marker.purpose}:${marker.key}`)));
-
 const statuses = (h: Harness) => h.runs.pipe(Effect.map((runs) => runs.map((run) => run.status)));
 
 const question = '⏺ The sync needs a conflict rule.\n\n❯ Which should win, local or remote?';
@@ -20,7 +17,7 @@ describe('monitoring', () => {
 			yield* h.tick;
 			yield* TestClock.adjust('179 seconds');
 			yield* h.tick;
-			assert.deepStrictEqual(markers(h, epic.id), []);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
 
 			// idle to done is still quiet, so the timer keeps running.
 			h.herdr.setAgentStatus(run.paneId, 'done');
@@ -33,7 +30,7 @@ describe('monitoring', () => {
 			const [flag] = h.linear.comments(epic.id);
 			const [flagged] = yield* h.runs;
 
-			assert.deepStrictEqual(markers(h, epic.id), ['awaitingInput:0-0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
 			assert.match(flag.body, /^\*\*herdr-linear\*\* \(`awaitingInput`\): the agent finished its turn 3 min ago before writing its result file\./);
 			assert.include(flag.body, 'Which should win, local or remote?');
 			assert.deepStrictEqual([flagged.status, flagged.questionCommentId], ['awaitingInput', flag.id]);
@@ -58,14 +55,14 @@ describe('monitoring', () => {
 
 			assert.deepStrictEqual(h.herdr.sentKeys(), [{ paneId: run.paneId, keys: ['esc'] }]);
 			assert.deepStrictEqual(h.herdr.prompts(), [{ paneId: run.paneId, text: 'continue' }]);
-			assert.deepStrictEqual(markers(h, epic.id), []);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
 
 			yield* TestClock.adjust('10 minutes');
 			yield* h.tick;
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h, epic.id), [`stale:0-${10 * 60_000}`]);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), [`stale:0-${10 * 60_000}`]);
 			assert.match(h.linear.comments(epic.id)[0].body, /has shown no new output for 20 min, even after a nudge/);
 			assert.deepStrictEqual(yield* statuses(h), ['stale']);
 			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
@@ -88,7 +85,7 @@ describe('monitoring', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h, epic.id), ['error:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['error:0']);
 			assert.match(h.linear.comments(epic.id)[0].body, /\(`error`\): the agent exited before writing its result file[\s\S]*Segmentation fault/);
 			assert.deepStrictEqual(h.herdr.closedTabs(), [run.tabId]);
 			assert.deepStrictEqual(yield* statuses(h), ['error']);
@@ -104,7 +101,7 @@ describe('monitoring', () => {
 			yield* h.tick;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h, epic.id), ['error:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['error:0']);
 			assert.include(h.linear.comments(epic.id)[0].body, 'disappeared (its tab was closed or herdr restarted)');
 			assert.deepStrictEqual(yield* statuses(h), ['error']);
 		}),
@@ -124,7 +121,7 @@ describe('monitoring', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h, epic.id), ['overCap:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['overCap:0']);
 			assert.match(h.linear.comments(epic.id)[0].body, /the run has been going for 60 min, over the 60 min cap\. It keeps running\./);
 			assert.deepStrictEqual(yield* statuses(h), ['running']);
 			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));

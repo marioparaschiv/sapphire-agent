@@ -11,9 +11,7 @@ import { Permanent, Transient } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { Git, gitFailure, parseGithubRepo, type Worktree } from './git.ts';
 import { InvalidResultFile } from './result-file.ts';
-
-const git = (cwd: string, ...args: Array<string>) =>
-	execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
+import { git } from './test-harness.ts';
 
 // An origin with a main branch, a clone of it, and an empty worktrees directory under `dir`, which AppConfig.layerTest
 // uses as its worktrees directory.

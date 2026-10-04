@@ -419,18 +419,4 @@ describe('FakeGitHub', () => {
 			});
 		}).pipe(Effect.provide(FakeGitHub.layer)),
 	);
-
-	it.effect('fails a write without applying it', () =>
-		Effect.gen(function* () {
-			const fake = yield* FakeGitHub;
-			const github = yield* GitHub;
-			const { number } = fake.addPullRequest({ repo, branch: 'mario/hl-11-github' });
-			const failure = new Permanent({ message: 'HTTP 422: Unprocessable Entity' });
-
-			fake.failWrite(1, failure);
-
-			assert.deepStrictEqual(yield* Effect.exit(github.postSummary(repo, number, summary)), Exit.fail(failure));
-			assert.deepStrictEqual(fake.comments(repo, number), []);
-		}).pipe(Effect.provide(FakeGitHub.layer)),
-	);
 });

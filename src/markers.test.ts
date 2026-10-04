@@ -1,8 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Option } from 'effect';
+import { ON_BEHALF_OF_CLAUDE } from './github.ts';
 import { hasMarker, type Marker, parseMarker, renderMarker, withMarker } from './markers.ts';
-
-const ON_BEHALF_OF_CLAUDE = '<!-- linear:extension {"version":1,"plugins":[{"plugin":"onBehalfOf","agent":"claude"}]} -->';
 
 describe('markers', () => {
 	it('renders a hidden comment naming the epic, purpose and key', () => {

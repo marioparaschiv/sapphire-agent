@@ -42,8 +42,6 @@ export type FakeGitHubControls = {
 	readonly comments: (repo: string, number: number) => ReadonlyArray<string>;
 	readonly reviews: (repo: string, number: number) => ReadonlyArray<FakeReview>;
 	readonly thread: (threadId: string) => ReviewThread;
-	// Counted from this call: the nth write after it fails without being applied.
-	readonly failWrite: (nth: number, error: CallError) => void;
 	// Counted from this call: the nth write after it is applied, then fails, as if the process died before recording it.
 	readonly crashAfterWrite: (nth: number, error: CallError) => void;
 	// Writes received so far, failed ones included.
@@ -56,7 +54,7 @@ const latestBodies = (bodies: ReadonlyArray<string>): Bodies => ({ totalCount: b
 const makeFake = () => {
 	const pullRequests: Array<PullRequestRecord> = [];
 	const threads = new Map<string, ThreadRecord>();
-	const failures = new Map<number, { readonly error: CallError; readonly afterApplying: boolean }>();
+	const crashes = new Map<number, CallError>();
 	let writes = 0;
 
 	const findRecord = (repo: string, number: number) => pullRequests.find((record) => record.repo === repo && record.pullRequest.number === number);
@@ -80,19 +78,11 @@ const makeFake = () => {
 	const write = (apply: () => void) =>
 		Effect.suspend(() => {
 			writes += 1;
-			const failure = failures.get(writes);
+			apply();
 
-			if (!failure) {
-				apply();
+			const crash = crashes.get(writes);
 
-				return Effect.void;
-			}
-
-			if (failure.afterApplying) {
-				apply();
-			}
-
-			return Effect.fail(failure.error);
+			return crash ? Effect.fail(crash) : Effect.void;
 		});
 
 	const unlessMarked = (bodies: ReadonlyArray<string>, comment: MarkedComment, where: string, apply: () => void) =>
@@ -220,12 +210,8 @@ const makeFake = () => {
 			return threadView(threadId, found);
 		},
 
-		failWrite: (nth, error) => {
-			failures.set(writes + nth, { error, afterApplying: false });
-		},
-
 		crashAfterWrite: (nth, error) => {
-			failures.set(writes + nth, { error, afterApplying: true });
+			crashes.set(writes + nth, error);
 		},
 		writes: () => writes,
 	};

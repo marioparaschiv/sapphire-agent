@@ -4,13 +4,9 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
-import { parseMarker } from './markers.ts';
 import { type Harness, makeHarness } from './test-harness.ts';
 
 const ownedTabs = (h: Harness) => h.herdr.tabs().filter((tab) => /^[A-Z]+-\d+ /.test(tab.label));
-
-const markers = (h: Harness, issueId: string) =>
-	h.linear.comments(issueId).flatMap((comment) => Option.toArray(Option.map(parseMarker(comment.body), (marker) => `${marker.purpose}:${marker.key}`)));
 
 // The run as dispatch leaves it, ready to compare across harnesses.
 const started = (h: Harness) =>
@@ -184,7 +180,7 @@ describe('dispatch', () => {
 				yield* TestClock.adjust('100 seconds');
 			}
 
-			assert.deepStrictEqual(markers(h, epic.id), []);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((run) => run.status),
 				['claimed'],
@@ -196,7 +192,7 @@ describe('dispatch', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h, epic.id), ['startFailed:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['startFailed:0']);
 			assert.match(h.linear.comments(epic.id)[0].body, /couldn't start an agent for this epic: the agent was not confirmed running within 300 s/);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
 			assert.deepStrictEqual(
@@ -216,7 +212,7 @@ describe('dispatch', () => {
 			h.herdr.setStartBehaviour('no-agent');
 			yield* h.tick;
 
-			assert.deepStrictEqual(markers(h, epic.id), ['startFailed:0']);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['startFailed:0']);
 			assert.match(h.linear.comments(epic.id)[0].body, /Claude did not start in \S+: no agent is running/);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((run) => run.status),
