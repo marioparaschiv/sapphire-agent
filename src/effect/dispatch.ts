@@ -9,7 +9,7 @@ import { GitHub } from './github.ts';
 import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
 import { Journal, type Job, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { hasRole, isInFlight, makeWarnOnce, type Observation, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, isInFlight, makeWarnOnce, type Observation, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { makeFlag } from './run-actions.ts';
@@ -194,15 +194,27 @@ export const startRule = Effect.gen(function* () {
 		}
 	};
 
-	// A follow-up that never started goes back to ended: its worktree is still cleaned up, and once the label is removed
-	// its pending threads start a new one.
-	const failStart = (observation: Observation, run: Run, error: string) =>
+	// A follow-up that never started goes back to ended in To Review: its worktree is still cleaned up, and once the label
+	// is removed its pending threads start a new one.
+	const failStart = (observation: Observation, run: Run, epic: Epic, error: string) =>
 		Effect.gen(function* () {
 			const tail = run.paneId === null ? Option.none<string>() : yield* herdr.readTail(run.paneId);
 
 			yield* Effect.logError(`failed to start: ${error}`);
 			yield* flag(observation, run, comments.startFailed({ identifier: run.identifier, claimedAt: run.claimedAt, error, tail }));
-			yield* journal.putRun({ ...run, status: run.job._tag === 'follow-up' ? 'ended' : 'error' });
+
+			if (run.job._tag === 'orchestrate') {
+				return yield* journal.putRun({ ...run, status: 'error' });
+			}
+
+			const team = observation.teams.get(run.teamId);
+
+			if (team && !Option.contains(roleOf(observation, epic), 'toReview')) {
+				yield* linear.moveIssue(epic.id, team.stateIds.toReview);
+			}
+
+			// The previous run's worktree is still there even when the start failed before it was recorded.
+			yield* journal.putRun({ ...run, status: 'ended', worktreePath: run.worktreePath ?? git.worktreePath(run.repo, run.branch) });
 		});
 
 	const start = (observation: Observation, runs: ReadonlyArray<Run>, claimed: Run, epic: Epic) => {
@@ -258,7 +270,7 @@ export const startRule = Effect.gen(function* () {
 
 			const team = observation.teams.get(run.teamId);
 
-			if (team && Option.contains(roleOf(observation, epic), 'ready')) {
+			if (team && !Option.contains(roleOf(observation, epic), 'implementing')) {
 				yield* linear.moveIssue(epic.id, team.stateIds.implementing);
 			}
 
@@ -271,10 +283,10 @@ export const startRule = Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
 
 			if (now - Math.max(claimed.claimedAt, bootedAt) >= config.startTimeoutSeconds * 1000) {
-				return yield* failStart(observation, claimed, `the agent was not confirmed running within ${config.startTimeoutSeconds} s`);
+				return yield* failStart(observation, claimed, epic, `the agent was not confirmed running within ${config.startTimeoutSeconds} s`);
 			}
 
-			yield* starts.withPermit(steps).pipe(Effect.catchIf(isPermanent, (error) => failStart(observation, run, error.message)));
+			yield* starts.withPermit(steps).pipe(Effect.catchIf(isPermanent, (error) => failStart(observation, run, epic, error.message)));
 		});
 	};
 
@@ -284,7 +296,7 @@ export const startRule = Effect.gen(function* () {
 				runs.flatMap((run): Array<EpicWork> => {
 					const epic = observation.epics.get(run.epicId);
 
-					if (run.status !== 'claimed' || !epic || !observation.teams.has(run.teamId) || !hasRole(observation, epic, ['ready', 'implementing'])) {
+					if (run.status !== 'claimed' || !epic || !observation.teams.has(run.teamId) || !hasRole(observation, epic, activeRoles(run))) {
 						return [];
 					}
 

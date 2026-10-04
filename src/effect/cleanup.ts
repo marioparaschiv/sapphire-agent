@@ -20,7 +20,7 @@ const isTrackedTab = (runs: ReadonlyArray<Run>, tab: WorkspaceTab) => runs.some(
 const isTrackedWorktree = (runs: ReadonlyArray<Run>, worktree: Worktree) =>
 	runs.some((run) => run.worktreePath === worktree.path || (run.repo === worktree.repo && run.branch === worktree.branch));
 
-// Ends what is left of a run once its epic shipped or its PR was merged or closed (or, for a run that never started,
+// Ends what is left of a run once its epic shipped or its PR was merged or closed (or, for a ready epic's run that never started,
 // once it ended): its tab, then its worktree and local branch, then its row. Work that is not on origin keeps the
 // worktree and the epic is told once; it is removed on a later tick once pushed or discarded. Also resolves owned
 // tabs and worktrees that no run tracks.
@@ -43,7 +43,8 @@ export const cleanupRule = Effect.gen(function* () {
 			return Effect.succeed(true);
 		}
 
-		if (run.startedAt === null) {
+		// A follow-up that never started still has the previous run's worktree and PR.
+		if (run.startedAt === null && run.job._tag === 'orchestrate') {
 			return Effect.succeed(run.status === 'ended' || run.status === 'kept');
 		}
 

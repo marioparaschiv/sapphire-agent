@@ -29,8 +29,8 @@ export const resultsRule = Effect.gen(function* () {
 
 	const fail = (run: Run): Effect.Effect<void, JournalError> => (run.status === 'error' ? Effect.void : journal.putRun({ ...run, status: 'error' }));
 
-	// Every part of the result as a marked PR write, each skipped when its marker is already there. Once this returns,
-	// every part is on the PR. Follow-up runs add their thread replies here.
+	// Every part of the result as a marked PR write, each skipped when its marker is already there (a resolved thread is
+	// not resolved again). Once this returns, every part is on the PR.
 	const postResult = (run: Run, result: ResultFile, repo: string, pullRequest: PullRequest): Effect.Effect<void, CallError> =>
 		Effect.gen(function* () {
 			const { identifier, claimedAt } = run;
@@ -39,6 +39,11 @@ export const resultsRule = Effect.gen(function* () {
 
 			if (result.flags.length > 0) {
 				yield* github.postFlagsReview(repo, pullRequest.number, comments.flagsReview({ identifier, claimedAt }), result.flags);
+			}
+
+			for (const { threadId, body } of result.replies) {
+				yield* github.replyToThread(threadId, comments.threadReply({ identifier, claimedAt, threadId, body }));
+				yield* github.resolveThread(threadId);
 			}
 		});
 

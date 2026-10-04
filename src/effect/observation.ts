@@ -35,9 +35,15 @@ export type StartedRun = Run & { readonly worktreePath: string; readonly tabId: 
 
 export const isStarted = (run: Run): run is StartedRun => run.worktreePath !== null && run.tabId !== null && run.paneId !== null;
 
-// A run that was never confirmed running belongs in the ready state (or in implementing, once the start moved it);
-// a started run in implementing or in review. Elsewhere its tab is closed.
-export const activeRoles = (run: Run): ReadonlyArray<StateRole> => (run.startedAt === null ? ['ready', 'implementing'] : ['implementing', 'inReview']);
+// A run that was never confirmed running belongs in the ready state, or in To Review for a follow-up (or in
+// implementing, once the start moved it); a started run in implementing or in review. Elsewhere its tab is closed.
+export const activeRoles = (run: Run): ReadonlyArray<StateRole> => {
+	if (run.startedAt !== null) {
+		return ['implementing', 'inReview'];
+	}
+
+	return run.job._tag === 'follow-up' ? ['toReview', 'implementing'] : ['ready', 'implementing'];
+};
 
 export const roleOf = (observation: Observation, epic: Epic): Option.Option<StateRole> => {
 	const team = observation.teams.get(epic.team.id);
