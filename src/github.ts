@@ -17,7 +17,7 @@ export type PullRequest = z.infer<typeof pullRequestSchema>;
 // Runs `gh` with the arguments and, when given, `input` on stdin; resolves with stdout.
 export type Gh = (args: string[], input?: string) => Promise<string>;
 
-export const runGh: Gh = async (args, input) => {
+const runGh: Gh = async (args, input) => {
 	const pending = execFileAsync('gh', args, { maxBuffer: 16 * 1024 * 1024 });
 	pending.child.stdin?.end(input ?? '');
 

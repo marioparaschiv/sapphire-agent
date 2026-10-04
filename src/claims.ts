@@ -47,8 +47,8 @@ const claimSchema = z.object({
 		.object({
 			file: resultFileSchema,
 			posted: z.array(z.enum(['summary', 'review'])),
-			replied: z.array(z.string()).default([]),
-			resolved: z.array(z.string()).default([]),
+			replied: z.array(z.string()),
+			resolved: z.array(z.string()),
 		})
 		.optional(),
 });

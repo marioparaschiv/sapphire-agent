@@ -124,7 +124,7 @@ export async function removeWorktree(repoPath: string, branch: string, path: str
 // never be committed. The orchestrate skill resolves the same path with `git rev-parse --git-dir`.
 export const resultFilePath = async (path: string) => join(await git(path, ['rev-parse', '--absolute-git-dir']), 'herdr-result.json');
 
-export type ResultFileRead = { ok: true; result: ResultFile } | { ok: false; error: string };
+type ResultFileRead = { ok: true; result: ResultFile } | { ok: false; error: string };
 
 // Undefined while the agent has not written the file.
 export async function readResultFile(path: string): Promise<ResultFileRead | undefined> {
