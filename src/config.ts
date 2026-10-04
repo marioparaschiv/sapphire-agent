@@ -51,9 +51,13 @@ const Settings = Schema.Struct({
 		repoPrefix: Name('repo:'),
 	}).pipe(withDefault({})),
 	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
-	// The GitHub account whose @mention hands review threads to the agent and that says on the PR when a follow-up
-	// starts. `ghConfigDirectory` is a gh config dir logged in as it.
-	bot: Schema.Struct({ login: Schema.NonEmptyString, ghConfigDirectory: Path }),
+	// The GitHub account whose @mention by one of `allowedUsers` starts a command run, and that answers it.
+	// `ghConfigDirectory` is a gh config dir logged in as it.
+	bot: Schema.Struct({
+		login: Schema.NonEmptyString,
+		ghConfigDirectory: Path,
+		allowedUsers: Schema.Array(Schema.NonEmptyString).check(Schema.makeFilter((users) => users.length > 0 || 'no allowed users configured')),
+	}),
 });
 
 export type Settings = typeof Settings.Type;
@@ -178,7 +182,7 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('her
 			...Schema.decodeUnknownSync(Settings)({
 				teams: { Test: { repo: join(directory, 'repo') } },
 				worktreesDirectory: join(directory, 'worktrees'),
-				bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot') },
+				bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), allowedUsers: ['marioparaschiv'] },
 				...settings,
 			}),
 			env: {

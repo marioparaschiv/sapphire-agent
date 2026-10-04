@@ -30,7 +30,7 @@ const load = (env: Record<string, string>, files: { config?: unknown; key?: { te
 
 const fullEnv = { HERDR_BIN_PATH: '/bin/herdr', HERDR_SOCKET_PATH: '/run/herdr.sock', HERDR_PLUGIN_STATE_DIR: '/state' };
 const key = { text: 'lin_api_secret\n', mode: 0o600 };
-const bot = { login: 'orchestratorbot', ghConfigDirectory: '~/.config/gh-orchestratorbot' };
+const bot = { login: 'orchestratorbot', ghConfigDirectory: '~/.config/gh-orchestratorbot', allowedUsers: ['marioparaschiv'] };
 
 describe('loadAppConfig', () => {
 	it.effect('fills defaults, expands ~ and reads the old stuckAfterSeconds key', () =>
@@ -45,7 +45,7 @@ describe('loadAppConfig', () => {
 			assert.strictEqual(config.labels.stuck, 'agent-stuck');
 			assert.strictEqual(config.worktreesDirectory, join(homedir(), '.herdr/worktrees'));
 			assert.deepStrictEqual(config.teams, { Telecord: { repo: join(homedir(), 'telecord') } });
-			assert.deepStrictEqual(config.bot, { login: 'orchestratorbot', ghConfigDirectory: join(homedir(), '.config/gh-orchestratorbot') });
+			assert.deepStrictEqual(config.bot, { login: 'orchestratorbot', ghConfigDirectory: join(homedir(), '.config/gh-orchestratorbot'), allowedUsers: ['marioparaschiv'] });
 			assert.isFalse('stuckAfterSeconds' in config);
 			assert.strictEqual(config.env.claudeConfigPath, join(homedir(), '.claude.json'));
 			assert.strictEqual(config.env.stateDirectory, '/state');
@@ -75,18 +75,23 @@ describe('loadAppConfig', () => {
 		}),
 	);
 
-	it.effect('rejects an empty team map, an unknown team key, a missing or incomplete bot and invalid JSON', () =>
+	it.effect('rejects an empty team map, an unknown team key, a missing or incomplete bot, no allowed users and invalid JSON', () =>
 		Effect.gen(function* () {
 			const noTeams = yield* load(fullEnv, { config: { teams: {}, bot }, key }).pipe(Effect.flip);
 			const unknownKey = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, bot }, key }).pipe(Effect.flip);
 			const noBot = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } } }, key }).pipe(Effect.flip);
-			const noBotLogin = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } }, bot: { login: '', ghConfigDirectory: '~/gh' } }, key }).pipe(Effect.flip);
+			const noBotLogin = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } }, bot: { ...bot, login: '' } }, key }).pipe(Effect.flip);
+			const { allowedUsers: _, ...withoutAllowedUsers } = bot;
+			const noAllowedUsers = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } }, bot: withoutAllowedUsers }, key }).pipe(Effect.flip);
+			const emptyAllowedUsers = yield* load(fullEnv, { config: { teams: { Unbound: { repo: '~/unbound' } }, bot: { ...bot, allowedUsers: [] } }, key }).pipe(Effect.flip);
 			const badJson = yield* load(fullEnv, { config: '{ "teams": ', key }).pipe(Effect.flip);
 
 			assert.match(noTeams.message, /no teams configured/);
 			assert.match(unknownKey.message, /repos/);
 			assert.match(noBot.message, /config\.json bot: Missing key/);
 			assert.match(noBotLogin.message, /config\.json bot\.login: /);
+			assert.match(noAllowedUsers.message, /config\.json bot\.allowedUsers: Missing key/);
+			assert.match(emptyAllowedUsers.message, /config\.json bot\.allowedUsers: no allowed users configured/);
 			assert.match(badJson.message, /config\.json/);
 		}),
 	);
