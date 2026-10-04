@@ -56,3 +56,16 @@ export const makeTabActions = Effect.gen(function* () {
 
 	return { closeRunTab, endRun };
 });
+
+// Esc, then the prompt `continue`, for an agent whose pane stopped changing. The stale handling follows after its grace
+// period whether or not the nudge got through, so a failure is only logged.
+export const makeNudge = Effect.gen(function* () {
+	const herdr = yield* Herdr;
+
+	return (paneId: string): Effect.Effect<void> =>
+		herdr.sendKeys(paneId, ['esc']).pipe(
+			Effect.andThen(herdr.prompt(paneId, 'continue')),
+			Effect.andThen(Effect.log(`nudged ${paneId}`)),
+			Effect.catch((error) => Effect.logWarning(`nudging ${paneId} failed: ${error.message}`)),
+		);
+});

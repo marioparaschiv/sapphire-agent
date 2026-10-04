@@ -9,9 +9,9 @@ import { parseMarker } from './markers.ts';
 import { activeRoles, hasRole, isStarted, type Observation, observedAgentStatus, type StartedRun, tabOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Prompts } from './prompts.ts';
-import { makeFlag, makeTabActions } from './run-actions.ts';
+import { makeFlag, makeNudge, makeTabActions } from './run-actions.ts';
 
-const quietStatuses: ReadonlyArray<AgentStatus> = ['idle', 'done', 'blocked'];
+export const quietStatuses: ReadonlyArray<AgentStatus> = ['idle', 'done', 'blocked'];
 
 // Marks a reply to a question as typed into the pane.
 export const deliveredEmoji = 'white_check_mark';
@@ -24,34 +24,42 @@ export const tailHash = (tail: string) => createHash('sha256').update(withoutTic
 
 const watchedStatuses: ReadonlyArray<Run['status']> = ['running', 'awaitingInput', 'stale'];
 
-// What the agent did since the last tick. `since` restarts on every change, except between quiet statuses (idle to
-// done keeps the awaitingInput timer) and while status and tail stay the same. Any change clears the nudge; a change
-// ends a stale episode and working again ends an awaitingInput one.
-export const track = <R extends Run>(run: R, status: AgentStatus, hash: string, now: number): R => {
-	const previous = run.agentStatus;
+// What runs and commands record of their agent between ticks.
+export type AgentWatch = Pick<Run, 'agentStatus' | 'agentStatusSince' | 'tailHash' | 'nudgedAt'>;
+
+// What the agent did since the last tick, and whether that was progress. `since` restarts on every change, except
+// between quiet statuses (idle to done keeps the quiet timer) and while status and tail stay the same. Any change
+// clears the nudge.
+export const trackAgent = <W extends AgentWatch>(watch: W, status: AgentStatus, hash: string, now: number): { readonly tracked: W; readonly progressed: boolean } => {
+	const previous = watch.agentStatus;
 	const stillQuiet = previous !== null && quietStatuses.includes(previous) && quietStatuses.includes(status);
-	const unchanged = previous === status && run.tailHash === hash;
+	const unchanged = previous === status && watch.tailHash === hash;
 	const progressed = !stillQuiet && !unchanged;
-	const resumed = (run.status === 'awaitingInput' && status === 'working') || (run.status === 'stale' && progressed);
 
 	return {
-		...run,
-		status: resumed ? 'running' : run.status,
-		agentStatus: status,
-		agentStatusSince: progressed || run.agentStatusSince === null ? now : run.agentStatusSince,
-		tailHash: hash,
-		nudgedAt: progressed ? null : run.nudgedAt,
-		questionCommentId: resumed ? null : run.questionCommentId,
+		tracked: {
+			...watch,
+			agentStatus: status,
+			agentStatusSince: progressed || watch.agentStatusSince === null ? now : watch.agentStatusSince,
+			tailHash: hash,
+			nudgedAt: progressed ? null : watch.nudgedAt,
+		},
+		progressed,
 	};
 };
 
-const sameRun = (a: Run, b: Run) =>
-	a.status === b.status &&
-	a.agentStatus === b.agentStatus &&
-	a.agentStatusSince === b.agentStatusSince &&
-	a.tailHash === b.tailHash &&
-	a.nudgedAt === b.nudgedAt &&
-	a.questionCommentId === b.questionCommentId;
+export const isSameWatch = (a: AgentWatch, b: AgentWatch) =>
+	a.agentStatus === b.agentStatus && a.agentStatusSince === b.agentStatusSince && a.tailHash === b.tailHash && a.nudgedAt === b.nudgedAt;
+
+// See trackAgent. Progress also ends a stale episode, and working again ends an awaitingInput one.
+export const track = <R extends Run>(run: R, status: AgentStatus, hash: string, now: number): R => {
+	const { tracked, progressed } = trackAgent(run, status, hash, now);
+	const resumed = (run.status === 'awaitingInput' && status === 'working') || (run.status === 'stale' && progressed);
+
+	return { ...tracked, status: resumed ? 'running' : run.status, questionCommentId: resumed ? null : run.questionCommentId };
+};
+
+const sameRun = (a: Run, b: Run) => a.status === b.status && isSameWatch(a, b) && a.questionCommentId === b.questionCommentId;
 
 // Watches started runs in herdr. Every tick reads herdr afresh, so an event that never arrived changes nothing: the
 // poll always wins. Flags, once each: awaitingInput (quiet too long without a result file), stale (working with an
@@ -66,6 +74,7 @@ export const monitoringRule = Effect.gen(function* () {
 	const prompts = yield* Prompts;
 	const flag = yield* makeFlag;
 	const { closeRunTab } = yield* makeTabActions;
+	const nudge = yield* makeNudge;
 
 	const flaggedRun = (observation: Observation, run: StartedRun, epic: Epic, tail: string, now: number): FlaggedRun => ({
 		identifier: run.identifier,
@@ -123,13 +132,6 @@ export const monitoringRule = Effect.gen(function* () {
 			}
 		});
 
-	const nudge = (run: StartedRun) =>
-		herdr.sendKeys(run.paneId, ['esc']).pipe(
-			Effect.andThen(herdr.prompt(run.paneId, 'continue')),
-			Effect.andThen(Effect.log(`nudged ${run.paneId}`)),
-			// The stale flag follows after the grace period whether or not the nudge got through.
-			Effect.catch((error) => Effect.logWarning(`nudging ${run.paneId} failed: ${error.message}`)),
-		);
 
 	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, replies: ReadonlyArray<Reply>) =>
 		Effect.gen(function* () {
@@ -182,7 +184,7 @@ export const monitoringRule = Effect.gen(function* () {
 						yield* Effect.log(`no new output for ${config.staleAfterSeconds} s; nudging the agent`);
 						run = { ...run, nudgedAt: now };
 						yield* journal.putRun(run);
-						yield* nudge(run);
+						yield* nudge(run.paneId);
 					}
 
 					return;
