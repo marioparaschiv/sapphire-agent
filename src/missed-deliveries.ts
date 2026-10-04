@@ -1,4 +1,4 @@
-import { Cause, Clock, Context, Duration, Effect, Layer, Option, Queue } from 'effect';
+import { Cause, Clock, Context, Duration, Effect, Layer, Option, Schedule } from 'effect';
 import type { CallError } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { type Delivery, GitHubApp } from './github-app.ts';
@@ -37,7 +37,7 @@ export class MissedDeliveries extends Context.Service<
 		readonly scan: Effect.Effect<void, CallError | JournalError>;
 		// Scans at once, then every deliveryScanSeconds, until interrupted. A failed scan is logged and tried again on
 		// the next one.
-		readonly run: Effect.Effect<never>;
+		readonly run: Effect.Effect<void>;
 	}
 >()('herdr-linear/MissedDeliveries') {
 	static readonly layer = Layer.effect(
@@ -85,14 +85,8 @@ export class MissedDeliveries extends Context.Service<
 				Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.logError('cannot scan for failed webhook deliveries; trying again next scan', cause))),
 			);
 
-			// Holds at most one pending scan, so a scan that outlasts the interval is followed by one more, not several.
-			const run = Effect.gen(function* () {
-				const due = yield* Queue.dropping<void>(1);
-
-				yield* Effect.forkScoped(Effect.forever(Effect.sleep(Duration.seconds(deliveryScanSeconds)).pipe(Effect.andThen(Queue.offer(due, undefined)))));
-
-				return yield* Effect.forever(loggedScan.pipe(Effect.andThen(Queue.take(due))));
-			}).pipe(Effect.scoped);
+			// A scan that outlasts the interval is followed by one more at once, not by one per missed interval.
+			const run = Effect.repeat(loggedScan, Schedule.fixed(Duration.seconds(deliveryScanSeconds))).pipe(Effect.asVoid);
 
 			return MissedDeliveries.of({ scan, run });
 		}),
