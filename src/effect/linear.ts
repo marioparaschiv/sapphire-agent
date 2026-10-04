@@ -111,6 +111,8 @@ export type LinearShape = {
 	readonly readyEpics: (stateIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
 	// The given issues wherever they are now; fails Permanent for more than 250 ids.
 	readonly epics: (ids: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
+	// The issues with the given identifiers (e.g. HL-8) wherever they are now; fails Permanent for more than 250.
+	readonly epicsByIdentifier: (identifiers: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
 	// The replies in the threads of the given comments, at most 250.
 	readonly replies: (questionIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Reply>, CallError>;
 	// Every comment on the issue, replies included, oldest first.
@@ -272,6 +274,36 @@ const make = (endpoint: string) =>
 						issues(first: ${MAX_PAGE_SIZE}, filter: { id: { in: $ids } }) { nodes { ${EPIC_FIELDS} } }
 					}`,
 					{ ids },
+				).pipe(
+					Effect.map((result) => result.issues.nodes),
+					withPolicy,
+				);
+			},
+
+			epicsByIdentifier: (identifiers) => {
+				if (identifiers.length === 0) {
+					return Effect.succeed([]);
+				}
+
+				if (identifiers.length > MAX_PAGE_SIZE) {
+					return Effect.fail(new Permanent({ message: `${identifiers.length} identifiers exceed the ${MAX_PAGE_SIZE} issues one read can return` }));
+				}
+
+				// The id filter takes only UUIDs, so an identifier is matched by its team key and number.
+				const filter = {
+					or: identifiers.map((identifier) => {
+						const [key, number] = identifier.split('-');
+
+						return { team: { key: { eq: key } }, number: { eq: Number(number) } };
+					}),
+				};
+
+				return request(
+					Schema.Struct({ issues: nodes(Epic) }),
+					`query EpicsByIdentifier($filter: IssueFilter) {
+						issues(first: ${MAX_PAGE_SIZE}, filter: $filter) { nodes { ${EPIC_FIELDS} } }
+					}`,
+					{ filter },
 				).pipe(
 					Effect.map((result) => result.issues.nodes),
 					withPolicy,

@@ -46,6 +46,10 @@ export const OwnedTab = Schema.Struct({
 
 export type OwnedTab = typeof OwnedTab.Type;
 
+// Any tab in the workspace labelled workspaceLabel, with its root pane. `identifier` is none for a tab whose label does
+// not start with one, e.g. a user's tab or a run's tab the user renamed.
+export type WorkspaceTab = Omit<OwnedTab, 'identifier'> & { readonly identifier: Option.Option<string> };
+
 export const OpenedTab = Schema.Struct({ tabId: Schema.String, paneId: Schema.String });
 
 export type OpenedTab = typeof OpenedTab.Type;
@@ -91,7 +95,7 @@ type Commands = Pick<Herdr['Service'], 'workspaces' | 'createWorkspace' | 'creat
 const findWorkspace = (commands: Commands, workspaceLabel: string) =>
 	commands.workspaces.pipe(Effect.map((workspaces) => Option.fromNullishOr(workspaces.find((workspace) => workspace.label === workspaceLabel))));
 
-export const ownedTabsOf = (commands: Commands, workspaceLabel: string): Effect.Effect<ReadonlyArray<OwnedTab>, CallError> =>
+export const workspaceTabsOf = (commands: Commands, workspaceLabel: string): Effect.Effect<ReadonlyArray<WorkspaceTab>, CallError> =>
 	Effect.gen(function* () {
 		const workspace = yield* findWorkspace(commands, workspaceLabel);
 
@@ -103,17 +107,23 @@ export const ownedTabsOf = (commands: Commands, workspaceLabel: string): Effect.
 		const [tabs, panes] = yield* Effect.all([commands.tabs(workspaceId), commands.panes(workspaceId)], { concurrency: 'unbounded' });
 
 		return tabs.flatMap((tab) => {
-			const identifier = identifierOf(tab.label);
 			// herdr lists a tab's root pane first.
 			const pane = panes.find((candidate) => candidate.tabId === tab.tabId);
 
-			if (Option.isNone(identifier) || !pane) {
+			if (!pane) {
 				return [];
 			}
 
-			return [{ identifier: identifier.value, tabId: tab.tabId, workspaceId, label: tab.label, paneId: pane.paneId, agent: pane.agent, agentStatus: pane.agentStatus }];
+			return [
+				{ identifier: identifierOf(tab.label), tabId: tab.tabId, workspaceId, label: tab.label, paneId: pane.paneId, agent: pane.agent, agentStatus: pane.agentStatus },
+			];
 		});
 	});
+
+export const ownedTabsOf = (commands: Commands, workspaceLabel: string): Effect.Effect<ReadonlyArray<OwnedTab>, CallError> =>
+	workspaceTabsOf(commands, workspaceLabel).pipe(
+		Effect.map((tabs) => tabs.flatMap((tab) => (Option.isSome(tab.identifier) ? [{ ...tab, identifier: tab.identifier.value }] : []))),
+	);
 
 export const openTabWith =
 	(commands: Commands, workspaceLabel: string) =>
@@ -173,6 +183,7 @@ export class Herdr extends Context.Service<
 		// A new tab in the workspace labelled workspaceLabel, creating the workspace when there is none.
 		readonly openTab: (label: string, cwd: string) => Effect.Effect<OpenedTab, CallError>;
 		readonly ownedTabs: Effect.Effect<ReadonlyArray<OwnedTab>, CallError>;
+		readonly workspaceTabs: Effect.Effect<ReadonlyArray<WorkspaceTab>, CallError>;
 		// Status, exit and close events of owned panes and tabs. Never fails: reconnects with backoff. Events are not
 		// durable, so they only make a tick come sooner; the poll stays authoritative.
 		readonly events: Stream.Stream<HerdrEvent>;
@@ -329,6 +340,7 @@ export class Herdr extends Context.Service<
 					).pipe(Effect.map(Option.match({ onNone: (): StartOutcome => 'starting', onSome: (): StartOutcome => 'ready' }))),
 				openTab: openTabWith(commands, workspaceLabel),
 				ownedTabs,
+				workspaceTabs: workspaceTabsOf(commands, workspaceLabel),
 				events: reconnecting(connect),
 			});
 		}),

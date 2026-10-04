@@ -151,6 +151,21 @@ describe('Herdr', () => {
 		}),
 	);
 
+	it.effect('lists every tab of its workspace, with the identifier where the label starts with one', () =>
+		Effect.gen(function* () {
+			const { herdr } = yield* liveHerdr(lists);
+
+			assert.deepStrictEqual(
+				(yield* herdr.workspaceTabs).map(({ identifier, tabId, paneId, agent }) => [identifier, tabId, paneId, agent]),
+				[
+					[Option.none(), 'w1:t1', 'w1:p1', Option.some('claude')],
+					[Option.some('HL-2'), 'w1:t4', 'w1:p4', Option.some('claude')],
+					[Option.some('HL-7'), 'w1:t6', 'w1:p7', Option.none()],
+				],
+			);
+		}),
+	);
+
 	it.effect('owns no tabs while its workspace does not exist', () =>
 		Effect.gen(function* () {
 			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'herdr-linear' });

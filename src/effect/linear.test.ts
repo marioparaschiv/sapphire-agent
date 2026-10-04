@@ -84,6 +84,27 @@ describe('Linear reads', () => {
 		}).pipe(withFixture),
 	);
 
+	it.effect('reads epics by identifier, skipping identifiers no issue has', () =>
+		Effect.gen(function* () {
+			const fixture = yield* LinearFixture;
+			const linear = yield* Linear;
+
+			fixture.addEpic({ identifier: 'TEST-10', title: 'Shipped one', state: 'Shipped' });
+			fixture.addEpic({ identifier: 'TEST-11', title: 'Not asked for' });
+			fixture.addEpic({ identifier: 'TEST-12', title: 'Running', state: 'Implementing' });
+
+			const epics = yield* linear.epicsByIdentifier(['TEST-12', 'TEST-10', 'TEST-99']);
+
+			assert.deepStrictEqual(
+				epics.map((epic) => [epic.identifier, epic.state.name]),
+				[
+					['TEST-10', 'Shipped'],
+					['TEST-12', 'Implementing'],
+				],
+			);
+		}).pipe(withFixture),
+	);
+
 	it.effect('refuses to read more epics than one page holds', () =>
 		Effect.gen(function* () {
 			const linear = yield* Linear;

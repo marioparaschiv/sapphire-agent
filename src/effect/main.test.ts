@@ -36,4 +36,36 @@ describe('main', () => {
 			assert.match(output, /- \S+config\.json maxInflight: Expected no excess property/);
 		}).pipe(Effect.provide(NodeServices.layer)),
 	);
+
+	it.live('refuses to start while the old claims.json holds claims', () =>
+		Effect.gen(function* () {
+			const fs = yield* FileSystem.FileSystem;
+			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+			const directory = yield* fs.makeTempDirectoryScoped();
+
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } } }));
+			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'claims.json'), JSON.stringify({ claims: [{ epicId: 'b1c2d3', identifier: 'UNB-12', status: 'running' }] }));
+
+			const handle = yield* spawner.spawn(
+				ChildProcess.make(process.execPath, [join(import.meta.dirname, 'main.ts')], {
+					extendEnv: false,
+					env: {
+						HERDR_BIN_PATH: join(directory, 'herdr'),
+						HERDR_SOCKET_PATH: join(directory, 'herdr.sock'),
+						HERDR_PLUGIN_CONFIG_DIR: directory,
+						HERDR_PLUGIN_STATE_DIR: directory,
+						HERDR_LINEAR_KEY_FILE: join(directory, 'linear-key'),
+						CLAUDE_CONFIG_PATH: join(directory, 'claude.json'),
+					},
+				}),
+			);
+			const output = yield* handle.all.pipe(Stream.decodeText(), Stream.mkString);
+			const exitCode = yield* handle.exitCode;
+
+			assert.notStrictEqual(exitCode, 0);
+			assert.include(output, `${join(directory, 'claims.json')} still holds 1 claim of the old dispatcher. Drain it first`);
+			assert.notInclude(output, 'watching Unbound');
+		}).pipe(Effect.provide(NodeServices.layer)),
+	);
 });

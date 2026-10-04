@@ -112,6 +112,9 @@ const variableSchemas = {
 	Teams: Schema.Struct({ names: Ids }),
 	ReadyEpics: Schema.Struct({ stateIds: Ids }),
 	Epics: Schema.Struct({ ids: Ids }),
+	EpicsByIdentifier: Schema.Struct({
+		filter: Schema.Struct({ or: Schema.Array(Schema.Struct({ team: Schema.Struct({ key: Schema.Struct({ eq: Schema.String }) }), number: Schema.Struct({ eq: Schema.Number }) })) }),
+	}),
 	Replies: Schema.Struct({ questionIds: Ids }),
 	Comments: Schema.Struct({ issueId: Schema.String, after: Schema.NullOr(Schema.String) }),
 	Reactions: Schema.Struct({ id: Schema.String }),
@@ -253,6 +256,14 @@ const make = Effect.gen(function* () {
 				const { ids } = Schema.decodeUnknownSync(variableSchemas.Epics)(variables);
 
 				return { issues: { nodes: issueList.filter((candidate) => ids.includes(candidate.id)).slice(0, MAX_PAGE_SIZE).map(toEpic) } };
+			}
+
+			case 'EpicsByIdentifier': {
+				const { filter } = Schema.decodeUnknownSync(variableSchemas.EpicsByIdentifier)(variables);
+				const matches = (candidate: FixtureIssue) =>
+					filter.or.some(({ team: { key }, number }) => team(candidate.teamId).key === key.eq && candidate.identifier === `${key.eq}-${number.eq}`);
+
+				return { issues: { nodes: issueList.filter(matches).slice(0, MAX_PAGE_SIZE).map(toEpic) } };
 			}
 
 			case 'Replies': {

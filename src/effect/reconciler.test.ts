@@ -3,10 +3,10 @@ import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Clock, Effect, FileSystem, Layer, Option, Queue } from 'effect';
 import { TestClock } from 'effect/testing';
-import { AppConfig } from './config.ts';
 import { Pause } from './pause.ts';
 import { Planner, type Rule } from './planner.ts';
 import { Reconciler } from './reconciler.ts';
+import { plannerDependencies } from './test-harness.ts';
 
 // A dispatch-like rule (skipped while paused) and a monitoring-like rule, each reporting `<rule>@<seconds>` per tick.
 const setup = Effect.gen(function* () {
@@ -16,16 +16,22 @@ const setup = Effect.gen(function* () {
 	const rule = (name: string, pausable: boolean): Rule => ({
 		name,
 		pausable,
-		plan: Effect.succeed([
-			{ identifier: 'HL-9', apply: Clock.currentTimeMillis.pipe(Effect.flatMap((now) => Queue.offer(ticks, `${name}@${now / 1000}`))) },
-		]),
+		plan: () =>
+			Effect.succeed([
+				{
+					epicId: 'issue-hl-9',
+					identifier: 'HL-9',
+					teamId: 'team-test',
+					apply: Clock.currentTimeMillis.pipe(Effect.flatMap((now) => Queue.offer(ticks, `${name}@${now / 1000}`))),
+				},
+			]),
 	});
 	const reconciler = yield* Reconciler.pipe(
 		Effect.provide(
 			Reconciler.layer.pipe(
 				Layer.provide(Planner.layer(Effect.succeed([rule('dispatch', true), rule('monitoring', false)]))),
 				Layer.provide(Pause.layer),
-				Layer.provideMerge(AppConfig.layerTest(directory, { pollSeconds: 30 })),
+				Layer.provideMerge(plannerDependencies(directory, { pollSeconds: 30 })),
 			),
 		),
 	);

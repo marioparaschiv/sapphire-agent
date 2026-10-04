@@ -16,6 +16,7 @@ import {
 	type StartOutcome,
 	type Tab,
 	type Workspace,
+	workspaceTabsOf,
 } from './herdr.ts';
 
 // One pane per tab, as herdr-linear opens them.
@@ -249,6 +250,7 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 			}),
 		openTab: openTabWith(commands, workspaceLabel),
 		ownedTabs: ownedTabsOf(commands, workspaceLabel),
+		workspaceTabs: workspaceTabsOf(commands, workspaceLabel),
 		events: reconnecting(
 			Stream.unwrap(
 				Effect.gen(function* () {
