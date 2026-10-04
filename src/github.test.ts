@@ -1,10 +1,10 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Context, Effect, Exit, Fiber, Layer, Option, Schema, Sink, Stream } from 'effect';
+import { Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Sink, Stream } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 import { TestClock } from 'effect/testing';
 import { Permanent, Transient } from './call-policy.ts';
 import { AppConfig } from './config.ts';
-import { asClaude, classifyGhFailure, GitHub, mentions, ON_BEHALF_OF_CLAUDE } from './github.ts';
+import { classifyGhFailure, GitHub, mentions } from './github.ts';
 import { GitHubAppFixture } from './github-app-fixture.ts';
 import { FakeGitHub } from './github-fake.ts';
 import { withMarker } from './markers.ts';
@@ -111,10 +111,8 @@ const pullRequestServer = () => {
 			return data({ repository: { issueOrPullRequest: { comments: page(state.comments) } } });
 		}
 
-		if (query.includes('query PullRequestBodies')) {
-			return query.includes('comments(last')
-				? data({ repository: { pullRequest: { comments: page(state.comments) } } })
-				: data({ repository: { pullRequest: { reviews: page(state.reviews.map(({ body }) => body)) } } });
+		if (query.includes('query ReviewBodies')) {
+			return data({ repository: { pullRequest: { reviews: page(state.reviews.map(({ body }) => body)) } } });
 		}
 
 		if (query.includes('query ReviewThread')) {
@@ -178,75 +176,20 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
-	it.effect('posts the summary once, as Claude, however often it is asked', () =>
+	it.effect("posts a comment once on an issue or PR, as the GitHub App with its installation's token", () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
 			const { calls, layer } = liveWithGh(server.respond);
-
-			yield* GitHub.use((github) => Effect.repeat(github.postSummary(repo, 7, summary), { times: 1 })).pipe(Effect.provide(layer));
-
-			assert.deepStrictEqual(server.state.comments, [`${summary.body}\n\n${ON_BEHALF_OF_CLAUDE}`]);
-			assert.deepStrictEqual(
-				calls.map(({ args }) => args.join(' ')),
-				['api graphql --input -', `api --method POST repos/${repo}/issues/7/comments --input -`, 'api graphql --input -'],
-			);
-		}),
-	);
-
-	it.effect('does not post the summary again when the write lands but times out', () =>
-		Effect.gen(function* () {
-			const server = pullRequestServer();
-			const { layer } = liveWithGh((call) => {
-				const reply = server.respond(call);
-
-				return call.args[1] === '--method' && server.state.comments.length === 1 ? 'hang' : reply;
-			});
-			const github = Context.get(yield* Layer.build(layer), GitHub);
-			const fiber = yield* github.postSummary(repo, 7, summary).pipe(Effect.forkChild);
-
-			yield* TestClock.adjust('20 seconds');
-			yield* TestClock.adjust('1200 millis');
-			yield* Fiber.join(fiber);
-
-			assert.deepStrictEqual(server.state.comments, [asClaude(summary.body)]);
-		}),
-	);
-
-	it.effect('posts every flag in one review once, each body as Claude', () =>
-		Effect.gen(function* () {
-			const server = pullRequestServer();
-			const { layer } = liveWithGh(server.respond);
-
-			yield* GitHub.use((github) => Effect.repeat(github.postFlagsReview(repo, 7, flagsReview, flags), { times: 1 })).pipe(Effect.provide(layer));
-
-			assert.deepStrictEqual(server.state.reviews, [
-				{
-					event: 'COMMENT',
-					body: asClaude(flagsReview.body),
-					comments: [
-						{ path: 'src/users.ts', line: 12, side: 'RIGHT', body: asClaude('This loads every user into memory.') },
-						{ path: 'src/import.ts', line: 3, side: 'RIGHT', body: asClaude('No retry on a failed page.') },
-					],
-				},
-			]);
-		}),
-	);
-
-	it.effect("posts as the GitHub App once on an issue or PR, with its installation's token", () =>
-		Effect.gen(function* () {
-			const server = pullRequestServer();
-			const { calls, layer } = liveWithGh(server.respond);
-			const reply = withMarker('Stopped HL-12.', { identifier: 'CMD-3', purpose: 'commandReply', key: '7' });
 			const minted = yield* Effect.gen(function* () {
 				const app = yield* GitHubAppFixture;
 
 				app.install(repo);
-				yield* GitHub.use((github) => Effect.repeat(github.postAsBot(repo, 7, reply), { times: 1 }));
+				yield* GitHub.use((github) => Effect.repeat(github.postComment(repo, 7, summary), { times: 1 }));
 
 				return app.tokens();
 			}).pipe(Effect.provide(layer));
 
-			assert.deepStrictEqual(server.state.comments, [reply.body]);
+			assert.deepStrictEqual(server.state.comments, [summary.body]);
 			assert.deepStrictEqual(
 				minted.map(({ token }) => token),
 				['ghs_1001_1'],
@@ -263,42 +206,116 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
+	it.effect('does not post the comment again when the write lands but times out', () =>
+		Effect.gen(function* () {
+			const server = pullRequestServer();
+			const hung = Deferred.makeUnsafe<void>();
+			const { layer } = liveWithGh((call) => {
+				const reply = server.respond(call);
+
+				if (call.args[1] === '--method' && server.state.comments.length === 1) {
+					Deferred.doneUnsafe(hung, Effect.void);
+
+					return 'hang';
+				}
+
+				return reply;
+			});
+			const context = yield* Layer.build(layer);
+
+			Context.get(context, GitHubAppFixture).install(repo);
+			const fiber = yield* Context.get(context, GitHub).postComment(repo, 7, summary).pipe(Effect.forkChild);
+
+			// Minting the token is real I/O, so the clock only moves once the write is in flight.
+			yield* Deferred.await(hung);
+			yield* TestClock.adjust('20 seconds');
+			yield* TestClock.adjust('1200 millis');
+			yield* Fiber.join(fiber);
+
+			assert.deepStrictEqual(server.state.comments, [summary.body]);
+		}),
+	);
+
+	it.effect('posts every flag in one review once, as the GitHub App', () =>
+		Effect.gen(function* () {
+			const server = pullRequestServer();
+			const { calls, layer } = liveWithGh(server.respond);
+
+			yield* Effect.gen(function* () {
+				(yield* GitHubAppFixture).install(repo);
+				yield* GitHub.use((github) => Effect.repeat(github.postFlagsReview(repo, 7, flagsReview, flags), { times: 1 }));
+			}).pipe(Effect.provide(layer));
+
+			assert.deepStrictEqual(server.state.reviews, [
+				{
+					event: 'COMMENT',
+					body: flagsReview.body,
+					comments: [
+						{ path: 'src/users.ts', line: 12, side: 'RIGHT', body: 'This loads every user into memory.' },
+						{ path: 'src/import.ts', line: 3, side: 'RIGHT', body: 'No retry on a failed page.' },
+					],
+				},
+			]);
+			assert.deepStrictEqual(
+				calls.map(({ args, env }) => [args.join(' '), env]),
+				[
+					['api graphql --input -', undefined],
+					[`api --method POST repos/${repo}/pulls/7/reviews --input -`, { GH_TOKEN: 'ghs_1001_1' }],
+					['api graphql --input -', undefined],
+				],
+			);
+		}),
+	);
+
 	it.effect('fails Permanent without posting when the GitHub App is not installed on the repo', () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
 			const { calls, layer } = liveWithGh(server.respond);
-			const reply = withMarker('Stopped HL-12.', { identifier: 'CMD-3', purpose: 'commandReply', key: '7' });
-			const exit = yield* GitHub.use((github) => github.postAsBot(repo, 7, reply)).pipe(Effect.provide(layer), Effect.exit);
+			const exit = yield* GitHub.use((github) => github.postComment(repo, 7, summary)).pipe(Effect.provide(layer), Effect.exit);
 
 			assert.deepStrictEqual(exit, Exit.fail(new Permanent({ message: `GitHub answered HTTP 404 to GET /repos/${repo}/installation: Not Found` })));
 			assert.lengthOf(calls, 0);
 		}),
 	);
 
-	it.effect('replies to a thread once and resolves it once', () =>
+	it.effect('replies to a thread once and resolves it once, as the GitHub App', () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
 			const { calls, layer } = liveWithGh(server.respond);
 
-			yield* GitHub.use((github) =>
-				Effect.repeat(Effect.andThen(github.replyToThread('PRRT_kwDOA1', reply), github.resolveThread('PRRT_kwDOA1')), { times: 1 }),
-			).pipe(Effect.provide(layer));
+			yield* Effect.gen(function* () {
+				(yield* GitHubAppFixture).install(repo);
+				yield* GitHub.use((github) =>
+					Effect.repeat(Effect.andThen(github.replyToThread(repo, 'PRRT_kwDOA1', reply), github.resolveThread(repo, 'PRRT_kwDOA1')), { times: 1 }),
+				);
+			}).pipe(Effect.provide(layer));
 
-			assert.deepStrictEqual(server.state.thread, { isResolved: true, comments: ['Rename this to fetchUsers @orchestratorbot', asClaude(reply.body)] });
+			assert.deepStrictEqual(server.state.thread, { isResolved: true, comments: ['Rename this to fetchUsers @orchestratorbot', reply.body] });
 			assert.deepStrictEqual(
-				calls.map((call) => /^(query|mutation) \w+/.exec(graphqlRequest(call).query)?.[0]),
-				['query ReviewThread', 'mutation ReplyToThread', 'query ReviewThread', 'mutation ResolveThread', 'query ReviewThread', 'query ReviewThread'],
+				calls.map((call) => [/^(query|mutation) \w+/.exec(graphqlRequest(call).query)?.[0], call.env]),
+				[
+					['query ReviewThread', undefined],
+					['mutation ReplyToThread', { GH_TOKEN: 'ghs_1001_1' }],
+					['query ReviewThread', undefined],
+					['mutation ResolveThread', { GH_TOKEN: 'ghs_1001_1' }],
+					['query ReviewThread', undefined],
+					['query ReviewThread', undefined],
+				],
 			);
-			assert.deepStrictEqual(graphqlRequest(calls[1]).variables, { threadId: 'PRRT_kwDOA1', body: asClaude(reply.body) });
+			assert.deepStrictEqual(graphqlRequest(calls[1]).variables, { threadId: 'PRRT_kwDOA1', body: reply.body });
 		}),
 	);
 
 	it.effect('refuses to look for a marker past the 100 newest comments', () =>
 		Effect.gen(function* () {
 			const { calls, layer } = liveWithGh(() =>
-				data({ repository: { pullRequest: { comments: { totalCount: 140, nodes: Array.from({ length: 100 }, (_, n) => ({ body: `LGTM ${n}` })) } } } }),
+				data({ repository: { issueOrPullRequest: { comments: { totalCount: 140, nodes: Array.from({ length: 100 }, (_, n) => ({ body: `LGTM ${n}` })) } } } }),
 			);
-			const exit = yield* GitHub.use((github) => github.postSummary(repo, 7, summary)).pipe(Effect.provide(layer), Effect.exit);
+			const exit = yield* Effect.gen(function* () {
+				(yield* GitHubAppFixture).install(repo);
+
+				return yield* GitHub.use((github) => github.postComment(repo, 7, summary));
+			}).pipe(Effect.provide(layer), Effect.exit);
 
 			assert.deepStrictEqual(exit, Exit.fail(new Permanent({ message: `${repo}#7 comments has 140 entries, over the 100 one query reads` })));
 			assert.lengthOf(calls, 1);
@@ -414,21 +431,21 @@ describe('FakeGitHub', () => {
 			const threadId = fake.addThread(repo, number, { comments: [{ body: '@orchestratorbot rename this' }] });
 			const crash = new Transient({ message: 'killed' });
 			const post = Effect.all([
-				github.postSummary(repo, number, summary),
+				github.postComment(repo, number, summary),
 				github.postFlagsReview(repo, number, flagsReview, flags),
-				github.replyToThread(threadId, reply),
-				github.resolveThread(threadId),
+				github.replyToThread(repo, threadId, reply),
+				github.resolveThread(repo, threadId),
 			]);
 
 			fake.crashAfterWrite(2, crash);
 			assert.deepStrictEqual(yield* Effect.exit(post), Exit.fail(crash));
 			yield* post;
 
-			assert.deepStrictEqual(fake.comments(repo, number), [asClaude(summary.body)]);
+			assert.deepStrictEqual(fake.botComments(repo, number), [summary.body]);
 			assert.lengthOf(fake.reviews(repo, number), 1);
 			assert.deepStrictEqual(
 				[fake.thread(threadId).isResolved, fake.thread(threadId).comments.map(({ body }) => body)],
-				[true, ['@orchestratorbot rename this', asClaude(reply.body)]],
+				[true, ['@orchestratorbot rename this', reply.body]],
 			);
 		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(GitHubAppFixture.layer), Layer.provide(config)))),
 	);

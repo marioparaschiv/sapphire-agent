@@ -87,7 +87,7 @@ On the Linear epic:
 | `transientFailure` | `<streakStartedAt>` | Once per streak of transient failures. |
 | `workingOrphan` | `<tabId>` | Once per untracked tab whose agent is working. |
 
-On the GitHub PR:
+On the GitHub PR, as the GitHub App:
 
 | Purpose | Key | Posted |
 | --- | --- | --- |

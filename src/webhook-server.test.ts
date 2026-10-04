@@ -3,7 +3,6 @@ import { assert, describe, it } from '@effect/vitest';
 import { Clock, Effect, FileSystem, Layer, Queue, Redacted } from 'effect';
 import { TestClock } from 'effect/testing';
 import { AppConfig } from './config.ts';
-import { asClaude } from './github.ts';
 import { GitHubAppFixture, postDelivery, signDelivery } from './github-app-fixture.ts';
 import type { Command } from './journal.ts';
 import { Pause } from './pause.ts';
@@ -55,7 +54,7 @@ describe('WebhookServer', () => {
 		}),
 	);
 
-	it.effect("records a mention by anyone else as ignored, and skips the App's and the agent's own comments and those that do not mention the bot", () =>
+	it.effect("records a mention by anyone else as ignored, and skips the App's own comments and those that do not mention the bot", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { number } = reviewedPullRequest(h);
@@ -64,7 +63,6 @@ describe('WebhookServer', () => {
 				[
 					comment('@orchestratorbot merge this', 'stranger'),
 					comment('Mention @orchestratorbot again to retry.', 'orchestratorbot[bot]'),
-					comment(asClaude('Ready for review. Mention @orchestratorbot to ask for changes.')),
 					comment('Thanks, orchestratorbot.'),
 					deliveries.review(h.githubRepo, number, { id: 'PRR_kwDO9', body: null, author: 'marioparaschiv' }),
 				],
@@ -73,7 +71,7 @@ describe('WebhookServer', () => {
 
 			yield* h.tick;
 
-			assert.deepStrictEqual(statuses, [204, 204, 204, 204, 204]);
+			assert.deepStrictEqual(statuses, [204, 204, 204, 204]);
 			assert.deepStrictEqual(described(yield* h.commands), [['stranger', '@orchestratorbot merge this', 'ignored']]);
 			assert.deepStrictEqual(h.herdr.starts(), []);
 		}),

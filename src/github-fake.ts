@@ -1,7 +1,7 @@
 import { Context, Effect, Layer } from 'effect';
 import { type CallError, Permanent } from './call-policy.ts';
 import { GitHubApp } from './github-app.ts';
-import { asClaude, type Bodies, containsMarker, GitHub, maxNodes, preferredPullRequest, type PullRequest, type PullRequestState } from './github.ts';
+import { type Bodies, containsMarker, GitHub, maxNodes, preferredPullRequest, type PullRequest, type PullRequestState } from './github.ts';
 import type { MarkedComment } from './markers.ts';
 
 export type FakeReview = {
@@ -36,7 +36,7 @@ export type FakeGitHubControls = {
 		number: number,
 		options: { readonly comments: ReadonlyArray<{ readonly body: string; readonly author?: string }>; readonly isResolved?: boolean },
 	) => string;
-	// Issue comment bodies as GitHub stores them, onBehalfOf block included.
+	// Conversation comment bodies on the PR, by anyone.
 	readonly comments: (repo: string, number: number) => ReadonlyArray<string>;
 	// The comments the GitHub App posted on the PR.
 	readonly botComments: (repo: string, number: number) => ReadonlyArray<string>;
@@ -57,7 +57,7 @@ const commentKinds = {
 	discussion_r: { nodePrefix: 'PRRC', anchor: 'discussion_r' },
 };
 
-// The user and the agent share the PR author's account; the GitHub App has its own.
+// The user is the PR's author; the GitHub App writes as its own login.
 const makeFake = (appLogin: string) => {
 	const pullRequests: Array<PullRequestRecord> = [];
 	const threads = new Map<string, ThreadRecord>();
@@ -85,11 +85,12 @@ const makeFake = (appLogin: string) => {
 			return found ? Effect.succeed(found) : Effect.fail(new Permanent({ message: `GraphQL: Could not resolve to an issue or pull request with the number of ${number}. (repository.issueOrPullRequest)` }));
 		});
 
-	const threadRecord = (threadId: string) =>
+	const threadRecord = (repo: string, threadId: string) =>
 		Effect.suspend(() => {
-			const found = threads.get(threadId);
+			const pullRequest = pullRequests.find((candidate) => candidate.repo === repo && candidate.threadIds.includes(threadId));
+			const thread = threads.get(threadId);
 
-			return found ? Effect.succeed(found) : Effect.fail(new Permanent({ message: `no review thread ${threadId}` }));
+			return pullRequest && thread ? Effect.succeed({ pullRequest, thread }) : Effect.fail(new Permanent({ message: `no review thread ${threadId} on ${repo}` }));
 		});
 
 	const comment = (repo: string, number: number, kind: keyof typeof commentKinds, body: string, author: string): FakeComment => {
@@ -124,18 +125,6 @@ const makeFake = (appLogin: string) => {
 				),
 			),
 
-		postSummary: (repo, number, marked) =>
-			record(repo, number).pipe(
-				Effect.flatMap((found) =>
-					unlessMarked(
-						found.comments.map(({ body }) => body),
-						marked,
-						`${repo}#${number} comments`,
-						() => found.comments.push(comment(repo, number, 'issuecomment', asClaude(marked.body), found.pullRequest.author.login)),
-					),
-				),
-			),
-
 		postFlagsReview: (repo, number, marked, flags) =>
 			record(repo, number).pipe(
 				Effect.flatMap((found) =>
@@ -145,34 +134,28 @@ const makeFake = (appLogin: string) => {
 						`${repo}#${number} reviews`,
 						() =>
 							found.flagReviews.push({
-								body: asClaude(marked.body),
-								comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body: asClaude(body) })),
+								body: marked.body,
+								comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body })),
 							}),
 					),
 				),
 			),
 
-		replyToThread: (threadId, marked) =>
-			threadRecord(threadId).pipe(
-				Effect.flatMap((thread) =>
+		replyToThread: (repo, threadId, marked) =>
+			threadRecord(repo, threadId).pipe(
+				Effect.flatMap(({ pullRequest, thread }) =>
 					unlessMarked(
 						thread.comments.map(({ body }) => body),
 						marked,
 						`review thread ${threadId}`,
-						() => {
-							const pullRequest = pullRequests.find((candidate) => candidate.threadIds.includes(threadId));
-
-							if (pullRequest) {
-								thread.comments.push(comment(pullRequest.repo, pullRequest.pullRequest.number, 'discussion_r', asClaude(marked.body), pullRequest.pullRequest.author.login));
-							}
-						},
+						() => thread.comments.push(comment(repo, pullRequest.pullRequest.number, 'discussion_r', marked.body, appLogin)),
 					),
 				),
 			),
 
-		resolveThread: (threadId) =>
-			threadRecord(threadId).pipe(
-				Effect.flatMap((thread) =>
+		resolveThread: (repo, threadId) =>
+			threadRecord(repo, threadId).pipe(
+				Effect.flatMap(({ thread }) =>
 					thread.isResolved
 						? Effect.void
 						: write(() => {
@@ -181,7 +164,7 @@ const makeFake = (appLogin: string) => {
 				),
 			),
 
-		postAsBot: (repo, number, marked) =>
+		postComment: (repo, number, marked) =>
 			record(repo, number).pipe(
 				Effect.flatMap((found) =>
 					unlessMarked(

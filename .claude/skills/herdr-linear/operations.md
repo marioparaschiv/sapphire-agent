@@ -12,7 +12,7 @@ How the live service is installed, started, paused, drained, deployed, inspected
 - herdr also starts its server on demand when a client attaches. `ExecCondition` runs `herdr status server` and skips the start if it prints `status: running`, so systemd never starts a second server. `inactive` for this unit is normal when herdr was started another way.
 - `ExecStart` pins `~/.nvm/versions/node/v24.21.0/bin/node`. Update both units after a Node upgrade.
 - Apply config or code changes with `systemctl --user restart herdr-linear` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
-- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user. The bot's comments are posted by the GitHub App (below), with no `gh` login.
+- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user, for reads. Every comment is posted by the GitHub App (below), with no `gh` login.
 - The service listens for the App's webhook deliveries on `127.0.0.1:<bot.app.webhookPort>` (default 3790) while it runs (Webhook below).
 - A command agent runs `node` through `scripts/ctl.sh` in its tab's shell, so `node` (24) must be on the user's shell `PATH`.
 
@@ -28,13 +28,13 @@ Editing a file in `systemd/` does nothing until you rerun the install (or copy i
 
 ## GitHub App
 
-Mentions of the bot reach the service as the GitHub App's webhook deliveries, and the bot's comments (command replies, `ctl.sh reply`, failure notices) are posted by the App and show as `<slug>[bot]`. It is created and installed by hand:
+Mentions of the bot reach the service as the GitHub App's webhook deliveries, and every comment the service writes (summaries, flags reviews, thread replies and resolves, command replies, `ctl.sh reply`, failure notices) is posted by the App and shows as `<slug>[bot]`. It is created and installed by hand:
 
 1. Create it under GitHub Settings, Developer settings, GitHub Apps. Permissions: Issues read and write, Pull requests read and write, Contents read, Metadata read. Events: Issue comment, Pull request review, Pull request review comment. Webhook URL `https://herdr.marioparaschiv.com/github`, with a webhook secret.
 2. Save the webhook secret as `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` and generate a private key in its settings and save it as `$HERDR_PLUGIN_CONFIG_DIR/app.pem`, both with `chmod 600`. Put the App ID and both paths in `bot.app` (`config.md`).
 3. Install it (its public page, Install) on every repo the bot should answer on. Only installed repos send deliveries, and a reply on a repo without the installation fails with `GitHub answered HTTP 404 to GET /repos/<owner>/<name>/installation: Not Found`.
 
-For each comment the service signs a JWT with the key (RS256, `iat` 60 s back, `exp` 10 min after that), looks up the repo's installation, and mints an installation token, which it reuses until 5 min before it expires (tokens last an hour); `gh` gets it as `GH_TOKEN`. Tokens live in memory only, so a restart mints new ones. Everything else on GitHub stays on the user's `gh` login.
+For each comment the service signs a JWT with the key (RS256, `iat` 60 s back, `exp` 10 min after that), looks up the repo's installation, and mints an installation token, which it reuses until 5 min before it expires (tokens last an hour); `gh` gets it as `GH_TOKEN`. Tokens live in memory only, so a restart mints new ones. Reads stay on the user's `gh` login.
 
 ## Webhook
 
@@ -119,7 +119,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 | `team X has no workflow state "..."; skipping it until it does` | Add the named states to that team in Linear (or change `states` in config). Picked up on the next tick, but the log line is printed only once per process and nothing is logged when it recovers. |
 | `team X not found in Linear` | The config key must equal the team's exact name. |
 | Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` run or one whose agent is still working? Team skipped? |
-| A mention of the bot does nothing | `ctl.sh status`: is the command `queued` behind another? Is its author in `bot.allowedUsers` (an `ignored` command shows only in the journal)? Is `@<bot.login>` a whole word, and the comment not posted through the agent (onBehalfOf block)? Is the App installed on the repo? Its Recent Deliveries show each delivery's response: 401 means the webhook secret differs from `bot.app.webhookSecretFile`, 502 that nginx could not reach the service, 500 a journal error (`cannot handle the delivery` in the log). The service redelivers failed deliveries itself within `deliveryScanSeconds` once fixed, for up to 3 days. |
+| A mention of the bot does nothing | `ctl.sh status`: is the command `queued` behind another? Is its author in `bot.allowedUsers` (an `ignored` command shows only in the journal)? Is `@<bot.login>` a whole word? Is the App installed on the repo? Its Recent Deliveries show each delivery's response: 401 means the webhook secret differs from `bot.app.webhookSecretFile`, 502 that nginx could not reach the service, 500 a journal error (`cannot handle the delivery` in the log). The service redelivers failed deliveries itself within `deliveryScanSeconds` once fixed, for up to 3 days. |
 | A follow-up was asked for but does not start | `ctl.sh status` shows the request waiting: paused? `maxInFlight` used up? Epic has `agent-stuck`, or is not in To Review? Its run must be `ended`; it waits while one is in flight. A request whose epic has no run is dropped. |
 | A command failed | The App replied on the issue or PR with the reason and the pane tail. Mention the bot again. |
 | A command's reply never shows up | Look for `cannot reply on` or `GitHub answered HTTP` in the log. A 404 for `/installation` means the App is not installed on that repo (GitHub App above). |

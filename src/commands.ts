@@ -100,7 +100,7 @@ export const commandsRule = Effect.gen(function* () {
 
 			yield* Effect.logError(`${reason}; failing it`);
 			yield* github
-				.postAsBot(command.repo, command.number, comments.commandFailed({ identifier, claimedAt: command.claimedAt ?? command.recordedAt, reason, tail }))
+				.postComment(command.repo, command.number, comments.commandFailed({ identifier, claimedAt: command.claimedAt ?? command.recordedAt, reason, tail }))
 				.pipe(Effect.catchTag('Permanent', (error) => Effect.logError(`cannot tell ${command.url} that ${identifier} failed`, error)));
 			yield* closeTab(command);
 			yield* journal.putCommand({ ...command, status: 'error' });
@@ -248,7 +248,7 @@ export const commandsRule = Effect.gen(function* () {
 		});
 
 	const postReply = (command: Command, requestId: number, body: string) =>
-		github.postAsBot(command.repo, command.number, comments.commandReply({ identifier: commandIdentifier(command), requestId, body })).pipe(
+		github.postComment(command.repo, command.number, comments.commandReply({ identifier: commandIdentifier(command), requestId, body })).pipe(
 			Effect.andThen(Effect.log(`replied on ${command.url}`)),
 			Effect.catchTag('Permanent', (error) => Effect.logError(`cannot reply on ${command.url}; dropped request ${requestId}`, error)),
 			Effect.andThen(journal.deleteRequest(requestId)),

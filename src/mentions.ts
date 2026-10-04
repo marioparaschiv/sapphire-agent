@@ -1,6 +1,6 @@
 import { Clock, Effect } from 'effect';
 import { AppConfig } from './config.ts';
-import { isClaude, mentions } from './github.ts';
+import { mentions } from './github.ts';
 import { GitHubApp } from './github-app.ts';
 import { Journal, type NewCommand } from './journal.ts';
 
@@ -16,9 +16,8 @@ export const makeRecordMention = Effect.gen(function* () {
 	const journal = yield* Journal;
 	const app = yield* GitHubApp;
 
-	// The App's replies may mention the bot too. The agent shares the user's account, so its own comments carry the
-	// onBehalfOf block instead.
-	const isRequest = ({ body, author }: Comment) => mentions(bot.login, body) && !isClaude(body) && !sameLogin(author, app.login);
+	// The App's own comments may mention the bot too.
+	const isRequest = ({ body, author }: Comment) => mentions(bot.login, body) && !sameLogin(author, app.login);
 
 	return (comment: Comment) =>
 		Effect.gen(function* () {

@@ -35,15 +35,15 @@ export const resultsRule = Effect.gen(function* () {
 		Effect.gen(function* () {
 			const { identifier, claimedAt } = run;
 
-			yield* github.postSummary(repo, pullRequest.number, comments.summary({ identifier, claimedAt, summary: result.summary, authorLogin: pullRequest.author.login }));
+			yield* github.postComment(repo, pullRequest.number, comments.summary({ identifier, claimedAt, summary: result.summary, authorLogin: pullRequest.author.login }));
 
 			if (result.flags.length > 0) {
 				yield* github.postFlagsReview(repo, pullRequest.number, comments.flagsReview({ identifier, claimedAt }), result.flags);
 			}
 
 			for (const { threadId, body } of result.replies) {
-				yield* github.replyToThread(threadId, comments.threadReply({ identifier, claimedAt, threadId, body }));
-				yield* github.resolveThread(threadId);
+				yield* github.replyToThread(repo, threadId, comments.threadReply({ identifier, claimedAt, threadId, body }));
+				yield* github.resolveThread(repo, threadId);
 			}
 		});
 

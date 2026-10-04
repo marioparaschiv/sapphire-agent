@@ -114,7 +114,7 @@ Not a rule: mentions come in as GitHub App webhook deliveries, which the webhook
 3. A comment that mentions the bot is recorded as a command keyed by its GitHub node id: `queued` when its author is in `bot.allowedUsers` (any case), `ignored` otherwise. A queued one wakes the reconciler, so the commands rule starts it at once.
 4. Answer 204 only once the journal write succeeded. A failed write gets 500, so the delivery shows as failed in the App's delivery log.
 
-A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` counts, `@orchestratorbotx` and `a@orchestratorbot` do not. Comments by the GitHub App (author `<slug>[bot]`, the slug read from `GET /app` at startup), whose replies may mention the bot, and comments carrying the onBehalfOf block (the agent's own, on the user's account), are never commands.
+A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` counts, `@orchestratorbotx` and `a@orchestratorbot` do not. Comments by the GitHub App (author `<slug>[bot]`, the slug read from `GET /app` at startup), whose comments may mention the bot, are never commands.
 
 Why a mention runs once: the command row's `comment_id` is unique and recording a comment again does nothing, so a delivery that arrives twice, or is redelivered after it failed, never starts a second run.
 

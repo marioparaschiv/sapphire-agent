@@ -25,14 +25,6 @@ export type Bodies = typeof Bodies.Type;
 
 export type Flags = ResultFile['flags'];
 
-// Linear shows a GitHub comment carrying this block as written by Claude. The agent and the user share one GitHub
-// account, so it is the only way to tell the agent's comments from the user's.
-export const ON_BEHALF_OF_CLAUDE = '<!-- linear:extension {"version":1,"plugins":[{"plugin":"onBehalfOf","agent":"claude"}]} -->';
-
-export const asClaude = (body: string) => `${body}\n\n${ON_BEHALF_OF_CLAUDE}`;
-
-export const isClaude = (body: string) => body.includes(ON_BEHALF_OF_CLAUDE);
-
 // `@<login>` as a whole word, so neither `@<login>x` nor an email address like `a@<login>` counts. GitHub logins are
 // case-insensitive.
 export const mentions = (login: string, body: string) => new RegExp(`(?<![\\w@-])@${RegExp.escape(login)}(?![\\w-])`, 'i').test(body);
@@ -71,13 +63,12 @@ export class GitHub extends Context.Service<
 	{
 		// See preferredPullRequest.
 		readonly findPullRequest: (repo: string, branch: string) => Effect.Effect<Option.Option<PullRequest>, CallError>;
-		readonly postSummary: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 		// One COMMENT review holding every flag as an inline comment on the PR's new code.
 		readonly postFlagsReview: (repo: string, number: number, comment: MarkedComment, flags: Flags) => Effect.Effect<void, CallError>;
-		readonly replyToThread: (threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
-		readonly resolveThread: (threadId: string) => Effect.Effect<void, CallError>;
-		// A comment on the issue or PR as the GitHub App.
-		readonly postAsBot: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		readonly replyToThread: (repo: string, threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		readonly resolveThread: (repo: string, threadId: string) => Effect.Effect<void, CallError>;
+		// A conversation comment on the issue or PR.
+		readonly postComment: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 	}
 >()('herdr-linear/GitHub') {
 	static readonly layer = Layer.effect(
@@ -88,7 +79,7 @@ export class GitHub extends Context.Service<
 			const encoder = new TextEncoder();
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
-			// The user's account is gh's default login. `token` switches it to a GitHub App installation token.
+			// The user's account is gh's default login, for reads. `token` switches it to a GitHub App installation token.
 			const run = (args: ReadonlyArray<string>, input: string, token?: Redacted.Redacted<string>) => {
 				const command = `gh ${args.join(' ')}`;
 				const options = token ? { env: { GH_TOKEN: Redacted.value(token) }, extendEnv: true } : {};
@@ -114,8 +105,8 @@ export class GitHub extends Context.Service<
 				);
 
 			// gh exits non-zero when the response carries GraphQL errors.
-			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>) =>
-				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables })).pipe(Effect.map(({ data }) => data));
+			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>, token?: Redacted.Redacted<string>) =>
+				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables }), token).pipe(Effect.map(({ data }) => data));
 
 			const post = (endpoint: string, body: Record<string, unknown>, token?: Redacted.Redacted<string>) =>
 				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), token).pipe(Effect.asVoid);
@@ -126,16 +117,16 @@ export class GitHub extends Context.Service<
 				return { owner, name };
 			};
 
-			const pullRequestBodies = (repo: string, number: number, connection: 'comments' | 'reviews') =>
+			const reviewBodies = (repo: string, number: number) =>
 				graphql(
-					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ [connection]: Bodies }) }) }),
-					`query PullRequestBodies($owner: String!, $name: String!, $number: Int!) {
+					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ reviews: Bodies }) }) }),
+					`query ReviewBodies($owner: String!, $name: String!, $number: Int!) {
 						repository(owner: $owner, name: $name) {
-							pullRequest(number: $number) { ${connection}(last: ${maxNodes}) { totalCount nodes { body } } }
+							pullRequest(number: $number) { reviews(last: ${maxNodes}) { totalCount nodes { body } } }
 						}
 					}`,
 					{ ...ownerAndName(repo), number },
-				).pipe(Effect.map(({ repository }) => repository.pullRequest[connection]));
+				).pipe(Effect.map(({ repository }) => repository.pullRequest.reviews));
 
 			const reviewThread = (threadId: string) =>
 				graphql(
@@ -181,6 +172,9 @@ export class GitHub extends Context.Service<
 					withPolicy,
 				);
 
+			// Every write is the GitHub App's, through the installation token of the repo it lands on.
+			const asApp = (repo: string, write: (token: Redacted.Redacted<string>) => Effect.Effect<void, CallError>) => Effect.flatMap(app.installationToken(repo), write);
+
 			return GitHub.of({
 				findPullRequest: (repo, branch) =>
 					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']).pipe(
@@ -188,58 +182,58 @@ export class GitHub extends Context.Service<
 						withPolicy,
 					),
 
-				postSummary: (repo, number, { marker, body }) =>
-					unlessMarked(
-						pullRequestBodies(repo, number, 'comments'),
-						marker,
-						`${repo}#${number} comments`,
-						post(`repos/${repo}/issues/${number}/comments`, { body: asClaude(body) }),
-					),
-
 				postFlagsReview: (repo, number, { marker, body }, flags) =>
-					unlessMarked(
-						pullRequestBodies(repo, number, 'reviews'),
-						marker,
-						`${repo}#${number} reviews`,
-						post(`repos/${repo}/pulls/${number}/reviews`, {
-							event: 'COMMENT',
-							body: asClaude(body),
-							comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body: asClaude(body) })),
-						}),
-					),
-
-				replyToThread: (threadId, { marker, body }) =>
-					unlessMarked(
-						Effect.map(reviewThread(threadId), ({ comments }) => comments),
-						marker,
-						`review thread ${threadId}`,
-						graphql(
-							Schema.Struct({ addPullRequestReviewThreadReply: Schema.Struct({ comment: Schema.Struct({ id: Schema.String }) }) }),
-							`mutation ReplyToThread($threadId: ID!, $body: String!) {
-								addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
-							}`,
-							{ threadId, body: asClaude(body) },
-						).pipe(Effect.asVoid),
-					),
-
-				resolveThread: (threadId) =>
-					reviewThread(threadId).pipe(
-						Effect.flatMap(({ isResolved }) =>
-							isResolved
-								? Effect.void
-								: graphql(
-										Schema.Struct({ resolveReviewThread: Schema.Struct({ thread: Schema.Struct({ isResolved: Schema.Literal(true) }) }) }),
-										`mutation ResolveThread($threadId: ID!) {
-											resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
-										}`,
-										{ threadId },
-									).pipe(Effect.asVoid),
+					asApp(repo, (token) =>
+						unlessMarked(
+							reviewBodies(repo, number),
+							marker,
+							`${repo}#${number} reviews`,
+							post(
+								`repos/${repo}/pulls/${number}/reviews`,
+								{ event: 'COMMENT', body, comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body })) },
+								token,
+							),
 						),
-						withPolicy,
 					),
 
-				postAsBot: (repo, number, { marker, body }) =>
-					Effect.flatMap(app.installationToken(repo), (token) =>
+				replyToThread: (repo, threadId, { marker, body }) =>
+					asApp(repo, (token) =>
+						unlessMarked(
+							Effect.map(reviewThread(threadId), ({ comments }) => comments),
+							marker,
+							`review thread ${threadId}`,
+							graphql(
+								Schema.Struct({ addPullRequestReviewThreadReply: Schema.Struct({ comment: Schema.Struct({ id: Schema.String }) }) }),
+								`mutation ReplyToThread($threadId: ID!, $body: String!) {
+									addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
+								}`,
+								{ threadId, body },
+								token,
+							).pipe(Effect.asVoid),
+						),
+					),
+
+				resolveThread: (repo, threadId) =>
+					asApp(repo, (token) =>
+						reviewThread(threadId).pipe(
+							Effect.flatMap(({ isResolved }) =>
+								isResolved
+									? Effect.void
+									: graphql(
+											Schema.Struct({ resolveReviewThread: Schema.Struct({ thread: Schema.Struct({ isResolved: Schema.Literal(true) }) }) }),
+											`mutation ResolveThread($threadId: ID!) {
+												resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
+											}`,
+											{ threadId },
+											token,
+										).pipe(Effect.asVoid),
+							),
+							withPolicy,
+						),
+					),
+
+				postComment: (repo, number, { marker, body }) =>
+					asApp(repo, (token) =>
 						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, token)),
 					),
 			});
