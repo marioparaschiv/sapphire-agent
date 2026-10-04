@@ -360,8 +360,9 @@ export class Dispatcher {
 			return;
 		}
 
-		// Closing a working agent's tab would kill it mid-turn, so a run only ends once the agent is not working.
-		const working = !claim.agent || claim.agent.status === 'working';
+		// Closing a working agent's tab would kill it mid-turn, so a run only ends once the agent is not working. A
+		// stale agent only claims to be working, and its comment tells the user to move the epic to start over.
+		const working = claim.status !== 'stale' && (!claim.agent || claim.agent.status === 'working');
 
 		if (role !== 'implementing' && role !== 'inReview') {
 			if (!working) {

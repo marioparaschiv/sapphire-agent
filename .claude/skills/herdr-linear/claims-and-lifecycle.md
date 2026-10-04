@@ -59,7 +59,7 @@ First match wins. "Working" means the last agent status is `working` or not repo
 | 11 | `running` and quiet for `awaitingInputAfterSeconds` | Question comment + label, status `awaitingInput`. |
 | 12 | `running` and `working` | Stale check (below). |
 
-"End the run" = status `ended`, then send `close` (worker closes the tab). A working agent is never ended, since closing its tab would kill it mid-turn; the claim keeps its slot until it stops.
+"End the run" = status `ended`, then send `close` (worker closes the tab). A working agent is never ended, since closing its tab would kill it mid-turn; the claim keeps its slot until it stops. A `stale` agent counts as stopped: it only claims to be working.
 
 An open PR alone no longer ends a run: the result file is the completion signal. Rule 9 applies to flagged claims too.
 

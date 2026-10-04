@@ -452,6 +452,27 @@ test('flags a run still unchanged after the nudge grace as stale, across a resta
 	assert.equal(claimsOnDisk(h)[0].status, 'running');
 });
 
+test('a stale run moved back to ready is closed and started over once the label is removed', async (t) => {
+	const h = await harness(t);
+	const { epic, dispatcher, job, run } = await startedRun(h, 'UNB-154', 'Hung');
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '✻ Thinking…' });
+	h.now += 600_000;
+	await dispatcher.tick();
+	h.now += 600_000;
+	await dispatcher.tick();
+	assert.equal(claimsOnDisk(h)[0].status, 'stale');
+
+	h.linear.issues.get(epic.id)!.stateId = stateId('Ready For Agent');
+	h.linear.issues.get(epic.id)!.labelIds = [];
+	await dispatcher.tick();
+
+	assert.deepEqual(
+		h.sent.filter((message) => message.type === 'close' || message.type === 'dispatch').map((message) => `${message.type} ${message.job.identifier}`),
+		['dispatch UNB-154', 'close UNB-154', 'dispatch UNB-154'],
+	);
+	assert.deepEqual(h.sent.find((message) => message.type === 'close'), { type: 'close', job, run });
+});
+
 test('flags a run past the wall-clock cap once, whatever its state, across restarts', async (t) => {
 	const h = await harness(t);
 	const { epic, dispatcher } = await startedRun(h, 'UNB-152', 'Endless');
