@@ -45,7 +45,7 @@ Keyed by exact Linear team name:
 - `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
 - Paths accept `~`. Repo label rules: `linear-api.md`.
 
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind; all other fields at their defaults.
+Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/herdr-linear`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults.
 
 ## API key
 
