@@ -72,7 +72,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Planner` | `planner.ts` | Runs the rules under the failure policy. | Real. |
 | `Reconciler` | `reconciler.ts` | The tick loop and `wake`. | Real. |
 | `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
-| `MissedDeliveries` | `missed-deliveries.ts` | `scan` redelivers failed webhook deliveries back to the delivery mark; `run` scans at once and every `deliveryScanSeconds`. | Real, against `GitHubAppFixture` (`makeHarness` builds it; `h.scanDeliveries` runs one scan). |
+| `MissedDeliveries` | `missed-deliveries.ts` | `scan` redelivers failed webhook deliveries back to 10 minutes before the delivery mark; `run` scans at once and every `deliveryScanSeconds`. | Real, against `GitHubAppFixture` (`makeHarness` builds it; `h.scanDeliveries` runs one scan). |
 
 Rules are not services: each rule module exports an Effect that builds its `Rule` (`name`, `pausable`, `plan`) from the services it needs, and `Planner.layer` takes them all. Shared run actions (flag an epic, close a run's tab, end a run, nudge an agent) live in `run-actions.ts`.
 

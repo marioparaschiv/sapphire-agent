@@ -70,8 +70,7 @@ export type GitHubAppFixtureShape = {
 	readonly deliver: (delivery: WebhookDelivery) => Effect.Effect<FixtureDelivery>;
 	// Logs an attempt with the given status without sending it, as a new event unless `guid` names an earlier one's.
 	readonly addDelivery: (delivery: WebhookDelivery, statusCode: number, guid?: string) => Effect.Effect<FixtureDelivery>;
-	// Like addDelivery, but the attempt is listed only once `list` runs, as GitHub lists a slow attempt once it ends,
-	// after newer ones.
+	// Like addDelivery, but the attempt is listed only once `list` runs, as GitHub can list a slow attempt after newer ones.
 	readonly addSlowDelivery: (delivery: WebhookDelivery, statusCode: number) => Effect.Effect<{ readonly attempt: FixtureDelivery; readonly list: Effect.Effect<void> }>;
 	// Answers `POST /app/hook/deliveries/{id}/attempts` for the delivery with 422 and sends nothing, `times` times.
 	readonly refuseRedelivery: (id: number, times: number) => void;

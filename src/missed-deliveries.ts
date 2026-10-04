@@ -7,8 +7,9 @@ import { Journal, type JournalError } from './journal.ts';
 // GitHub keeps an App's webhook deliveries this long.
 const retention = Duration.days(3);
 
-// GitHub lists an attempt only once it ends, so one can show up after a newer one was already scanned. Each scan looks
-// this far behind the mark again; redelivering twice is safe, as recording a mention is idempotent.
+// GitHub can list a slow attempt only after a newer one was already scanned, as delivery ids do not follow the order
+// attempts are listed in. Each scan looks this far behind the mark again; redelivering twice is safe, as recording a
+// mention is idempotent.
 const overlap = Duration.minutes(10);
 
 const deliveredAt = (delivery: Delivery) => Date.parse(delivery.deliveredAt);

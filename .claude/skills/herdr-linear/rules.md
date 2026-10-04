@@ -122,7 +122,7 @@ Why a mention runs once: the command row's `comment_id` is unique and recording 
 
 GitHub does not redeliver a failed delivery by itself, so `MissedDeliveries` (`missed-deliveries.ts`) does it: once at startup, then every `deliveryScanSeconds` (default 300), it scans the App's delivery log (`GET /app/hook/deliveries`, App JWT, 100 a page, following the `Link` header's `cursor`, newest first):
 
-1. Page back until a delivery delivered more than 10 minutes before the journal's delivery mark, or one older than 3 days (GitHub keeps deliveries that long), whichever comes first. GitHub lists an attempt only once it ends, so a slow one can show up after a newer one was scanned; the 10 minutes look at it again, and a second redelivery is safe. Without a mark (the first scan ever) it goes back the full 3 days.
+1. Page back until a delivery delivered more than 10 minutes before the journal's delivery mark, or one older than 3 days (GitHub keeps deliveries that long), whichever comes first. GitHub can list a slow attempt after a newer one was scanned; the 10 minutes look at it again, and a second redelivery is safe. Without a mark (the first scan ever) it goes back the full 3 days.
 2. Group the attempts by `guid` (an event and all its redeliveries share it). An event whose newest attempt answered non-2xx is redelivered once (`POST /app/hook/deliveries/{id}/attempts` on that attempt), oldest first. Events whose newest attempt succeeded are left alone.
 3. Move the mark to when the newest delivery seen was delivered, only once every redelivery request of the scan succeeded. If GitHub refuses one, the mark stays and the next scan tries again.
 
