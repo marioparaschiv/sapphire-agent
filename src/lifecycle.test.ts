@@ -2,10 +2,11 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Fiber, Option, Random } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
+import type { WebhookDelivery } from './github-app-fixture.ts';
 import type { Command, Run } from './journal.ts';
 import { parseMarker } from './markers.ts';
 import { deliveredEmoji } from './monitoring.ts';
-import { deliveries, git, type Harness, makeHarness, type WebhookDelivery } from './test-harness.ts';
+import { deliveries, git, type Harness, makeHarness } from './test-harness.ts';
 
 const writeKinds = ['journal', 'linear', 'github', 'herdr'] as const;
 

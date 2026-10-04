@@ -49,7 +49,7 @@ The service answers each delivery:
 | 401 | The `X-Hub-Signature-256` header is missing or does not match the webhook secret. |
 | 500 | The command could not be recorded (journal error). |
 
-A delivery that failed (500, or the service down so nginx answered 502) is not redelivered by GitHub on its own: redeliver it from the App's settings (Advanced, Recent Deliveries). Redelivering one that succeeded already starts nothing.
+GitHub does not redeliver a failed delivery (500, or the service down so nginx answered 502) on its own, so the service does: at startup and every `deliveryScanSeconds` (default 300) it asks GitHub to redeliver each event whose newest attempt failed, back to the last scan and at most 3 days back (`rules.md`, Missed deliveries). A mention made while the service was down is handled once it is back, if that is within 3 days; older deliveries are gone from GitHub. A delivery can also be redelivered by hand from the App's settings (Advanced, Recent Deliveries); redelivering one that succeeded already starts nothing.
 
 ## Plugin manifest (`herdr-plugin.toml`)
 
@@ -103,7 +103,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 ## Logs and state
 
 - Logs: `journalctl --user -u herdr-linear -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations.
-- Logs of a command carry `task=CMD-<n>`. Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`.
+- Logs of a command carry `task=CMD-<n>`. Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`. The delivery scan logs `redelivered webhook delivery <id> (<guid>), which failed with HTTP <status>`, `cannot redeliver webhook delivery ...` and `cannot scan for failed webhook deliveries; trying again next scan`.
 - State dir: `~/.local/state/herdr/plugins/herdr-linear/` holds `journal.db`, `paused` and `wake`.
 - Run tabs: herdr workspace `agents`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>`.
 - Worktrees: `~/.herdr/worktrees/<repo>/<branch-slug>`. Removed with the local branch once the epic is Shipped or its PR is merged or closed, unless they hold unpushed work (then the epic gets a comment with the path).
@@ -119,7 +119,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 | `team X has no workflow state "..."; skipping it until it does` | Add the named states to that team in Linear (or change `states` in config). Picked up on the next tick, but the log line is printed only once per process and nothing is logged when it recovers. |
 | `team X not found in Linear` | The config key must equal the team's exact name. |
 | Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` run or one whose agent is still working? Team skipped? |
-| A mention of the bot does nothing | `ctl.sh status`: is the command `queued` behind another? Is its author in `bot.allowedUsers` (an `ignored` command shows only in the journal)? Is `@<bot.login>` a whole word, and the comment not posted through the agent (onBehalfOf block)? Is the App installed on the repo? Its Recent Deliveries show each delivery's response: 401 means the webhook secret differs from `bot.app.webhookSecretFile`, 502 that nginx could not reach the service, 500 a journal error (`cannot handle the delivery` in the log); redeliver it once fixed. |
+| A mention of the bot does nothing | `ctl.sh status`: is the command `queued` behind another? Is its author in `bot.allowedUsers` (an `ignored` command shows only in the journal)? Is `@<bot.login>` a whole word, and the comment not posted through the agent (onBehalfOf block)? Is the App installed on the repo? Its Recent Deliveries show each delivery's response: 401 means the webhook secret differs from `bot.app.webhookSecretFile`, 502 that nginx could not reach the service, 500 a journal error (`cannot handle the delivery` in the log). The service redelivers failed deliveries itself within `deliveryScanSeconds` once fixed, for up to 3 days. |
 | A follow-up was asked for but does not start | `ctl.sh status` shows the request waiting: paused? `maxInFlight` used up? Epic has `agent-stuck`, or is not in To Review? Its run must be `ended`; it waits while one is in flight. A request whose epic has no run is dropped. |
 | A command failed | The App replied on the issue or PR with the reason and the pane tail. Mention the bot again. |
 | A command's reply never shows up | Look for `cannot reply on` or `GitHub answered HTTP` in the log. A 404 for `/installation` means the App is not installed on that repo (GitHub App above). |

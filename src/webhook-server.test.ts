@@ -4,12 +4,12 @@ import { Clock, Effect, FileSystem, Layer, Queue, Redacted } from 'effect';
 import { TestClock } from 'effect/testing';
 import { AppConfig } from './config.ts';
 import { asClaude } from './github.ts';
-import { GitHubAppFixture } from './github-app-fixture.ts';
+import { GitHubAppFixture, postDelivery, signDelivery } from './github-app-fixture.ts';
 import type { Command } from './journal.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Reconciler } from './reconciler.ts';
-import { deliveries, type Harness, makeHarness, plannerDependencies, postDelivery, signDelivery } from './test-harness.ts';
+import { deliveries, type Harness, makeHarness, plannerDependencies } from './test-harness.ts';
 import { WebhookServer } from './webhook-server.ts';
 
 const reviewedPullRequest = (h: Harness) => h.github.addPullRequest({ repo: h.githubRepo, branch: 'mario/test-10-plugin-settings-sync', author: 'marioparaschiv' });

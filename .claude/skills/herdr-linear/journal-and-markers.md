@@ -4,7 +4,7 @@ What herdr-linear stores locally and why, and how markers on its comments make e
 
 ## Reality first
 
-Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, and what `ctl.sh` asked for.
+Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, what `ctl.sh` asked for, and how far back the App's webhook deliveries were checked.
 
 Idempotency comes from markers on external writes, not from the journal: before a write, look for its marker (or its effect) and skip it when present.
 
@@ -55,9 +55,13 @@ One row per comment that mentioned the bot, written by the webhook server before
 
 What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
+### `delivery_mark`
+
+At most one row: `delivery_id`, the id of the newest App webhook delivery the last complete scan saw. Every delivery at or below it either succeeded, has a later successful attempt of the same event, or was redelivered with a newer id, so the next scan pages back only to it (and never more than 3 days, GitHub's retention). It is moved only after every redelivery request of the scan succeeded; without a row, a scan goes back the full 3 days (`rules.md`, Missed deliveries).
+
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction); `deliveryMark`, `setDeliveryMark`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
 The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, worktree), the commands in flight and the requests waiting.
 
@@ -106,7 +110,8 @@ Every multi-step action is ordered so that a crash at any step leaves something 
 
 - Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, and Claude found in the pane is not started again. Commands start the same way.
 - A follow-up claim and the drop of its request are one transaction.
-- A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, to be redelivered; a command is keyed by its comment, so a redelivery records nothing twice.
+- A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, and the next delivery scan redelivers it; a command is keyed by its comment, so a redelivery records nothing twice.
+- The delivery scan requests every redelivery before it moves the delivery mark, so a crash mid-scan leaves the mark where it was and the next scan looks at the same deliveries again; a redelivery that already went through shows as a later success and is not repeated.
 - A reply or a failure notice of a command is posted before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
 - Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
 - Flags put the label on first, then the comment, then the journal update.

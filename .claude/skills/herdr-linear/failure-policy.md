@@ -40,7 +40,7 @@ The planner runs every rule's work per epic in its own fiber, so one bad epic ne
 - Permanent: logged as `failed`, and the epic is flagged once with `permanentFailure` and `agent-stuck`, keyed by the run's claim time (or, without a run, by the streak start).
 - Anything else (a defect, a journal error) is logged with the rule and epic and dropped; the next tick tries again. Interruption (shutdown) still stops the tick.
 
-Work that is not about an epic (`TaskWork`: a command, a request whose epic has no run) has nothing to flag, so the planner only logs its failures with its `task`. A command handles its own: a Transient failure is logged and tried again next tick, a Permanent one while starting fails the command with a reply on GitHub (`rules.md`). A webhook delivery whose command cannot be recorded is answered 500 and logged, so it stays failed in the App's delivery log until redelivered.
+Work that is not about an epic (`TaskWork`: a command, a request whose epic has no run) has nothing to flag, so the planner only logs its failures with its `task`. A command handles its own: a Transient failure is logged and tried again next tick, a Permanent one while starting fails the command with a reply on GitHub (`rules.md`). A webhook delivery whose command cannot be recorded is answered 500 and logged, so it stays failed in the App's delivery log until the delivery scan redelivers it. The scan's own GitHub calls go through the call policy; a scan that still fails, or a redelivery GitHub refuses, is logged and tried again on the next scan, without moving the delivery mark (`rules.md`, Missed deliveries).
 
 A failure while observing or planning skips that tick or that rule and is logged; nothing is written.
 

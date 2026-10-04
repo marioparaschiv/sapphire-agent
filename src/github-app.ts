@@ -12,6 +12,22 @@ const AccessToken = Schema.Struct({ token: Schema.String, expiresAt: Schema.Stri
 
 const ErrorJson = Schema.Struct({ message: Schema.String });
 
+// One attempt to deliver a webhook event. A redelivery is a new attempt with the event's `guid`.
+export const Delivery = Schema.Struct({ id: Schema.Int, guid: Schema.String, deliveredAt: Schema.String, statusCode: Schema.Int }).pipe(
+	Schema.encodeKeys({ deliveredAt: 'delivered_at', statusCode: 'status_code' }),
+);
+
+export type Delivery = typeof Delivery.Type;
+
+export type DeliveryPage = { readonly deliveries: ReadonlyArray<Delivery>; readonly next: Option.Option<string> };
+
+// GitHub's maximum.
+const deliveriesPerPage = 100;
+
+// The `cursor` of the `rel="next"` URL in a Link header.
+const nextCursor = (link: string | undefined) =>
+	Option.fromNullishOr(/<([^>]+)>;\s*rel="next"/.exec(link ?? '')?.[1]).pipe(Option.flatMap((url) => Option.fromNullishOr(new URL(url).searchParams.get('cursor'))));
+
 // A token is minted again this long before GitHub expires it, so a write that starts with it has time to finish.
 const tokenRefreshMargin = Duration.minutes(5);
 
@@ -39,6 +55,10 @@ export class GitHubApp extends Context.Service<
 		// A token acting as the App on the installation that covers the repo (`owner/name`). Each installation's token is
 		// reused until shortly before it expires.
 		readonly installationToken: (repo: string) => Effect.Effect<Redacted.Redacted<string>, CallError>;
+		// A page of the App's webhook deliveries, newest first: the first page, or the one at `cursor`.
+		readonly deliveries: (cursor: Option.Option<string>) => Effect.Effect<DeliveryPage, CallError>;
+		// Asks GitHub to send the delivery again, as a new attempt with the same `guid`.
+		readonly redeliver: (id: number) => Effect.Effect<void, CallError>;
 	}
 >()('herdr-linear/GitHubApp') {
 	// Reads the App's slug from GitHub, so it fails to build when the App id, key or GitHub is wrong.
@@ -54,7 +74,10 @@ export class GitHubApp extends Context.Service<
 				);
 				const tokens = new Map<number, { readonly token: Redacted.Redacted<string>; readonly refreshAt: number }>();
 
-				const call = <A>(schema: Schema.Decoder<A>, request: HttpClientRequest.HttpClientRequest) =>
+				const call = <A>(
+					request: HttpClientRequest.HttpClientRequest,
+					read: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, HttpClientError.HttpClientError | Schema.SchemaError>,
+				) =>
 					Effect.gen(function* () {
 						const where = `${request.method} ${request.url}`;
 						const jwt = appJwt(bot.app.id, appPrivateKey, yield* Clock.currentTimeMillis);
@@ -71,7 +94,7 @@ export class GitHubApp extends Context.Service<
 							return yield* new Permanent({ message: `GitHub answered HTTP ${status} to ${where}: ${Option.match(body, { onNone: () => 'no error message', onSome: ({ message }) => message })}` });
 						}
 
-						return yield* HttpClientResponse.schemaBodyJson(schema)(response).pipe(
+						return yield* read(response).pipe(
 							Effect.catchTags({
 								HttpClientError: (error) => Effect.fail(transportFailure(error)),
 								SchemaError: (error) => Effect.fail(new Permanent({ message: `GitHub answered ${where} with unexpected data: ${error.message}`, cause: error })),
@@ -79,27 +102,34 @@ export class GitHubApp extends Context.Service<
 						);
 					}).pipe(withCallPolicy(callTimeouts.gh));
 
-				const { slug } = yield* call(AppJson, HttpClientRequest.get('/app'));
+				const { slug } = yield* call(HttpClientRequest.get('/app'), HttpClientResponse.schemaBodyJson(AppJson));
 
 				return GitHubApp.of({
 					login: `${slug}[bot]`,
 
 					installationToken: (repo) =>
 						Effect.gen(function* () {
-							const { id } = yield* call(Installation, HttpClientRequest.get(`/repos/${repo}/installation`));
+							const { id } = yield* call(HttpClientRequest.get(`/repos/${repo}/installation`), HttpClientResponse.schemaBodyJson(Installation));
 							const cached = tokens.get(id);
 
 							if (cached && (yield* Clock.currentTimeMillis) < cached.refreshAt) {
 								return cached.token;
 							}
 
-							const { token, expiresAt } = yield* call(AccessToken, HttpClientRequest.post(`/app/installations/${id}/access_tokens`));
+							const { token, expiresAt } = yield* call(HttpClientRequest.post(`/app/installations/${id}/access_tokens`), HttpClientResponse.schemaBodyJson(AccessToken));
 							const minted = { token: Redacted.make(token), refreshAt: Date.parse(expiresAt) - Duration.toMillis(tokenRefreshMargin) };
 
 							tokens.set(id, minted);
 
 							return minted.token;
 						}),
+
+					deliveries: (cursor) =>
+						call(HttpClientRequest.get('/app/hook/deliveries', { urlParams: { per_page: deliveriesPerPage, ...Option.match(cursor, { onNone: () => ({}), onSome: (at) => ({ cursor: at }) }) } }), (response) =>
+							HttpClientResponse.schemaBodyJson(Schema.Array(Delivery))(response).pipe(Effect.map((deliveries) => ({ deliveries, next: nextCursor(response.headers.link) }))),
+						),
+
+					redeliver: (id) => call(HttpClientRequest.post(`/app/hook/deliveries/${id}/attempts`), () => Effect.void),
 				});
 			}),
 		);

@@ -38,6 +38,8 @@ const Settings = Schema.Struct({
 	maxRunSeconds: IntAtLeast(600, 5400),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
+	// How often the App's failed webhook deliveries are looked for and redelivered.
+	deliveryScanSeconds: IntAtLeast(60, 300),
 	worktreesDirectory: Path.pipe(withDefault('~/.herdr/worktrees')),
 	workspaceLabel: Name('agents'),
 	states: Schema.Struct({

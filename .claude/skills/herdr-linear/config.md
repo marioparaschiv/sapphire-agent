@@ -30,6 +30,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `nudgeGraceSeconds` | `600` | int, min 60. Output still unchanged this long after the nudge: run `stale`, epic flagged. |
 | `maxRunSeconds` | `5400` | int, min 600. Wall-clock cap from the claim; the epic is flagged once, in any in-flight state. The run keeps going. |
 | `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` comment is posted once (see `failure-policy.md`). |
+| `deliveryScanSeconds` | `300` | int, min 60. How often the App's failed webhook deliveries are looked for and redelivered, besides once at startup (`rules.md`, Missed deliveries). |
 | `worktreesDirectory` | `~/.herdr/worktrees` | `~` expanded. |
 | `workspaceLabel` | `agents` | herdr workspace that holds the run tabs. |
 | `states.*` | see below | Exact Linear workflow state names. |

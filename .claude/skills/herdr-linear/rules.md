@@ -118,6 +118,18 @@ A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` coun
 
 Why a mention runs once: the command row's `comment_id` is unique and recording a comment again does nothing, so a delivery that arrives twice, or is redelivered after it failed, never starts a second run.
 
+### Missed deliveries
+
+GitHub does not redeliver a failed delivery by itself, so `MissedDeliveries` (`missed-deliveries.ts`) does it: once at startup, then every `deliveryScanSeconds` (default 300), it scans the App's delivery log (`GET /app/hook/deliveries`, App JWT, 100 a page, following the `Link` header's `cursor`, newest first):
+
+1. Page back until a delivery at or below the journal's delivery mark, or one older than 3 days (GitHub keeps deliveries that long), whichever comes first. Without a mark (the first scan ever) it goes back the full 3 days.
+2. Group the attempts by `guid` (an event and all its redeliveries share it). An event whose newest attempt answered non-2xx is redelivered once (`POST /app/hook/deliveries/{id}/attempts` on that attempt), oldest first. Events whose newest attempt succeeded are left alone.
+3. Move the mark to the newest delivery seen, only once every redelivery request of the scan succeeded. If GitHub refuses one, the mark stays and the next scan tries again.
+
+The redelivery is a new attempt with the same `guid` and a newer id, so it is above the mark: if it fails again (the service went down again), the next scan redelivers it once more; once it succeeds, the event is left alone. It comes in through the webhook server like any delivery, so recording it is idempotent. A crash anywhere in the scan leaves the mark where it was, so nothing is skipped; the next scan finds the event's newer successful attempt or redelivers it again.
+
+A failed scan (GitHub unreachable or refusing, a journal error) is logged as `cannot scan for failed webhook deliveries; trying again next scan` and does not stop the service.
+
 ## 8. Commands
 
 Not paused. Runs the command agents, one at a time, oldest first. Command statuses: `ignored`, `queued` (waiting for its turn), `claimed` (its turn came; being started), `running`, `ended` (the agent said it was done; tab closed), `error` (failed; the comment got a reply saying so; tab closed). Commands hold no `maxInFlight` slot: a stop or a pause must work while every slot is taken, so at most `maxInFlight` runs plus one command agent are alive.
@@ -219,4 +231,5 @@ A new claim reuses the existing worktree if it is on the same branch and opens a
 - A run whose agent keeps reporting `working` holds its slot and its tab until it stops or is flagged `stale`.
 - A crash after a message was typed into the pane but before its `send` request was dropped types it again, as with question replies.
 - The command agent's replies go to the issue's or PR's conversation, also for a mention in a review thread.
-- GitHub does not redeliver a failed webhook delivery by itself: a mention made while the service was down, or whose journal write failed, waits until the delivery is redelivered from the App's delivery log.
+- A mention whose delivery failed more than 3 days ago is lost: GitHub no longer lists it, so it cannot be redelivered. Mention the bot again.
+- A delivery that the service refuses every time (401 for a webhook secret that does not match, 400 for an unexpected payload) is redelivered on every scan until it is fixed or 3 days have passed.

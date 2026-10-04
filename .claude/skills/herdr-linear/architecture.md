@@ -49,6 +49,8 @@ Each rule details: `rules.md`.
 
 Mentions are not a rule: they arrive as GitHub App webhook deliveries. `WebhookServer` (`webhook-server.ts`) is an Effect-managed `node:http` server (`NodeHttpServer`) on `127.0.0.1:<bot.app.webhookPort>`, built as a layer beside the reconciler, so it listens while the service runs and closes on shutdown. nginx terminates TLS at `https://herdr.marioparaschiv.com/github` and forwards to it (`operations.md`). Each delivery's signature is checked against the webhook secret, its payload is decoded with `Schema`, and a comment that mentions the bot is recorded as a command by `makeRecordMention` (`mentions.ts`, which holds the mention and allowed-user decisions), before the delivery is answered. See `rules.md` (Mentions).
 
+GitHub does not redeliver a failed delivery by itself. `MissedDeliveries` (`missed-deliveries.ts`), forked by `main.ts` beside the reconciler, scans the App's delivery log at startup and every `deliveryScanSeconds` and asks GitHub to redeliver each event whose newest attempt failed, back to the journal's delivery mark and at most 3 days. The redeliveries arrive at the webhook server like any other. A failed scan is logged and tried again on the next. See `rules.md` (Missed deliveries).
+
 ## Services
 
 Each is an Effect `Context.Service` with a live layer; the externals have a test layer.
@@ -58,7 +60,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `AppConfig` | `config.ts` | Env, config file, API key and the GitHub App's private key and webhook secret, read once at startup. | `AppConfig.layerTest(dir, settings)` |
 | `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, replies, comments, moves, labels, reactions. | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
 | `GitHub` | `github.ts` | `gh` CLI: PR lookup, summary, flags review, thread replies and resolves as the user; comments as the GitHub App. | `FakeGitHub.layer` |
-| `GitHubApp` | `github-app.ts` | GitHub App auth over `HttpClient`: its `<slug>[bot]` login, read at startup, and installation tokens, cached per installation. | `GitHubAppFixture.layer`: a real HTTP server with the real `GitHubApp` layer pointed at it. |
+| `GitHubApp` | `github-app.ts` | GitHub App auth over `HttpClient`: its `<slug>[bot]` login, read at startup, installation tokens, cached per installation, and the App's webhook delivery log: a page of it and a redelivery. | `GitHubAppFixture.layer`: a real HTTP server with the real `GitHubApp` layer pointed at it. |
 | `Herdr` | `herdr.ts` | herdr CLI and event socket: workspaces, tabs (with extra shell variables), panes, agents, prompts, starting Claude (with extra arguments). | `FakeHerdr.layer` |
 | `Git` | `git.ts` | Worktrees, pull, unsaved-work check, removal, origin's GitHub repo, the result file. | Real git in temp repos. |
 | `ClaudeTrust` | `claude-trust.ts` | Pre-accepts Claude's folder trust in `~/.claude.json`. | Real temp files. |
@@ -70,6 +72,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Planner` | `planner.ts` | Runs the rules under the failure policy. | Real. |
 | `Reconciler` | `reconciler.ts` | The tick loop and `wake`. | Real. |
 | `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
+| `MissedDeliveries` | `missed-deliveries.ts` | `scan` redelivers failed webhook deliveries back to the delivery mark; `run` scans at once and every `deliveryScanSeconds`. | Real, against `GitHubAppFixture` (`makeHarness` builds it; `h.scanDeliveries` runs one scan). |
 
 Rules are not services: each rule module exports an Effect that builds its `Rule` (`name`, `pausable`, `plan`) from the services it needs, and `Planner.layer` takes them all. Shared run actions (flag an epic, close a run's tab, end a run, nudge an agent) live in `run-actions.ts`.
 
@@ -78,7 +81,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 1. `AppConfig.layer` reads env, the config file, the API key and the GitHub App's private key and webhook secret and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$HERDR_PLUGIN_STATE_DIR/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
 3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), and the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url>`). A failure there, e.g. the port taken, stops startup.
-4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event and one that calls it whenever the state directory's `wake` file is written, and runs the reconciler.
+4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event, one that calls it whenever the state directory's `wake` file is written and one that runs the delivery scan, and runs the reconciler.
 
 `NodeRuntime.runMain` runs it; SIGTERM interrupts the tick cleanly. Logs go to stdout with `epic` and `rule` annotations.
 

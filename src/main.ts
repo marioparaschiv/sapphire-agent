@@ -12,6 +12,7 @@ import { Herdr } from './herdr.ts';
 import { Journal } from './journal.ts';
 import { refuseUndrainedClaims } from './legacy-claims.ts';
 import { Linear } from './linear.ts';
+import { MissedDeliveries } from './missed-deliveries.ts';
 import { Observer } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
@@ -24,7 +25,7 @@ const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(jo
 
 const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, Herdr.layer, Comments.layer, Prompts.layer).pipe(Layer.provideMerge(GitHubApp.layer()));
 
-const MainLive = WebhookServer.layer.pipe(
+const MainLive = Layer.mergeAll(WebhookServer.layer, MissedDeliveries.layer).pipe(
 	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
 	Layer.provideMerge(ServicesLive),
 	Layer.provideMerge(JournalLive),
@@ -35,11 +36,13 @@ const program = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const reconciler = yield* Reconciler;
 	const herdr = yield* Herdr;
+	const missedDeliveries = yield* MissedDeliveries;
 	const fs = yield* FileSystem.FileSystem;
 
 	yield* Effect.log(`watching ${Object.keys(config.teams).join(', ')} every ${config.pollSeconds}s, at most ${config.maxInFlight} in flight`);
 
 	yield* Effect.forkChild(Stream.runForEach(herdr.events, () => reconciler.wake));
+	yield* Effect.forkChild(missedDeliveries.run);
 	yield* Effect.forkChild(
 		fs.watch(config.env.stateDirectory).pipe(
 			Stream.filter((event) => basename(event.path) === wakeFileName),

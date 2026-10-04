@@ -1,5 +1,5 @@
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
-import { Clock, Context, Effect, Layer, type Option, Schema, String } from 'effect';
+import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
 import { ResultFile } from './result-file.ts';
 
@@ -198,6 +198,17 @@ const migrations = SqliteMigrator.layer({
 			yield* sql`DROP TABLE mention_threads`;
 			yield* sql`DROP TABLE mention_floor`;
 		}),
+		'0003_create_delivery_mark': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// At most one row.
+			yield* sql`
+				CREATE TABLE delivery_mark (
+					id INTEGER PRIMARY KEY CHECK (id = 1),
+					delivery_id INTEGER NOT NULL
+				)
+			`;
+		}),
 	}),
 });
 
@@ -228,6 +239,10 @@ export class Journal extends Context.Service<
 		// Records the follow-up's claim and drops the request that asked for it in one transaction, so a crash never
 		// claims it twice or loses it.
 		readonly claimFollowUp: (run: Run, requestId: number) => Effect.Effect<void, JournalError>;
+		// The newest webhook delivery id at or below which every delivery succeeded or was redelivered; none before the
+		// first scan.
+		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
+		readonly setDeliveryMark: (deliveryId: number) => Effect.Effect<void, JournalError>;
 	}
 >()('herdr-linear/Journal') {
 	static readonly layer = (filename: string) =>
@@ -323,6 +338,17 @@ export class Journal extends Context.Service<
 
 				const claimFollowUp = (run: Run, requestId: number) => sql.withTransaction(putRun(run).pipe(Effect.andThen(deleteRequest(requestId))));
 
+				const deliveryMark = SqlSchema.findOneOption({
+					Request: Schema.Void,
+					Result: Schema.Struct({ deliveryId: Schema.Int }),
+					execute: () => sql`SELECT delivery_id FROM delivery_mark`,
+				})(undefined).pipe(Effect.map(Option.map(({ deliveryId }) => deliveryId)));
+
+				const setDeliveryMark = SqlSchema.void({
+					Request: Schema.Int,
+					execute: (deliveryId) => sql`INSERT OR REPLACE INTO delivery_mark (id, delivery_id) VALUES (1, ${deliveryId})`,
+				});
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -337,6 +363,8 @@ export class Journal extends Context.Service<
 					listRequests,
 					deleteRequest,
 					claimFollowUp,
+					deliveryMark,
+					setDeliveryMark,
 				});
 			}),
 		).pipe(
