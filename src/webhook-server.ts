@@ -88,24 +88,24 @@ export class WebhookServer extends Context.Service<
 			const handle = (request: HttpServerRequest.HttpServerRequest) =>
 				Effect.gen(function* () {
 					const body = new Uint8Array(yield* request.arrayBuffer);
-	
+
 					if (!isSigned(webhookSecret, body, request.headers['x-hub-signature-256'])) {
 						yield* Effect.logWarning('refused a delivery without a valid signature');
-	
+
 						return respond(401);
 					}
-	
+
 					const text = new TextDecoder().decode(body);
 					const event = handledEvents[request.headers['x-github-event'] ?? ''];
-	
+
 					if (event === undefined || (yield* Schema.decodeUnknownEffect(Action)(text)).action !== event.action) {
 						return respond(204);
 					}
-	
+
 					if (yield* recordMention(yield* event.comment(text))) {
 						yield* reconciler.wake;
 					}
-	
+
 					return respond(204);
 				}).pipe(
 					Effect.catchTag('SchemaError', (error) => Effect.logWarning('refused a delivery that does not match its event', error).pipe(Effect.as(respond(400)))),
