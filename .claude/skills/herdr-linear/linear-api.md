@@ -58,7 +58,7 @@ Repo labels (`resolveRepo`, `config.ts:67-104`), read from the epic's labels:
 
 PR detection:
 
-- `gh pr list --repo <owner/repo> --head <branch> --state all --json number,url,state`.
+- `gh pr list --repo <owner/repo> --head <branch> --state all --json number,url,state,author`.
 - Prefers an `OPEN` PR, else a `MERGED` one, else a `CLOSED` one. A `CLOSED` PR does not hand a run over; it only triggers worktree cleanup.
 - Called when a run with a result file finishes, and each tick for `ended` / `kept` claims not in Shipped.
 - Needs `gh` on the service `PATH` and authenticated for the service user. A `gh` failure aborts the tick.
@@ -76,7 +76,7 @@ Writes (dispatcher only; the agent never posts to GitHub):
 Thread scan (`pendingThreads(repo, branch)`): `gh api graphql --input -` with `{ query, variables }`, `repository.pullRequests(headRefName, states: OPEN, first: 1) { url reviewThreads(first: 100) { totalCount nodes { id isResolved comments(last: 100) { nodes { body pullRequestReview { body } } } } } }`. Returns the PR URL and the pending thread ids (rule in `claims-and-lifecycle.md`). Linear's public API has no field for PR comments, so this reads GitHub directly; Linear Diffs syncs threads both ways, so `/agent` written in Linear's review UI shows up here. `gh` exits non-zero on GraphQL errors.
 
 - Every body ends with `ON_BEHALF_OF_CLAUDE`, the Linear `onBehalfOf` extension block. Linear shows such comments as written by Claude; it is the only way to tell agent comments from the user's, since both use one GitHub account.
-- A COMMENT review on your own PR is allowed. Requesting review, approving or requesting changes is not, which is why the user's review is not re-requested.
+- A COMMENT review on your own PR is allowed. Requesting review, approving or requesting changes is not, so instead of re-requesting review the summary comment ends with `Ready for review, @<PR author>.`, which notifies the user.
 
 ## Branch name
 

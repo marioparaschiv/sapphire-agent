@@ -425,7 +425,8 @@ export class Dispatcher {
 		};
 
 		if (!saved.posted.includes('summary')) {
-			await github.comment(run.githubRepo, pullRequest.number, result.file.summary);
+			// GitHub refuses review requests from the PR's author, which is the user's own account, so a mention notifies them.
+			await github.comment(run.githubRepo, pullRequest.number, `${result.file.summary}\n\nReady for review, @${pullRequest.author.login}.`);
 			await save({ posted: [...saved.posted, 'summary'] });
 		}
 

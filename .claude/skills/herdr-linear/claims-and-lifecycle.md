@@ -69,7 +69,7 @@ An open PR alone no longer ends a run: the result file is the completion signal.
 - The worker reads it (`readResultFile`, `git.ts`) whenever the agent is not `working`, and before reporting `exited` / `vanished`, so it is never read half-written. It sends `result` or `invalidResult` once per tracked run.
 - `result`: saved on the claim. `invalidResult`: `error` + comment with the zod message.
 - Posting (rule 9, `finishRun`): first `replies` must hold exactly one entry per id in `job.threadIds` (none for an initial run). Otherwise `error`, a comment naming the missing, unknown and repeated ids, and nothing is posted. Then it needs an open or merged PR for the branch, else `error`. Then the summary as a PR comment, all `flags` as one `COMMENT` review with inline comments (none when `flags` is empty), and for each reply: post it into its thread, then resolve the thread. Each step is saved (`posted`, `replied`, `resolved`) right after it succeeds, so a restart or a failed `gh` call carries on without posting anything twice. A `gh` failure aborts the tick and is retried next tick.
-- Not done: re-requesting the user's review. The PR author is the user's own account (GitHub rejects review requests from the author), and Linear's public API has no review-request mutation.
+- Instead of re-requesting the user's review, the summary mentions the PR author (the user's own account; GitHub rejects review requests from the author, and Linear's public API has no review-request mutation).
 
 ## Follow-up runs
 

@@ -223,7 +223,7 @@ test('keeps at most maxInFlight epics in flight, in board order', async (t) => {
 	await dispatcher.handle({ type: 'started', epicId: first.id, run: runFor('UNB-40') });
 	await dispatcher.handle({ type: 'status', epicId: first.id, status: 'idle', tail: 'PR opened.' });
 	await dispatcher.handle({ type: 'result', epicId: first.id, result: result() });
-	h.pullRequest = { number: 88, url: 'https://github.com/marioparaschiv/unbound/pull/88', state: 'OPEN' };
+	h.pullRequest = { number: 88, url: 'https://github.com/marioparaschiv/unbound/pull/88', state: 'OPEN', author: { login: 'marioparaschiv' } };
 	await dispatcher.tick();
 
 	assert.equal(h.linear.stateName(first.id), 'To Review');
@@ -286,7 +286,7 @@ test('an open PR alone does not end the run; the result file does, posted to the
 	await dispatcher.tick();
 	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-55') });
 	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: 'Opening the PR' });
-	h.pullRequest = { number: 91, url: 'https://github.com/marioparaschiv/unbound/pull/91', state: 'OPEN' };
+	h.pullRequest = { number: 91, url: 'https://github.com/marioparaschiv/unbound/pull/91', state: 'OPEN', author: { login: 'marioparaschiv' } };
 
 	await dispatcher.tick();
 	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Opened PR #91.' });
@@ -304,7 +304,7 @@ test('an open PR alone does not end the run; the result file does, posted to the
 	assert.deepEqual(ghWrites(h), [
 		{
 			args: ['api', '--method', 'POST', 'repos/marioparaschiv/unbound/issues/91/comments', '--input', '-'],
-			body: { body: `Added settings sync.\n\n1. Synced plugin settings.\n\n${ON_BEHALF_OF_CLAUDE}` },
+			body: { body: `Added settings sync.\n\n1. Synced plugin settings.\n\nReady for review, @marioparaschiv.\n\n${ON_BEHALF_OF_CLAUDE}` },
 		},
 		{
 			args: ['api', '--method', 'POST', 'repos/marioparaschiv/unbound/pulls/91/reviews', '--input', '-'],
@@ -335,7 +335,7 @@ test('posts no review without flags, and a restart mid-way never posts the summa
 		epicId: epic.id,
 		result: result({ flags: [{ path: 'src/a.ts', line: 3, body: 'Rename this.' }] }),
 	});
-	h.pullRequest = { number: 92, url: 'https://github.com/marioparaschiv/unbound/pull/92', state: 'OPEN' };
+	h.pullRequest = { number: 92, url: 'https://github.com/marioparaschiv/unbound/pull/92', state: 'OPEN', author: { login: 'marioparaschiv' } };
 	h.ghFails = /\/reviews/;
 
 	await dispatcher.tick();
@@ -637,7 +637,7 @@ async function endedRun(h: Awaited<ReturnType<typeof harness>>, identifier: stri
 	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor(identifier) });
 	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'done', tail: 'Opened the PR.' });
 	await dispatcher.handle({ type: 'result', epicId: epic.id, result: result() });
-	h.pullRequest = { number: 120, url: 'https://github.com/marioparaschiv/unbound/pull/120', state: 'OPEN' };
+	h.pullRequest = { number: 120, url: 'https://github.com/marioparaschiv/unbound/pull/120', state: 'OPEN', author: { login: 'marioparaschiv' } };
 	await dispatcher.tick();
 	assert.equal(h.linear.stateName(epic.id), 'To Review');
 
@@ -685,7 +685,7 @@ test('a merged or closed PR triggers cleanup too', async (t) => {
 	for (const state of ['MERGED', 'CLOSED'] as const) {
 		const h = await harness(t);
 		const { job, run } = await endedRun(h, 'UNB-121');
-		h.pullRequest = { number: 121, url: 'https://github.com/marioparaschiv/unbound/pull/121', state };
+		h.pullRequest = { number: 121, url: 'https://github.com/marioparaschiv/unbound/pull/121', state, author: { login: 'marioparaschiv' } };
 
 		await (await h.dispatcher()).tick();
 
@@ -756,7 +756,7 @@ test('/agent threads start one follow-up run, which replies to and resolves each
 
 	assert.deepEqual(ghWrites(h)[0], {
 		args: ['api', '--method', 'POST', 'repos/marioparaschiv/unbound/issues/120/comments', '--input', '-'],
-		body: { body: asClaude('Renamed the sync function and derived the settings type.') },
+		body: { body: asClaude('Renamed the sync function and derived the settings type.\n\nReady for review, @marioparaschiv.') },
 	});
 	assert.deepEqual(graphqlWrites(h), [
 		['ReplyToThread', { threadId: 'PRRT_inline', body: asClaude('Renamed it to syncSettings.') }],

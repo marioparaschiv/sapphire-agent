@@ -5,7 +5,12 @@ import type { ResultFile } from './protocol.ts';
 
 const execFileAsync = promisify(execFile);
 
-const pullRequestSchema = z.object({ number: z.number().int(), url: z.string(), state: z.enum(['OPEN', 'CLOSED', 'MERGED']) });
+const pullRequestSchema = z.object({
+	number: z.number().int(),
+	url: z.string(),
+	state: z.enum(['OPEN', 'CLOSED', 'MERGED']),
+	author: z.object({ login: z.string() }),
+});
 
 export type PullRequest = z.infer<typeof pullRequestSchema>;
 
@@ -61,7 +66,7 @@ export class GitHub {
 
 	// The open PR for the branch if there is one, else a merged one, else a closed one.
 	async findPullRequest(githubRepo: string, branch: string): Promise<PullRequest | undefined> {
-		const stdout = await this.gh(['pr', 'list', '--repo', githubRepo, '--head', branch, '--state', 'all', '--json', 'number,url,state']);
+		const stdout = await this.gh(['pr', 'list', '--repo', githubRepo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']);
 		const pullRequests = z.array(pullRequestSchema).parse(JSON.parse(stdout));
 
 		return (
