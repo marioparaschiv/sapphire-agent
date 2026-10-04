@@ -167,14 +167,15 @@ describe('monitoring', () => {
 
 			assert.deepStrictEqual(h.herdr.prompts(), [{ paneId: run.paneId, text: 'Remote wins. Keep a backup of local.' }]);
 			assert.deepStrictEqual(
-				h.linear.comments(epic.id).map((comment) => [comment.body.split('\n')[0], comment.reactions]),
+				h.linear.comments(epic.id).map((comment) => [comment.id === flagged.questionCommentId ? 'question' : comment.body.split('\n')[0], comment.reactions]),
 				[
-					[h.linear.comments(epic.id)[0].body.split('\n')[0], []],
+					['question', []],
 					['Note for later: check the iOS build.', []],
 					['Not this one.', []],
 					['Remote wins.', ['white_check_mark']],
 				],
 			);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
 			assert.deepStrictEqual((yield* h.runs)[0].deliveredReplyIds, [reply.id]);
 		}),
 	);
