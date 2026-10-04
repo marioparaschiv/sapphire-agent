@@ -7,13 +7,16 @@ import { ClaimStore } from './claims.ts';
 import { configSchema } from './config.ts';
 import { Dispatcher } from './dispatcher.ts';
 import { FakeLinear, UNBOUND_TEAM_ID, unboundStates } from './fixtures/linear-server.ts';
-import type { PullRequest } from './github.ts';
+import { GitHub, ON_BEHALF_OF_CLAUDE, type PullRequest } from './github.ts';
 import { LinearClient } from './linear.ts';
-import type { DispatcherMessage, Run } from './protocol.ts';
+import type { DispatcherMessage, ResultFile, Run } from './protocol.ts';
 
 const config = configSchema.parse({
 	awaitingInputAfterSeconds: 180,
 	startTimeoutSeconds: 300,
+	staleAfterSeconds: 600,
+	nudgeGraceSeconds: 600,
+	maxRunSeconds: 5400,
 	teams: { Unbound: { repo: '/srv/unbound', labelReposDirectory: '/srv/unbound-app' } },
 });
 
@@ -35,6 +38,10 @@ async function harness(t: TestContext) {
 		now: 1_791_100_000_000,
 		paused: false,
 		pullRequest: undefined as PullRequest | undefined,
+		// Every gh call, as the process would receive it.
+		gh: [] as { args: string[]; input?: string }[],
+		// gh calls whose arguments match fail like a GitHub outage.
+		ghFails: undefined as RegExp | undefined,
 		onSend: (_message: DispatcherMessage) => {},
 		async dispatcher() {
 			return new Dispatcher({
@@ -45,7 +52,15 @@ async function harness(t: TestContext) {
 					harness.onSend(message);
 					harness.sent.push(message);
 				},
-				findPullRequest: async () => harness.pullRequest,
+				github: new GitHub(async (args, input) => {
+					harness.gh.push({ args, input });
+
+					if (harness.ghFails?.test(args.join(' '))) {
+						throw new Error('gh: HTTP 502');
+					}
+
+					return args[0] === 'pr' ? JSON.stringify(harness.pullRequest ? [harness.pullRequest] : []) : '{}';
+				}),
 				isPaused: async () => harness.paused,
 				now: () => harness.now,
 				log: (line) => harness.logs.push(line),
@@ -65,6 +80,16 @@ const runFor = (identifier: string): Run => ({
 });
 
 const stateId = (name: string) => unboundStates.find((state) => state.name === name)!.id;
+
+const ghWrites = (h: { gh: { args: string[]; input?: string }[] }) =>
+	h.gh.filter(({ args }) => args[0] === 'api').map(({ args, input }) => ({ args, body: JSON.parse(input ?? '') }));
+
+const result = (overrides: Partial<ResultFile> = {}): ResultFile => ({
+	summary: 'Added settings sync.\n\n1. Synced plugin settings.',
+	replies: [],
+	flags: [],
+	...overrides,
+});
 
 test('records the claim on disk before dispatching, and moves the epic only after the worker confirms', async (t) => {
 	const h = await harness(t);
@@ -153,7 +178,8 @@ test('keeps at most maxInFlight epics in flight, in board order', async (t) => {
 
 	await dispatcher.handle({ type: 'started', epicId: first.id, run: runFor('UNB-40') });
 	await dispatcher.handle({ type: 'status', epicId: first.id, status: 'idle', tail: 'PR opened.' });
-	h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/88', state: 'OPEN' };
+	await dispatcher.handle({ type: 'result', epicId: first.id, result: result() });
+	h.pullRequest = { number: 88, url: 'https://github.com/marioparaschiv/unbound/pull/88', state: 'OPEN' };
 	await dispatcher.tick();
 
 	assert.equal(h.linear.stateName(first.id), 'To Review');
@@ -164,7 +190,7 @@ test('keeps at most maxInFlight epics in flight, in board order', async (t) => {
 });
 
 const claimsOnDisk = (h: { statePath: string }) =>
-	JSON.parse(readFileSync(h.statePath, 'utf8')).claims as { epicId: string; status: string }[];
+	JSON.parse(readFileSync(h.statePath, 'utf8')).claims as { epicId: string; status: string; claimedAt: number }[];
 
 test('flags an agent that sits idle as awaiting input, keeps its slot, and resumes it once it works again', async (t) => {
 	const h = await harness(t);
@@ -191,7 +217,8 @@ test('flags an agent that sits idle as awaiting input, keeps its slot, and resum
 	assert.equal(h.linear.comments.length, 1);
 	const [comment] = h.linear.comments;
 	assert.equal(comment.issueId, epic.id);
-	assert.match(comment.body, /\(`awaitingInput`\): the agent has been idle for 3 min without opening a PR/);
+	assert.match(comment.body, /\(`awaitingInput`\): the agent has been idle for 3 min before writing its result file/);
+	assert.match(comment.body, /Reply to this comment and the reply is typed into the agent's pane/);
 	assert.match(comment.body, /w1:t4/);
 	assert.match(comment.body, /Which auth provider should slice 2 use\?/);
 	assert.equal(h.linear.stateName(epic.id), 'Implementing');
@@ -208,24 +235,236 @@ test('flags an agent that sits idle as awaiting input, keeps its slot, and resum
 	assert.ok(h.logs.includes('UNB-50: agent is working again'));
 });
 
-test('hands the epic over once the PR is up and the agent stops working, then closes its tab', async (t) => {
+test('an open PR alone does not end the run; the result file does, posted to the PR as Claude', async (t) => {
 	const h = await harness(t);
 	const epic = h.linear.addEpic({ identifier: 'UNB-55', title: 'PR while working' });
 	const dispatcher = await h.dispatcher();
 	await dispatcher.tick();
 	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-55') });
-	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '' });
-	h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/91', state: 'OPEN' };
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: 'Opening the PR' });
+	h.pullRequest = { number: 91, url: 'https://github.com/marioparaschiv/unbound/pull/91', state: 'OPEN' };
 
 	await dispatcher.tick();
-	assert.equal(h.linear.stateName(epic.id), 'Implementing', 'a working agent is not interrupted');
-
 	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Opened PR #91.' });
 	await dispatcher.tick();
+	assert.equal(h.linear.stateName(epic.id), 'Implementing', 'the PR is up but the agent has not written its result');
+	assert.deepEqual(ghWrites(h), []);
 
+	const flags = [
+		{ path: 'src/sync.ts', line: 12, body: 'This retry loop has no backoff.' },
+		{ path: 'src/settings.ts', line: 40, body: 'The settings type duplicates the schema.' },
+	];
+	await dispatcher.handle({ type: 'result', epicId: epic.id, result: result({ flags }) });
+	await dispatcher.tick();
+
+	assert.deepEqual(ghWrites(h), [
+		{
+			args: ['api', '--method', 'POST', 'repos/marioparaschiv/unbound/issues/91/comments', '--input', '-'],
+			body: { body: `Added settings sync.\n\n1. Synced plugin settings.\n\n${ON_BEHALF_OF_CLAUDE}` },
+		},
+		{
+			args: ['api', '--method', 'POST', 'repos/marioparaschiv/unbound/pulls/91/reviews', '--input', '-'],
+			body: {
+				event: 'COMMENT',
+				body: `Self-review findings I did not fix in this PR.\n\n${ON_BEHALF_OF_CLAUDE}`,
+				comments: flags.map((flag) => ({ ...flag, side: 'RIGHT', body: `${flag.body}\n\n${ON_BEHALF_OF_CLAUDE}` })),
+			},
+		},
+	]);
 	assert.equal(h.linear.stateName(epic.id), 'To Review');
 	assert.deepEqual(h.sent.at(-1), { type: 'close', job: h.sent[0].job, run: runFor('UNB-55') });
 	assert.equal(claimsOnDisk(h)[0].status, 'ended');
+
+	await dispatcher.tick();
+	assert.equal(ghWrites(h).length, 2, 'nothing is posted twice');
+});
+
+test('posts no review without flags, and a restart mid-way never posts the summary twice', async (t) => {
+	const h = await harness(t);
+	const epic = h.linear.addEpic({ identifier: 'UNB-56', title: 'Crash while posting' });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-56') });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'done', tail: 'Done.' });
+	await dispatcher.handle({
+		type: 'result',
+		epicId: epic.id,
+		result: result({ flags: [{ path: 'src/a.ts', line: 3, body: 'Rename this.' }] }),
+	});
+	h.pullRequest = { number: 92, url: 'https://github.com/marioparaschiv/unbound/pull/92', state: 'OPEN' };
+	h.ghFails = /\/reviews/;
+
+	await dispatcher.tick();
+	assert.ok(h.logs.includes('poll failed: gh: HTTP 502'));
+	assert.equal(claimsOnDisk(h)[0].status, 'running');
+
+	h.ghFails = undefined;
+	const restarted = await h.dispatcher();
+	await restarted.tick();
+
+	assert.deepEqual(
+		ghWrites(h).map(({ args }) => args[3]),
+		['repos/marioparaschiv/unbound/issues/92/comments', 'repos/marioparaschiv/unbound/pulls/92/reviews', 'repos/marioparaschiv/unbound/pulls/92/reviews'],
+	);
+	assert.equal(claimsOnDisk(h)[0].status, 'ended');
+
+	const other = h.linear.addEpic({ identifier: 'UNB-57', title: 'No flags' });
+	h.gh.length = 0;
+	await restarted.tick();
+	await restarted.handle({ type: 'started', epicId: other.id, run: runFor('UNB-57') });
+	await restarted.handle({ type: 'status', epicId: other.id, status: 'idle', tail: 'Done.' });
+	await restarted.handle({ type: 'result', epicId: other.id, result: result() });
+	await restarted.tick();
+
+	assert.deepEqual(
+		ghWrites(h).map(({ args }) => args[3]),
+		['repos/marioparaschiv/unbound/issues/92/comments'],
+	);
+});
+
+test('an invalid result file is an error with the validation message on the epic', async (t) => {
+	const h = await harness(t);
+	const epic = h.linear.addEpic({ identifier: 'UNB-58', title: 'Bad result' });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor('UNB-58') });
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Wrote the result.' });
+
+	await dispatcher.handle({ type: 'invalidResult', epicId: epic.id, error: '✖ Invalid input: expected array, received undefined\n  → at flags' });
+
+	assert.equal(claimsOnDisk(h)[0].status, 'error');
+	assert.match(h.linear.comments[0].body, /\(`error`\): the agent's result file is invalid:\n\n```\n✖ Invalid input: expected array, received undefined\n  → at flags\n```/);
+	assert.deepEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+	assert.deepEqual(ghWrites(h), []);
+});
+
+async function startedRun(h: Awaited<ReturnType<typeof harness>>, identifier: string, title: string) {
+	const epic = h.linear.addEpic({ identifier, title, sortOrder: 1 });
+	h.linear.addEpic({ identifier: `${identifier}9`, title: 'Queued behind it', sortOrder: 2 });
+	const dispatcher = await h.dispatcher();
+	await dispatcher.tick();
+	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor(identifier) });
+
+	return { epic, dispatcher, job: h.sent[0].job, run: runFor(identifier) };
+}
+
+const nudges = (h: { sent: DispatcherMessage[] }) => h.sent.filter((message) => message.type === 'nudge');
+
+test('nudges a working agent once when its pane stops changing, and a change after the nudge clears it', async (t) => {
+	const h = await harness(t);
+	const { epic, dispatcher, job, run } = await startedRun(h, 'UNB-150', 'Long build');
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '✻ Compiling… (0m 1s)' });
+
+	h.now += 599_000;
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '✶ Compiling… (9m 59s)' });
+	await dispatcher.tick();
+	assert.deepEqual(nudges(h), [], 'still inside the stale window');
+
+	h.now += 1_000;
+	await dispatcher.tick();
+	h.now += 300_000;
+	await dispatcher.tick();
+	assert.deepEqual(nudges(h), [{ type: 'nudge', job, run }]);
+
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '✻ Compiling…\nInterrupted\n> continue' });
+	h.now += 599_000;
+	await dispatcher.tick();
+
+	assert.equal(nudges(h).length, 1);
+	assert.equal(h.linear.comments.length, 0);
+	assert.deepEqual(
+		claimsOnDisk(h).map((claim) => [claim.status, 'nudgedAt' in claim]),
+		[['running', false]],
+	);
+});
+
+test('flags a run still unchanged after the nudge grace as stale, across a restart, until the pane moves', async (t) => {
+	const h = await harness(t);
+	const { epic, dispatcher } = await startedRun(h, 'UNB-151', 'Frozen');
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '✻ Thinking… (esc to interrupt)' });
+	h.now += 600_000;
+	await dispatcher.tick();
+
+	const restarted = await h.dispatcher();
+	restarted.start();
+	await restarted.handle({ type: 'status', epicId: epic.id, status: 'working', tail: '✻ Thinking… (esc to interrupt)' });
+	h.now += 599_000;
+	await restarted.tick();
+	assert.equal(h.linear.comments.length, 0, 'still inside the nudge grace');
+
+	h.now += 1_000;
+	await restarted.tick();
+	await restarted.tick();
+
+	assert.equal(nudges(h).length, 1, 'a restart does not nudge again');
+	assert.equal(h.linear.comments.length, 1);
+	assert.match(h.linear.comments[0].body, /\(`stale`\): the agent has shown no new output for 20 min, even after a nudge/);
+	assert.match(h.linear.comments[0].body, /✻ Thinking… \(esc to interrupt\)/);
+	assert.deepEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+	assert.equal(claimsOnDisk(h)[0].status, 'stale');
+	assert.equal(h.sent.filter((message) => message.type === 'dispatch').length, 1, 'a stale run keeps its slot');
+
+	await restarted.handle({ type: 'status', epicId: epic.id, status: 'working', tail: 'Running tests' });
+	assert.equal(claimsOnDisk(h)[0].status, 'running');
+});
+
+test('flags a run past the wall-clock cap once, whatever its state, across restarts', async (t) => {
+	const h = await harness(t);
+	const { epic, dispatcher } = await startedRun(h, 'UNB-152', 'Endless');
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'idle', tail: 'Which database?' });
+	h.now += 180_000;
+	await dispatcher.tick();
+	assert.equal(claimsOnDisk(h)[0].status, 'awaitingInput');
+
+	h.now = claimsOnDisk(h)[0].claimedAt + 5_399_000;
+	await dispatcher.tick();
+	assert.equal(h.linear.comments.length, 1, 'still under the cap');
+
+	h.now += 1_000;
+	await dispatcher.tick();
+	const restarted = await h.dispatcher();
+	restarted.start();
+	await restarted.tick();
+
+	assert.equal(h.linear.comments.length, 2);
+	assert.match(h.linear.comments[1].body, /\(`awaitingInput`\): the run has been going for 90 min, over the 90 min cap/);
+	assert.match(h.linear.comments[1].body, /Which database\?/);
+	assert.equal(claimsOnDisk(h)[0].status, 'awaitingInput');
+});
+
+test('asks the question on the epic once and types the user\'s reply into the pane exactly once', async (t) => {
+	const h = await harness(t);
+	const { epic, dispatcher, job, run } = await startedRun(h, 'UNB-153', 'Needs a decision');
+	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'blocked', tail: 'Use Postgres or SQLite?' });
+	h.now += 180_000;
+	await dispatcher.tick();
+
+	const [question] = h.linear.comments;
+	assert.match(question.body, /Use Postgres or SQLite\?/);
+	const unrelated = h.linear.addComment(epic.id, 'An older note');
+	h.linear.addComment(epic.id, 'Not an answer', unrelated.id);
+	h.linear.addComment(epic.id, '**herdr-linear:** a note from the dispatcher', question.id);
+	const answer = h.linear.addComment(epic.id, 'SQLite.\nKeep it in one file.', question.id);
+
+	await dispatcher.tick();
+	const restarted = await h.dispatcher();
+	restarted.start();
+	await restarted.tick();
+
+	assert.deepEqual(
+		h.sent.filter((message) => message.type === 'reply'),
+		[{ type: 'reply', job, run, commentId: answer.id, text: 'SQLite.\nKeep it in one file.' }],
+	);
+	assert.deepEqual(answer.reactions, ['white_check_mark']);
+	assert.equal(h.linear.comments.filter((comment) => comment.body.includes('Use Postgres or SQLite?')).length, 1, 'the question is asked once');
+
+	await restarted.handle({ type: 'replyFailed', epicId: epic.id, commentId: answer.id, error: 'herdr agent_blocked: agent is blocked' });
+	assert.equal(h.linear.comments.at(-1)?.parentId, answer.id);
+	assert.match(h.linear.comments.at(-1)!.body, /couldn't type this reply into the agent's pane: herdr agent_blocked/);
+
+	await restarted.handle({ type: 'status', epicId: epic.id, status: 'working', tail: 'Using SQLite' });
+	assert.equal(claimsOnDisk(h)[0].status, 'running');
+	assert.ok(!('questionCommentId' in claimsOnDisk(h)[0]));
 });
 
 test('flags a run that vanished without a PR as an error straight away and frees its slot', async (t) => {
@@ -353,7 +592,8 @@ async function endedRun(h: Awaited<ReturnType<typeof harness>>, identifier: stri
 	await dispatcher.tick();
 	await dispatcher.handle({ type: 'started', epicId: epic.id, run: runFor(identifier) });
 	await dispatcher.handle({ type: 'status', epicId: epic.id, status: 'done', tail: 'Opened the PR.' });
-	h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/120', state: 'OPEN' };
+	await dispatcher.handle({ type: 'result', epicId: epic.id, result: result() });
+	h.pullRequest = { number: 120, url: 'https://github.com/marioparaschiv/unbound/pull/120', state: 'OPEN' };
 	await dispatcher.tick();
 	assert.equal(h.linear.stateName(epic.id), 'To Review');
 
@@ -401,7 +641,7 @@ test('a merged or closed PR triggers cleanup too', async (t) => {
 	for (const state of ['MERGED', 'CLOSED'] as const) {
 		const h = await harness(t);
 		const { job, run } = await endedRun(h, 'UNB-121');
-		h.pullRequest = { url: 'https://github.com/marioparaschiv/unbound/pull/121', state };
+		h.pullRequest = { number: 121, url: 'https://github.com/marioparaschiv/unbound/pull/121', state };
 
 		await (await h.dispatcher()).tick();
 

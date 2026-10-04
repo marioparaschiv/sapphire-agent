@@ -55,13 +55,15 @@ sh ~/herdr-linear/scripts/ctl.sh status   # paused?, service state, claims.json
 | `team X has no workflow state "..."; skipping it until it does` | Add the named states to that team in Linear (or change `states` in config). Picked up on the next tick, but the log line is printed only once per process and nothing is logged when it recovers. |
 | `team X not found in Linear` | Config key must equal the team's exact name. |
 | Service crash-loops on startup | `journalctl` shows the reason: key file missing/empty/mode (`chmod 600 ~/.config/herdr-linear/linear-key`), invalid config field, missing env var. |
-| Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` claim or a run still `working` after its PR is up? Team skipped? |
+| Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` claim or a run still `working` or without a result file after its PR is up? Team skipped? |
 | Epic has `agent-stuck` | Read the epic comment. Retry rules: `claims-and-lifecycle.md`. |
+| PR is up but the epic stays in Implementing | The agent wrote no result file yet. It is flagged `awaitingInput` once quiet. |
+| `poll failed: ...` from `gh api` | Posting the result failed; it retries every tick without double-posting. A flag whose `line` is outside the diff makes the review fail every time (HTTP 422): post the findings by hand and move the epic to To Review, which ends the run. |
 
 Retry quick reference:
 
 - `error`, never started: fix the cause, remove `agent-stuck`.
-- `awaitingInput`: answer the agent in its tab. To start over (also for `error`): move the epic to Ready and remove the label.
+- `awaitingInput`: reply to the question comment on the epic (typed into the pane), or answer in its tab. To start over (also for `error` and `stale`): move the epic to Ready and remove the label.
 
 ## Don't
 

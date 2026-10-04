@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { ClaimStore } from './claims.ts';
 import { loadConfig } from './config.ts';
 import { Dispatcher } from './dispatcher.ts';
-import { findPullRequest } from './github.ts';
+import { GitHub } from './github.ts';
 import { Herdr } from './herdr.ts';
 import { LinearClient } from './linear.ts';
 import { dispatcherMessageSchema, workerMessageSchema } from './protocol.ts';
@@ -60,7 +60,7 @@ const dispatcher: Dispatcher = new Dispatcher({
 	linear: new LinearClient({ apiKey: await readApiKey(env.HERDR_LINEAR_KEY_FILE) }),
 	claims: await ClaimStore.open(join(env.HERDR_PLUGIN_STATE_DIR, 'claims.json')),
 	send: (message) => queueMicrotask(() => void worker.handle(dispatcherMessageSchema.parse(message))),
-	findPullRequest,
+	github: new GitHub(),
 	isPaused: () => access(pausedPath).then(
 		() => true,
 		() => false,

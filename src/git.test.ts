@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { parseGithubRepo, prepareWorktree, removeWorktree, unsavedWork } from './git.ts';
+import { parseGithubRepo, prepareWorktree, readResultFile, removeWorktree, resultFilePath, unsavedWork } from './git.ts';
 
 const git = (cwd: string, ...args: string[]) =>
 	execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], {
@@ -144,4 +144,26 @@ test('reads owner/repo from GitHub remotes', () => {
 	assert.equal(parseGithubRepo('https://github.com/marioparaschiv/hivemind.ts'), 'marioparaschiv/hivemind.ts');
 	assert.equal(parseGithubRepo('git@github.com:unbound-app/loader-ios.git'), 'unbound-app/loader-ios');
 	assert.throws(() => parseGithubRepo('https://gitlab.com/someone/thing.git'), /not a GitHub repository/);
+});
+
+test('reads the result file from the worktree\'s git dir, where it can never be committed', async (t) => {
+	const { repo, worktrees } = repos(t);
+	const path = await prepareWorktree(repo, 'mario/unb-14', worktrees);
+	const resultPath = await resultFilePath(path);
+
+	assert.equal(resultPath, join(repo, '.git', 'worktrees', 'mario-unb-14', 'herdr-result.json'));
+	assert.equal(await readResultFile(path), undefined);
+
+	writeFileSync(resultPath, JSON.stringify({ summary: 'Done.', flags: [] }));
+	const missingReplies = await readResultFile(path);
+	assert.ok(missingReplies && !missingReplies.ok && /replies/.test(missingReplies.error), JSON.stringify(missingReplies));
+
+	writeFileSync(resultPath, '{ "summary": ');
+	const notJson = await readResultFile(path);
+	assert.ok(notJson && !notJson.ok && notJson.error.startsWith('not JSON'), JSON.stringify(notJson));
+
+	const result = { summary: 'Done.', replies: [], flags: [{ path: 'src/a.ts', line: 3, body: 'Rename this.' }] };
+	writeFileSync(resultPath, JSON.stringify(result));
+	assert.deepEqual(await readResultFile(path), { ok: true, result });
+	assert.equal(git(path, 'status', '--porcelain', '--ignored'), '');
 });

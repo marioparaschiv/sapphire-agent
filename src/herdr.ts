@@ -163,6 +163,16 @@ export class Herdr {
 		await this.exec(['agent', 'start', name, '--kind', 'claude', '--pane', paneId, '--timeout', String(timeoutMs), '--', prompt]);
 	}
 
+	async sendKeys(paneId: string, keys: string[]) {
+		await this.exec(['agent', 'send-keys', paneId, ...keys]);
+	}
+
+	// herdr rejects newlines in a prompt, so lines are joined with spaces. It also rejects a prompt while the agent
+	// sits at an approval or question dialog (agent_blocked).
+	async prompt(paneId: string, text: string) {
+		await this.exec(['agent', 'prompt', paneId, text.trim().replace(/\s*[\r\n]+\s*/g, ' ')]);
+	}
+
 	// Runs of blank lines are squeezed to one; a TUI pads its screen with them.
 	async readPane(paneId: string, lines: number) {
 		const text = await this.exec(['pane', 'read', paneId, '--source', 'recent-unwrapped', '--lines', String(lines)]);

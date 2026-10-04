@@ -23,6 +23,12 @@ export const configSchema = z.strictObject({
 	// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
 	// one at a time, so this covers waiting behind other starts as well as the fetch and herdr's 30 s start wait.
 	startTimeoutSeconds: z.number().int().min(60).default(300),
+	// How long herdr may report working while the pane tail stays the same before the agent is nudged.
+	staleAfterSeconds: z.number().int().min(60).default(600),
+	// How long after the nudge the tail may stay the same before the epic is flagged as stale.
+	nudgeGraceSeconds: z.number().int().min(60).default(600),
+	// How long a run may go, in any state, before the epic is flagged once.
+	maxRunSeconds: z.number().int().min(600).default(5400),
 	worktreesDirectory: pathSchema.default(join(homedir(), '.herdr/worktrees')),
 	workspaceLabel: z.string().min(1).default('agents'),
 	states: z

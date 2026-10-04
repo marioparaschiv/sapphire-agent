@@ -5,7 +5,7 @@ How the worker starts a Claude Code run (worktree, trust, tab, `herdr agent star
 ## Dispatch sequence (`worker.ts:107-138`)
 
 1. `prepareWorktree(repoPath, branch, worktreesDirectory)`.
-2. `githubRepo(repoPath)`: `owner/repo` from `origin` (must be GitHub).
+2. `githubRepo(repoPath)`: `owner/repo` from `origin` (must be GitHub). Delete a leftover result file from an earlier run.
 3. `trustFolder(~/.claude.json, worktree)`.
 4. `openTab(tabLabel, worktree)`.
 5. `herdr agent start`, then confirm with `herdr agent get`.
@@ -76,6 +76,12 @@ Command: `herdr agent start <identifier lowercased> --kind claude --pane <pane> 
 - Events only trigger a reconcile; their payload is ignored.
 - Events are not durable and closing a pane emits nothing (`pane.closed` is subscribed but not relied on), so every tracked run is also reconciled every `pollSeconds`.
 - On socket close the worker resubscribes after `pollSeconds`.
-- Reconcile: pane gone gives `finished vanished`; pane alive but no Claude gives `finished exited` with tail; status change gives `status` (tail only when not `working`).
+- Reconcile: pane gone gives `finished vanished`; pane alive but no Claude gives `finished exited` with tail. Otherwise the tail is read every time and a status or tail change gives `status`, so the dispatcher can see a `working` agent's output stop.
+- Result file: read when the agent is not `working`, and before `finished`. Reported once per tracked run as `result` or `invalidResult`.
+
+## Nudge and reply
+
+- `nudge`: `herdr agent send-keys <pane> esc`, then `herdr agent prompt <pane> continue`. Errors are logged; the dispatcher flags `stale` after the grace anyway.
+- `reply`: `herdr agent prompt <pane> <text>`. `Herdr.prompt` joins lines with spaces, since herdr rejects newlines. On error (`agent_blocked` while a dialog is open) the worker sends `replyFailed`.
 
 Tracking lives in memory only; after a restart the dispatcher re-sends `watch` (see `claims-and-lifecycle.md`).

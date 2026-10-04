@@ -28,6 +28,15 @@ export const agentStatusSchema = z.enum(['working', 'idle', 'done', 'blocked', '
 
 export type AgentStatus = z.infer<typeof agentStatusSchema>;
 
+// What the agent writes as the last step of a run. A valid file is the run's completion signal.
+export const resultFileSchema = z.strictObject({
+	summary: z.string().min(1),
+	replies: z.array(z.strictObject({ threadId: z.string().min(1), body: z.string().min(1) })),
+	flags: z.array(z.strictObject({ path: z.string().min(1), line: z.number().int().min(1), body: z.string().min(1) })),
+});
+
+export type ResultFile = z.infer<typeof resultFileSchema>;
+
 export const dispatcherMessageSchema = z.discriminatedUnion('type', [
 	z.object({ type: z.literal('dispatch'), job: jobSchema }),
 	// Re-attach to a run after a dispatcher restart. Without a run, the dispatch was interrupted before
@@ -38,6 +47,10 @@ export const dispatcherMessageSchema = z.discriminatedUnion('type', [
 	// The epic shipped or its PR was merged or closed: close the tab, then remove the worktree and local branch
 	// unless they hold work that is not on origin.
 	z.object({ type: z.literal('cleanup'), job: jobSchema, run: runSchema }),
+	// The agent shows no progress: press Esc, then prompt it to continue.
+	z.object({ type: z.literal('nudge'), job: jobSchema, run: runSchema }),
+	// The user answered the agent's question on Linear: type the answer into the pane.
+	z.object({ type: z.literal('reply'), job: jobSchema, run: runSchema, commentId: z.string(), text: z.string() }),
 ]);
 
 export type DispatcherMessage = z.infer<typeof dispatcherMessageSchema>;
@@ -54,6 +67,9 @@ export const workerMessageSchema = z.discriminatedUnion('type', [
 	z.object({ type: z.literal('failed'), epicId: z.string(), error: z.string(), tail: z.string().optional() }),
 	z.object({ type: z.literal('cleaned'), epicId: z.string() }),
 	z.object({ type: z.literal('kept'), epicId: z.string(), worktreePath: z.string(), reason: z.string() }),
+	z.object({ type: z.literal('result'), epicId: z.string(), result: resultFileSchema }),
+	z.object({ type: z.literal('invalidResult'), epicId: z.string(), error: z.string() }),
+	z.object({ type: z.literal('replyFailed'), epicId: z.string(), commentId: z.string(), error: z.string() }),
 ]);
 
 export type WorkerMessage = z.infer<typeof workerMessageSchema>;

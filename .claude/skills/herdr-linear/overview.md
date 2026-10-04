@@ -12,10 +12,10 @@ A dispatcher (systemd user service, `node src/main.ts`) polls Linear every `poll
 2. Dispatcher claims it (`claims.json`, status `claimed`) and sends `dispatch` to the worker.
 3. Worker prepares the worktree, trusts it for Claude, opens a tab, starts Claude, replies `started`.
 4. Dispatcher moves the epic to **Implementing** (`dispatcher.ts:94-96`).
-5. Agent works through sub-issues, moves the epic to **In Review** when it starts `/sreview`, then runs `/pr`.
-6. Dispatcher sees an open or merged PR via `gh` and, once the agent stops working, moves the epic to **To Review**, removes `agent-stuck` if present, marks the claim `ended` and has the worker close the tab.
+5. Agent works through sub-issues, moves the epic to **In Review** when it starts `/sreview`, runs `/pr`, reviews its own diff, then writes its result file.
+6. Worker reads the result file once the agent stops. Dispatcher posts the summary as a PR comment and the self-review flags as one review (both shown as Claude), moves the epic to **To Review**, removes `agent-stuck` if present, marks the claim `ended` and has the worker close the tab.
 
-If the agent stops without a PR, see `claims-and-lifecycle.md`.
+If the agent stops without a result file, hangs, or asks a question, see `claims-and-lifecycle.md`.
 
 ## Columns and who moves what
 
@@ -27,7 +27,7 @@ Epic columns:
 | Ready For Agent | `states.ready` | Human. Also where an epic whose run never started stays until retried. |
 | Implementing | `states.implementing` | Plugin, after the worker confirms Claude started. |
 | In Review | `states.inReview` | Agent, when it starts `/sreview` (the orchestrate skill's rule). |
-| To Review | `states.toReview` | Plugin, when a PR for the branch is open or merged. |
+| To Review | `states.toReview` | Plugin, once the result file is posted to the open or merged PR. |
 | Shipped | `states.shipped` | Not this code. Linear's GitHub integration on merge. |
 
 Linear's GitHub automation (team settings) must be: PR opened → To Review, merged → Shipped, branch/start → no action. A "start" rule moving to In Progress would pull the epic back out of To Review.
@@ -54,6 +54,6 @@ Built in `buildJob` (`src/dispatcher.ts`), one line:
 The workflow lives in the orchestrate skill (`~/.claude/skills/orchestrate/SKILL.md`), sections **Linear epics** and **Autonomous runs**:
 
 - Move sub-issues to Implementing / Done and the epic to In Review at `/sreview`.
-- `autonomously` means: commit each verified slice, run `/pr` after `/sreview`, comment a question on the epic and stop if blocked.
+- `autonomously` means: commit each verified slice, run `/pr` after `/sreview`, self-review and push fixes, write the result file, never post to GitHub; comment a question on the epic and stop if blocked.
 
 Changing the column names means editing that skill as well as `states` in the config.

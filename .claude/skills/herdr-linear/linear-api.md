@@ -1,6 +1,6 @@
 # Linear API and GitHub
 
-The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states and labels are resolved, and how PRs are detected (`src/github.ts`).
+The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states and labels are resolved, and how the dispatcher reads and writes GitHub (`src/github.ts`).
 
 ## Client basics
 
@@ -14,9 +14,10 @@ The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states a
 | Method | Operation | Used for |
 | --- | --- | --- |
 | `teams(names)` | `query Teams` | Teams by name with all workflow states. Every tick. |
-| `poll(readyStateIds, claimedIds)` | `query Poll` | Two aliased `issues` lists in one request. Every tick. |
+| `poll(readyStateIds, claimedIds, questionIds)` | `query Poll` | Two aliased `issues` lists and the replies to question comments in one request. Every tick. |
 | `moveIssue(id, stateId)` | `issueUpdate` | Move epic to Implementing or To Review. |
-| `comment(id, body)` | `commentCreate` | Flag comments (`awaitingInput`, `error`) and kept-worktree comments. |
+| `comment(id, body, parentId?)` | `commentCreate` | Flag comments, kept-worktree comments, thread replies. Returns the comment ID. |
+| `react(commentId, emoji)` | `reactionCreate` | Mark a reply as delivered (`white_check_mark`). |
 | `addLabel(id, teamId, name)` | `issueAddLabel` | Add `agent-stuck`. |
 | `removeLabel(id, labelId)` | `issueRemoveLabel` | Remove `agent-stuck` when the PR is up. |
 | `labelId` (private) | `query Labels`, `issueLabelCreate` | Find or create the label ID. |
@@ -26,6 +27,7 @@ The GraphQL operations the dispatcher sends (`src/linear.ts`), how team states a
 - `ready`: `issues(first: 50)` with state in the ready state IDs and `parent: { null: true }`.
 - `claimed`: `issues(first: 250)` with `id in claimedIds`. `poll` throws when there are more than 250 claims, because a truncated page would release claims whose epics still exist.
 - Epic fields: id, identifier, title, url, `branchName`, `sortOrder`, team, state, labels (with parent group name), `children(first: 1)` (only to know it has sub-issues).
+- `replies`: `comments(first: 250)` with `parent.id in questionIds`: id, body, createdAt, parent id, reaction emojis. An empty list matches nothing.
 - No pagination: more than 50 ready epics are cut off.
 
 ## State resolution (`dispatcher.ts:174-210`)
@@ -50,13 +52,27 @@ Repo labels (`resolveRepo`, `config.ts:67-104`), read from the epic's labels:
 - None: the team's `repo`. One: `<labelReposDirectory>/<name>`.
 - Errors (claim `error` + comment): more than one repo label, team has no `labelReposDirectory`, or name not matching `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
-## PR detection (`src/github.ts`)
+## GitHub (`src/github.ts`)
 
-- `gh pr list --repo <owner/repo> --head <branch> --state all --json url,state`.
+`GitHub` wraps the `gh` CLI. The `gh` runner is injected, so tests fake only the process boundary and assert the exact args and JSON bodies.
+
+PR detection:
+
+- `gh pr list --repo <owner/repo> --head <branch> --state all --json number,url,state`.
 - Prefers an `OPEN` PR, else a `MERGED` one, else a `CLOSED` one. A `CLOSED` PR does not hand a run over; it only triggers worktree cleanup.
-- Called once per tick for each claim in Implementing or In Review that has a `run`.
+- Called when a run with a result file finishes, and each tick for `ended` / `kept` claims not in Shipped.
 - Needs `gh` on the service `PATH` and authenticated for the service user. A `gh` failure aborts the tick.
 - `owner/repo` comes from the repo's `origin` URL (`git.ts:23-35`), stored in `run.githubRepo`.
+
+Writes (dispatcher only; the agent never posts to GitHub):
+
+| Method | Call |
+| --- | --- |
+| `comment(repo, number, body)` | `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. |
+| `review(repo, number, flags)` | `gh api --method POST repos/<repo>/pulls/<n>/reviews --input -` with `{ event: "COMMENT", body, comments: [{ path, line, side: "RIGHT", body }] }`. |
+
+- Every body ends with `ON_BEHALF_OF_CLAUDE`, the Linear `onBehalfOf` extension block. Linear shows such comments as written by Claude; it is the only way to tell agent comments from the user's, since both use one GitHub account.
+- A COMMENT review on your own PR is allowed. Requesting review, approving or requesting changes is not, which is why the user's review is not re-requested.
 
 ## Branch name
 

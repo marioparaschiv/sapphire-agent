@@ -1,4 +1,5 @@
-import { githubRepo, prepareWorktree, removeWorktree, unsavedWork, worktreePath } from './git.ts';
+import { rm } from 'node:fs/promises';
+import { githubRepo, prepareWorktree, readResultFile, removeWorktree, resultFilePath, unsavedWork, worktreePath } from './git.ts';
 import { type Herdr, HerdrError } from './herdr.ts';
 import type { AgentStatus, DispatcherMessage, Job, Run, Send, WorkerMessage } from './protocol.ts';
 import { trustFolder } from './trust.ts';
@@ -13,7 +14,7 @@ export type WorkerOptions = {
 	log: (line: string) => void;
 };
 
-type Tracked = { run: Run; status?: AgentStatus; unsubscribe?: () => void };
+type Tracked = { run: Run; status?: AgentStatus; tail?: string; resultReported?: boolean; unsubscribe?: () => void };
 
 const TAIL_LINES = 40;
 const START_TIMEOUT_MS = 30_000;
@@ -75,6 +76,16 @@ export class Worker {
 				return this.serial(() => this.cleanup(job, message.run)).catch((error: unknown) =>
 					this.logError(`cleaning up ${job.identifier}`, error),
 				);
+
+			case 'nudge':
+				return this.nudge(job, message.run).catch((error: unknown) => this.logError(`nudging ${job.identifier}`, error));
+
+			case 'reply':
+				return this.options.herdr.prompt(message.run.paneId, message.text).then(
+					() => this.options.log(`${job.identifier}: typed reply ${message.commentId} into ${message.run.paneId}`),
+					(error: unknown) =>
+						this.options.send({ type: 'replyFailed', epicId: job.epicId, commentId: message.commentId, error: errorMessage(error) }),
+				);
 		}
 	}
 
@@ -108,6 +119,9 @@ export class Worker {
 		const { herdr, worktreesDirectory, claudeConfigPath, send, log } = this.options;
 		const path = await prepareWorktree(job.repoPath, job.branch, worktreesDirectory);
 		const repo = await githubRepo(job.repoPath);
+
+		// A reused worktree may still hold the result of an earlier run.
+		await rm(await resultFilePath(path), { force: true });
 
 		await trustFolder(claudeConfigPath, path);
 
@@ -193,6 +207,14 @@ export class Worker {
 		log(`${job.identifier}: closed tab ${run.tabId}`);
 	}
 
+	private async nudge(job: Job, run: Run) {
+		const { herdr, log } = this.options;
+
+		await herdr.sendKeys(run.paneId, ['esc']);
+		await herdr.prompt(run.paneId, 'continue');
+		log(`${job.identifier}: nudged ${run.paneId}`);
+	}
+
 	private async cleanup(job: Job, run: Run) {
 		const { send, log } = this.options;
 
@@ -270,6 +292,7 @@ export class Worker {
 
 		if (!pane || agent?.agent !== 'claude') {
 			this.untrack(epicId);
+			await this.reportResult(epicId, tracked);
 			send({
 				type: 'finished',
 				epicId,
@@ -280,13 +303,35 @@ export class Worker {
 			return;
 		}
 
-		if (agent.agent_status === tracked.status) {
+		// The tail is sent while working too: the dispatcher tells a hung agent by its tail not changing.
+		const tail = await herdr.readPane(paneId, TAIL_LINES);
+
+		if (agent.agent_status !== tracked.status || tail !== tracked.tail) {
+			tracked.status = agent.agent_status;
+			tracked.tail = tail;
+			send({ type: 'status', epicId, status: agent.agent_status, tail });
+		}
+
+		// The agent writes the file as its last step, so it is only read once the agent stops; never half-written.
+		if (agent.agent_status !== 'working') {
+			await this.reportResult(epicId, tracked);
+		}
+	}
+
+	private async reportResult(epicId: string, tracked: Tracked) {
+		if (tracked.resultReported) {
 			return;
 		}
 
-		tracked.status = agent.agent_status;
-		const tail = agent.agent_status === 'working' ? '' : await herdr.readPane(paneId, TAIL_LINES);
+		const read = await readResultFile(tracked.run.worktreePath);
 
-		send({ type: 'status', epicId, status: agent.agent_status, tail });
+		if (!read) {
+			return;
+		}
+
+		tracked.resultReported = true;
+		this.options.send(
+			read.ok ? { type: 'result', epicId, result: read.result } : { type: 'invalidResult', epicId, error: read.error },
+		);
 	}
 }

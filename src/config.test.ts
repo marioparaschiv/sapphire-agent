@@ -19,6 +19,9 @@ test('fills defaults and expands ~ in repo paths', async (t) => {
 
 	assert.equal(config.pollSeconds, 30);
 	assert.equal(config.maxInFlight, 1);
+	assert.equal(config.staleAfterSeconds, 600);
+	assert.equal(config.nudgeGraceSeconds, 600);
+	assert.equal(config.maxRunSeconds, 5400);
 	assert.equal(config.states.ready, 'Ready For Agent');
 	assert.equal(config.labels.stuck, 'agent-stuck');
 	assert.equal(config.teams.Telecord.repo, join(homedir(), 'telecord'));
@@ -30,6 +33,7 @@ test('rejects an invalid config with the offending field named', async (t) => {
 		load(t, JSON.stringify({ pollSeconds: 2, teams: { Unbound: { repo: '~/unbound' } } })),
 		/invalid config .*config\.json:[\s\S]*pollSeconds/,
 	);
+	await assert.rejects(load(t, JSON.stringify({ staleAfterSeconds: 10, teams: { Unbound: { repo: '~/unbound' } } })), /staleAfterSeconds/);
 	await assert.rejects(load(t, JSON.stringify({ teams: {} })), /no teams configured/);
 	await assert.rejects(load(t, JSON.stringify({ teams: { Unbound: { repo: '~/unbound', repos: '~/x' } } })), /repos/);
 	await assert.rejects(load(t, JSON.stringify({ teams: { Unbound: { repo: '~/unbound' } }, maxInflight: 2 })), /maxInflight/);

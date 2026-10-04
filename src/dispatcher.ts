@@ -1,7 +1,7 @@
 import type { Claim, ClaimStore } from './claims.ts';
 import { type Config, resolveRepo, type StateRole } from './config.ts';
-import type { PullRequest } from './github.ts';
-import type { Epic, LinearClient, LinearTeam } from './linear.ts';
+import type { GitHub } from './github.ts';
+import type { Epic, LinearClient, LinearTeam, Reply } from './linear.ts';
 import type { DispatcherMessage, Job, Run, Send, WorkerMessage } from './protocol.ts';
 
 export type DispatcherOptions = {
@@ -9,7 +9,7 @@ export type DispatcherOptions = {
 	linear: LinearClient;
 	claims: ClaimStore;
 	send: Send<DispatcherMessage>;
-	findPullRequest: (githubRepo: string, branch: string) => Promise<PullRequest | undefined>;
+	github: GitHub;
 	isPaused: () => Promise<boolean>;
 	now: () => number;
 	log: (line: string) => void;
@@ -20,6 +20,11 @@ type ResolvedTeam = { team: LinearTeam; stateIds: Record<StateRole, string> };
 const QUIET_STATUSES = new Set(['idle', 'done', 'blocked']);
 // Claims whose agent may still be alive. They hold a maxInFlight slot so live Claude processes never exceed it.
 const IN_FLIGHT_STATUSES = new Set<Claim['status']>(['claimed', 'running', 'awaitingInput', 'stale']);
+// Every comment the dispatcher posts starts with this, which tells them apart from the user's: both are posted
+// with the user's API key.
+const COMMENT_MARKER = '**herdr-linear';
+// Marks a reply to a question comment as typed into the pane, so it is delivered once across restarts.
+const DELIVERED_EMOJI = 'white_check_mark';
 
 // The only component that talks to Linear. Every tick and every worker message runs one at a time, so
 // claim updates never interleave.
@@ -51,15 +56,18 @@ export class Dispatcher {
 			this.teams = await this.resolveTeams();
 			const { claims, linear } = this.options;
 			const readyStateIds = [...this.teams.values()].map(({ stateIds }) => stateIds.ready);
-			const { ready, claimed } = await linear.poll(
+			const { ready, claimed, replies } = await linear.poll(
 				readyStateIds,
 				claims.all().map((claim) => claim.epicId),
+				claims.all().flatMap((claim) => (claim.status === 'awaitingInput' && claim.questionCommentId ? [claim.questionCommentId] : [])),
 			);
 			const claimedById = new Map(claimed.map((epic) => [epic.id, epic]));
 
 			for (const claim of claims.all()) {
 				await this.reconcile(claim, claimedById.get(claim.epicId));
 			}
+
+			await this.deliverReplies(replies);
 
 			const paused = await this.options.isPaused();
 
@@ -101,13 +109,17 @@ export class Dispatcher {
 				case 'status': {
 					const previous = claim.agent;
 					const stillQuiet = previous && QUIET_STATUSES.has(previous.status) && QUIET_STATUSES.has(message.status);
-					const since = stillQuiet ? previous.since : now();
-					const resumed = claim.status === 'awaitingInput' && message.status === 'working';
+					const unchanged = previous && previous.status === message.status && sameOutput(previous.tail, message.tail);
+					const progressed = !stillQuiet && !unchanged;
+					const resumed =
+						(claim.status === 'awaitingInput' && message.status === 'working') || (claim.status === 'stale' && progressed);
 
 					await claims.put({
 						...claim,
 						status: resumed ? 'running' : claim.status,
-						agent: { status: message.status, since, tail: message.tail },
+						agent: { status: message.status, since: progressed || !previous ? now() : previous.since, tail: message.tail },
+						nudgedAt: progressed ? undefined : claim.nudgedAt,
+						questionCommentId: resumed ? undefined : claim.questionCommentId,
 					});
 
 					if (resumed) {
@@ -151,6 +163,44 @@ export class Dispatcher {
 					log(`${claim.identifier}: kept ${message.worktreePath}: ${message.reason}`);
 					await this.options.linear.comment(claim.epicId, keptComment(message.worktreePath, message.reason));
 					await claims.put({ ...claim, status: 'kept' });
+
+					return;
+				}
+
+				// Posting waits for the next poll, which retries it if GitHub fails.
+				// The worker reads the file again after a restart.
+				case 'result': {
+					if (claim.result) {
+						return;
+					}
+
+					if (!IN_FLIGHT_STATUSES.has(claim.status)) {
+						log(`${claim.identifier}: ignoring a result file for a ${claim.status} claim`);
+
+						return;
+					}
+
+					await claims.put({ ...claim, result: { file: message.result, posted: [] } });
+					log(`${claim.identifier}: agent wrote its result file`);
+
+					return;
+				}
+
+				case 'invalidResult': {
+					if (!IN_FLIGHT_STATUSES.has(claim.status)) {
+						return;
+					}
+
+					log(`${claim.identifier}: invalid result file: ${message.error}`);
+					await claims.put({ ...claim, status: 'error' });
+					await this.flag(claim, invalidResultComment(this.options.config, message.error));
+
+					return;
+				}
+
+				case 'replyFailed': {
+					log(`${claim.identifier}: typing reply ${message.commentId} failed: ${message.error}`);
+					await this.options.linear.comment(claim.epicId, replyFailedComment(message.error), message.commentId);
 				}
 			}
 		});
@@ -251,8 +301,10 @@ export class Dispatcher {
 	private async flag(claim: Claim, comment: string) {
 		const { linear, config } = this.options;
 
-		await linear.comment(claim.epicId, comment);
+		const commentId = await linear.comment(claim.epicId, comment);
 		await linear.addLabel(claim.epicId, claim.teamId, config.labels.stuck);
+
+		return commentId;
 	}
 
 	private async reconcile(claim: Claim, epic: Epic | undefined) {
@@ -292,6 +344,12 @@ export class Dispatcher {
 			return;
 		}
 
+		if (claim.status !== 'error' && !claim.overCap && this.options.now() - claim.claimedAt >= this.options.config.maxRunSeconds * 1000) {
+			await this.flagOverCap(claim);
+
+			return;
+		}
+
 		if (role === 'ready' && claim.status === 'running') {
 			await this.move(claim, 'implementing');
 
@@ -309,23 +367,10 @@ export class Dispatcher {
 			return;
 		}
 
-		const pullRequest = await this.options.findPullRequest(run.githubRepo, run.branch);
-
-		if (pullRequest && pullRequest.state !== 'CLOSED') {
-			if (working) {
-				return;
+		if (claim.result) {
+			if (!working) {
+				await this.finishRun(claim, claim.result, epic, job, run);
 			}
-
-			this.options.log(`${claim.identifier}: PR ${pullRequest.url} is ${pullRequest.state.toLowerCase()}`);
-			await this.move(claim, 'toReview');
-
-			const stuckLabel = this.stuckLabel(epic);
-
-			if (stuckLabel) {
-				await this.options.linear.removeLabel(claim.epicId, stuckLabel.id);
-			}
-
-			await this.endRun(claim, job, run, 'the PR is up');
 
 			return;
 		}
@@ -340,6 +385,101 @@ export class Dispatcher {
 			await this.flagRun(claim, run, agent, 'error');
 		} else if (claim.status === 'running' && this.quietTooLong(agent)) {
 			await this.flagRun(claim, run, agent, 'awaitingInput');
+		} else if (claim.status === 'running' && agent.status === 'working') {
+			await this.checkStale(claim, job, run, agent);
+		}
+	}
+
+	// Posts the result file to the PR, then hands the epic over. Each posted part is saved straight away, so a
+	// restart mid-way carries on without posting anything twice.
+	private async finishRun(claim: Claim, result: ClaimResult, epic: Epic, job: Job, run: Run) {
+		const { github, claims, log } = this.options;
+		const pullRequest = await github.findPullRequest(run.githubRepo, run.branch);
+
+		if (!pullRequest || pullRequest.state === 'CLOSED') {
+			log(`${claim.identifier}: result file written but no open PR for ${run.branch}`);
+			await claims.put({ ...claim, status: 'error' });
+			await this.flag(claim, noPullRequestComment(this.options.config, run.branch));
+
+			return;
+		}
+
+		let posted = result.posted;
+		const save = async (part: (typeof posted)[number]) => {
+			posted = [...posted, part];
+			await claims.put({ ...claim, result: { ...result, posted } });
+		};
+
+		if (!posted.includes('summary')) {
+			await github.comment(run.githubRepo, pullRequest.number, result.file.summary);
+			await save('summary');
+		}
+
+		if (result.file.flags.length > 0 && !posted.includes('review')) {
+			await github.review(run.githubRepo, pullRequest.number, result.file.flags);
+			await save('review');
+		}
+
+		if (result.file.replies.length > 0) {
+			log(`${claim.identifier}: the result file has ${result.file.replies.length} thread replies; posting them is not supported yet`);
+		}
+
+		log(`${claim.identifier}: posted the result to ${pullRequest.url}`);
+		await this.move(claim, 'toReview');
+
+		const stuckLabel = this.stuckLabel(epic);
+
+		if (stuckLabel) {
+			await this.options.linear.removeLabel(claim.epicId, stuckLabel.id);
+		}
+
+		await this.endRun({ ...claim, result: { ...result, posted } }, job, run, 'the agent finished');
+	}
+
+	// Nudges once per stale episode; the status handler clears nudgedAt as soon as the pane changes.
+	private async checkStale(claim: Claim, job: Job, run: Run, agent: Agent) {
+		const { config, claims, now, send, log } = this.options;
+
+		if (claim.nudgedAt === undefined) {
+			if (now() - agent.since >= config.staleAfterSeconds * 1000) {
+				log(`${claim.identifier}: no new output for ${config.staleAfterSeconds} s; nudging the agent`);
+				await claims.put({ ...claim, nudgedAt: now() });
+				send({ type: 'nudge', job, run });
+			}
+
+			return;
+		}
+
+		if (now() - claim.nudgedAt >= config.nudgeGraceSeconds * 1000) {
+			await this.flagRun(claim, run, agent, 'stale');
+		}
+	}
+
+	private async flagOverCap(claim: Claim) {
+		const { config, claims, now, log } = this.options;
+
+		log(`${claim.identifier}: running for over ${config.maxRunSeconds} s; flagging it`);
+		await this.flag(claim, overCapComment(config, claim, now()));
+		await claims.put({ ...claim, overCap: true });
+	}
+
+	// Types each new reply to a question comment into its pane. The reaction goes on first: a reply is never
+	// typed twice, and if typing fails the worker says so and the user is told in the thread.
+	private async deliverReplies(replies: Reply[]) {
+		const { claims, linear, send, log } = this.options;
+		const sorted = replies.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+		for (const reply of sorted) {
+			const claim = claims.all().find((candidate) => candidate.questionCommentId === reply.parent.id);
+			const delivered = reply.reactions.some((reaction) => reaction.emoji === DELIVERED_EMOJI);
+
+			if (!claim?.job || !claim.run || claim.status !== 'awaitingInput' || delivered || reply.body.startsWith(COMMENT_MARKER)) {
+				continue;
+			}
+
+			await linear.react(reply.id, DELIVERED_EMOJI);
+			send({ type: 'reply', job: claim.job, run: claim.run, commentId: reply.id, text: reply.body });
+			log(`${claim.identifier}: sent reply ${reply.id} to the agent`);
 		}
 	}
 
@@ -356,7 +496,7 @@ export class Dispatcher {
 	// Sent every poll until the worker reports the worktree removed, so a kept worktree goes once its work is pushed.
 	private async checkCleanup(job: Job, run: Run, role: StateRole | undefined) {
 		if (role !== 'shipped') {
-			const pullRequest = await this.options.findPullRequest(run.githubRepo, run.branch);
+			const pullRequest = await this.options.github.findPullRequest(run.githubRepo, run.branch);
 
 			if (pullRequest?.state !== 'MERGED' && pullRequest?.state !== 'CLOSED') {
 				return;
@@ -366,10 +506,10 @@ export class Dispatcher {
 		this.options.send({ type: 'cleanup', job, run });
 	}
 
-	private async flagRun(claim: Claim, run: Run, agent: Agent, status: 'awaitingInput' | 'error') {
-		this.options.log(`${claim.identifier}: agent ${agent.status} without a PR; flagging it as ${status}`);
-		await this.flag(claim, runComment(this.options.config, status, claim, agent, run, this.options.now()));
-		await this.options.claims.put({ ...claim, status });
+	private async flagRun(claim: Claim, run: Run, agent: Agent, status: FlaggedStatus) {
+		this.options.log(`${claim.identifier}: agent ${agent.status} without a result file; flagging it as ${status}`);
+		const commentId = await this.flag(claim, runComment(this.options.config, status, claim, agent, run, this.options.now()));
+		await this.options.claims.put({ ...claim, status, questionCommentId: status === 'awaitingInput' ? commentId : undefined });
 	}
 
 	private quietTooLong(agent: Agent) {
@@ -436,9 +576,19 @@ export function buildJob(epic: Epic, repoPath: string): Job {
 	};
 }
 
+// Claude's spinner glyph, its elapsed timer and the status line's counters tick even while a turn hangs,
+// so they are not progress.
+const withoutTickers = (tail: string) => tail.replace(/[\d·✢✳✶✻✽]/g, '');
+
+const sameOutput = (a: string, b: string) => withoutTickers(a) === withoutTickers(b);
+
 const codeBlock = (text: string) => `\`\`\`\n${text.replaceAll('```', "'''")}\n\`\`\``;
 
 type Agent = NonNullable<Claim['agent']>;
+
+type ClaimResult = NonNullable<Claim['result']>;
+
+type FlaggedStatus = 'awaitingInput' | 'stale' | 'error';
 
 function describeStop(agent: Agent, now: number) {
 	const minutes = Math.round((now - agent.since) / 60_000);
@@ -450,6 +600,8 @@ function describeStop(agent: Agent, now: number) {
 			return `finished its turn ${minutes} min ago`;
 		case 'blocked':
 			return `has been waiting for input for ${minutes} min`;
+		case 'working':
+			return `has shown no new output for ${minutes} min, even after a nudge`;
 		case 'exited':
 			return 'exited';
 		case 'vanished':
@@ -459,14 +611,17 @@ function describeStop(agent: Agent, now: number) {
 	}
 }
 
-function runComment(config: Config, status: 'awaitingInput' | 'error', claim: Claim, agent: Agent, run: Run, now: number) {
-	const next =
-		status === 'awaitingInput'
-			? `Answer the agent in its tab and it carries on, or remove the label and move the epic back to ${config.states.ready} to start over.`
-			: `Remove the label and move the epic back to ${config.states.ready} to start over.`;
+const startOver = (config: Config) => `Remove the label and move the epic back to ${config.states.ready} to start over.`;
+
+function runComment(config: Config, status: FlaggedStatus, claim: Claim, agent: Agent, run: Run, now: number) {
+	const next = {
+		awaitingInput: `Reply to this comment and the reply is typed into the agent's pane. Or: ${startOver(config)}`,
+		stale: `Look at the agent in its tab. Or: ${startOver(config)}`,
+		error: startOver(config),
+	}[status];
 
 	return [
-		`**herdr-linear** (\`${status}\`): the agent ${describeStop(agent, now)} without opening a PR.`,
+		`**herdr-linear** (\`${status}\`): the agent ${describeStop(agent, now)} before writing its result file.`,
 		'',
 		`- Tab: \`${claim.job?.tabLabel}\` (${run.tabId}), pane ${run.paneId}`,
 		`- Worktree: \`${run.worktreePath}\` on branch \`${run.branch}\``,
@@ -475,8 +630,32 @@ function runComment(config: Config, status: 'awaitingInput' | 'error', claim: Cl
 		'',
 		codeBlock(agent.tail),
 		'',
-		`The epic stays in ${config.states.implementing} with the \`${config.labels.stuck}\` label. ${next}`,
+		`The epic keeps the \`${config.labels.stuck}\` label. ${next}`,
 	].join('\n');
+}
+
+function overCapComment(config: Config, claim: Claim, now: number) {
+	return [
+		`**herdr-linear** (\`${claim.status}\`): the run has been going for ${Math.round((now - claim.claimedAt) / 60_000)} min, over the ${config.maxRunSeconds / 60} min cap. It keeps running.`,
+		'',
+		'Last lines of the pane:',
+		'',
+		codeBlock(claim.agent?.tail ?? ''),
+		'',
+		`Look at the agent in its tab. Or: ${startOver(config)}`,
+	].join('\n');
+}
+
+function invalidResultComment(config: Config, error: string) {
+	return [`**herdr-linear** (\`error\`): the agent's result file is invalid:`, '', codeBlock(error), '', startOver(config)].join('\n');
+}
+
+function noPullRequestComment(config: Config, branch: string) {
+	return `**herdr-linear** (\`error\`): the agent wrote its result file, but branch \`${branch}\` has no open or merged PR. ${startOver(config)}`;
+}
+
+function replyFailedComment(error: string) {
+	return `**herdr-linear:** couldn't type this reply into the agent's pane: ${error}. Answer the agent in its tab.`;
 }
 
 function failureComment(config: Config, error: string, tail?: string) {

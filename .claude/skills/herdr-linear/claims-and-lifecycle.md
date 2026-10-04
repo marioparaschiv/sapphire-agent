@@ -10,35 +10,37 @@ Flagged states use Linear's agent-session names.
 | --- | --- | --- |
 | `claimed` | Saved before `dispatch` is sent; worker has not confirmed yet. | yes |
 | `running` | Worker sent `started`. | yes |
-| `awaitingInput` | Agent sat `idle`, `done` or `blocked` without a PR for `awaitingInputAfterSeconds`; epic flagged. | yes |
-| `stale` | herdr says `working` but the pane stopped changing; epic flagged. Detection not built yet. | yes |
-| `error` | Agent `exited` or `vanished`, or the run never started (worker `failed`, start timeout, repo label unresolvable); epic flagged. | no |
-| `ended` | Run over (PR up, or the epic moved on) and its tab closed. Kept only to clean the worktree up later. | no |
+| `awaitingInput` | Agent sat `idle`, `done` or `blocked` without a result file for `awaitingInputAfterSeconds`; epic flagged with the question (see Elicitation). | yes |
+| `stale` | herdr says `working`, the pane tail did not change for `staleAfterSeconds`, a nudge did not help within `nudgeGraceSeconds`; epic flagged. | yes |
+| `error` | Agent `exited` or `vanished` without a result file, invalid result file, result file but no open or merged PR, or the run never started (worker `failed`, start timeout, repo label unresolvable); epic flagged. | no |
+| `ended` | Run over (result posted to the PR, or the epic moved on) and its tab closed. Kept only to clean the worktree up later. | no |
 | `kept` | Cleanup found work not on origin; worktree kept and the epic told once. | no |
 
-The rule: a claim holds a slot while its Claude process may be alive, so live agents never exceed `maxInFlight` (`IN_FLIGHT_STATUSES`, `dispatcher.ts:22`). `error`, `ended` and `kept` are never re-dispatched by themselves; an `ended` or `kept` claim is replaced by a fresh one if its epic is put back in Ready (without `agent-stuck`).
+The rule: a claim holds a slot while its Claude process may be alive, so live agents never exceed `maxInFlight` (`IN_FLIGHT_STATUSES`). `error`, `ended` and `kept` are never re-dispatched by themselves; an `ended` or `kept` claim is replaced by a fresh one if its epic is put back in Ready (without `agent-stuck`).
 
 Older `claims.json` files load unchanged: `stuck` is read as `awaitingInput` and `failed` as `error` (zod preprocess in `claimStatusSchema`).
 
 ## `claims.json`
 
 - Path: `$HERDR_PLUGIN_STATE_DIR/claims.json`, live: `~/.local/state/herdr/plugins/herdr-linear/claims.json`.
-- Shape: `{ "claims": [ { epicId, identifier, teamId, status, claimedAt, job?, run?, agent? } ] }`.
-- `agent` is `{ status, since, tail }`; status is an `AgentStatus` or `exited` / `vanished`.
+- Shape: `{ "claims": [ { epicId, identifier, teamId, status, claimedAt, job?, run?, agent?, nudgedAt?, overCap?, questionCommentId?, result? } ] }`.
+- `agent` is `{ status, since, tail }`; status is an `AgentStatus` or `exited` / `vanished`. `since` is when the status (or, while `working`, the tail) last changed.
+- `nudgedAt`: the current stale episode's nudge. `overCap`: the cap flag was posted. `questionCommentId`: the current awaitingInput question comment. `result`: `{ file, posted }`, the result file and which of `summary` / `review` are on the PR already.
 - Written atomically (temp + fsync + rename, mode 600) on every `put` / `delete`. Missing file means no claims. Invalid file fails startup (zod).
 - A released claim is deleted. There is no history; the log has it.
 
-## One tick (`dispatcher.ts:49-75`)
+## One tick (`tick`)
 
 1. Resolve teams and state IDs (see `linear-api.md`).
-2. One `poll` query: ready epics plus every claimed epic wherever it is now.
+2. One `poll` query: ready epics, every claimed epic wherever it is now, and the replies to awaitingInput question comments.
 3. Reconcile each claim, in order (rules below).
-4. Read the pause file; log on change.
-5. If not paused, dispatch ready epics: resolved team, no claim (or an `ended` / `kept` one), no `agent-stuck` label, has sub-issues, by `sortOrder`, until `maxInFlight`.
+4. Deliver new replies (see Elicitation).
+5. Read the pause file; log on change.
+6. If not paused, dispatch ready epics: resolved team, no claim (or an `ended` / `kept` one), no `agent-stuck` label, has sub-issues, by `sortOrder`, until `maxInFlight`.
 
-An exception anywhere aborts the rest of that tick and is logged as `poll failed: ...` (`dispatcher.ts:159-165`).
+An exception anywhere aborts the rest of that tick and is logged as `poll failed: ...` (`serial`). The next tick retries.
 
-## Reconcile rules (`reconcile`, `dispatcher.ts:258`)
+## Reconcile rules (`reconcile`)
 
 First match wins. "Working" means the last agent status is `working` or not reported yet.
 
@@ -49,33 +51,64 @@ First match wins. "Working" means the last agent status is `working` or not repo
 | 3 | `claimed` | `error` + flag once the start timeout passes. Otherwise nothing. |
 | 4 | Run never started (no `job` or `run`) | Release if the epic left Ready or the label was removed. Otherwise nothing. |
 | 5 | `ended` or `kept` | Send `cleanup` if the epic is in Shipped or its PR is merged or closed. |
-| 6 | `running` and epic still in Ready | Move to Implementing (repairs a failed move). |
-| 7 | Epic not in Implementing or In Review | End the run unless working. |
-| 8 | Open or merged PR for `run.branch` | Unless working: move to To Review, remove `agent-stuck`, end the run. |
-| 9 | Agent `exited` or `vanished` (not already `error`) | Comment + label, status `error`. |
-| 10 | `running` and quiet for `awaitingInputAfterSeconds` | Comment + label, status `awaitingInput`. |
+| 6 | Not `error`, not yet `overCap`, `maxRunSeconds` since `claimedAt` | Comment + label once (`overCap`). Status unchanged. |
+| 7 | `running` and epic still in Ready | Move to Implementing (repairs a failed move). |
+| 8 | Epic not in Implementing or In Review | End the run unless working. |
+| 9 | Claim has a `result` | Unless working: post it (below), move to To Review, remove `agent-stuck`, end the run. |
+| 10 | Agent `exited` or `vanished` (not already `error`) | Comment + label, status `error`. |
+| 11 | `running` and quiet for `awaitingInputAfterSeconds` | Question comment + label, status `awaitingInput`. |
+| 12 | `running` and `working` | Stale check (below). |
 
 "End the run" = status `ended`, then send `close` (worker closes the tab). A working agent is never ended, since closing its tab would kill it mid-turn; the claim keeps its slot until it stops.
 
-Rule 8 applies to flagged claims too, so a PR opened after flagging still hands the epic over.
+An open PR alone no longer ends a run: the result file is the completion signal. Rule 9 applies to flagged claims too.
+
+## Result file
+
+- The agent writes `"$(git rev-parse --git-dir)/herdr-result.json"` as its last step (orchestrate skill). It lives in the worktree's git dir, so it is never committed. The worker deletes a leftover one when it starts a run in a reused worktree.
+- The worker reads it (`readResultFile`, `git.ts`) whenever the agent is not `working`, and before reporting `exited` / `vanished`, so it is never read half-written. It sends `result` or `invalidResult` once per tracked run.
+- `result`: saved on the claim. `invalidResult`: `error` + comment with the zod message.
+- Posting (rule 9, `finishRun`): needs an open or merged PR for the branch, else `error`. Then the summary as a PR comment, then all `flags` as one `COMMENT` review with inline comments (none when `flags` is empty). Each part is saved in `result.posted` right after it posts, so a restart or a failed `gh` call carries on without posting anything twice. A `gh` failure aborts the tick and is retried next tick.
+- `replies` are not posted yet (logged).
+- Not done: re-requesting the user's review. The PR author is the user's own account (GitHub rejects review requests from the author), and Linear's public API has no review-request mutation.
 
 ## Flagging
 
-- `idle`, `done`, `blocked`: quiet; `awaitingInput` once quiet for `awaitingInputAfterSeconds` (default 180).
+- `idle`, `done`, `blocked`: quiet; `awaitingInput` once quiet for `awaitingInputAfterSeconds` (default 180), PR or not, as long as there is no result file.
 - `exited`, `vanished`: `error` immediately, from `running`, `awaitingInput` or `stale`.
 - `unknown` and `working` never count.
 - Start timeout: a `claimed` claim not confirmed within `startTimeoutSeconds` (default 300) becomes `error` and frees its slot. After a dispatcher restart the window restarts, so the worker can adopt the run first. A late `started` still turns it into `running`; a late `failed` is only logged.
 
-`agent.since` resets on every `status` message unless both the old and new status are quiet, so `idle` to `done` keeps the timer. An `awaitingInput` claim that reports `working` goes back to `running`, but the label stays until the PR rule removes it.
+`agent.since` resets on every `status` message unless both the old and new status are quiet (so `idle` to `done` keeps the timer) or status and tail are both unchanged. An `awaitingInput` claim that reports `working` goes back to `running`, but the label stays until the run finishes.
 
-Flag = comment, then add label `agent-stuck`. Comments (`runComment`, `failureComment`) name the state, e.g. `**herdr-linear** (\`error\`): ...`, and include the pane tail in a code block. The epic stays where it was (Ready for runs that never started, Implementing or In Review otherwise).
+Stale (`checkStale`, timing in the dispatcher with the injected clock):
+
+- `running`, `working`, tail unchanged for `staleAfterSeconds`: send `nudge` once and save `nudgedAt`.
+- Any tail or status change clears `nudgedAt`; a `stale` claim goes back to `running`.
+- Still unchanged `nudgeGraceSeconds` after the nudge: comment with the tail + label, status `stale`. It keeps its slot.
+- `nudgedAt` is on disk, so a restart does not nudge again.
+- Tails are compared without digits or spinner glyphs (`withoutTickers` in `dispatcher.ts`): the spinner, its timer and the status line counters keep ticking while a turn hangs.
+
+Wall-clock cap: rule 6, once per claim (`overCap` on disk), in any in-flight state. The run keeps going and keeps its slot.
+
+Flag = comment, then add label `agent-stuck`. Comments (`runComment`, `failureComment`, `overCapComment`, `invalidResultComment`) start with `**herdr-linear`, name the state, e.g. `**herdr-linear** (\`error\`): ...`, and include the pane tail or error in a code block. The epic stays where it was (Ready for runs that never started, Implementing or In Review otherwise).
+
+## Elicitation
+
+- The `awaitingInput` comment is the question: it holds the pane tail and says to reply to it. Its ID is saved as `questionCommentId`, so it is posted once per episode, also across restarts. The episode ends when the agent works again.
+- Each tick, `poll` fetches the children of every current question comment in the same request.
+- A reply counts when it is a child of the claim's current question, does not start with `**herdr-linear` (the dispatcher posts with the user's key, so the marker is the only tell), and has no `white_check_mark` reaction.
+- Delivery: add the reaction first, then send `reply`. A reply is never typed twice, also across restarts. The worker runs `herdr agent prompt <pane> <text>` with newlines joined into spaces (herdr rejects newlines).
+- herdr refuses a prompt while the agent sits at a permission or question dialog (`agent_blocked`). The worker then sends `replyFailed` and the dispatcher replies in the thread to answer in the tab.
+- Replies to any other comment are ignored.
 
 ## Retrying
 
 | Situation | What the human does |
 | --- | --- |
 | `error`, never started | Fix the cause, remove `agent-stuck`. Released and re-dispatched the same tick. |
-| `awaitingInput` | Answer it in its herdr tab. |
+| `awaitingInput` | Reply to the question comment on the epic, or answer in its herdr tab. |
+| `stale` or over the cap | Look at the tab; the run carries on by itself once the pane changes. |
 | `awaitingInput` or `error`, start over | Move the epic back to Ready (ends the run, closing its tab) and remove the label (allows dispatch). |
 
 A re-dispatch reuses the existing worktree if it is on the same branch (see `worker-and-herdr.md`) and opens a new tab.

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { writeFileAtomic } from './atomic-write.ts';
-import { agentStatusSchema, jobSchema, runSchema } from './protocol.ts';
+import { agentStatusSchema, jobSchema, resultFileSchema, runSchema } from './protocol.ts';
 
 // claimed: recorded before the dispatch is sent. running: the worker confirmed the agent started.
 // awaitingInput: the agent sat idle or blocked without a PR. stale: herdr says working but the pane stopped
@@ -26,6 +26,7 @@ const claimSchema = z.object({
 	claimedAt: z.number(),
 	job: jobSchema.optional(),
 	run: runSchema.optional(),
+	// since: when the status or, while working, the pane tail last changed.
 	agent: z
 		.object({
 			status: z.union([agentStatusSchema, z.enum(['exited', 'vanished'])]),
@@ -33,6 +34,14 @@ const claimSchema = z.object({
 			tail: z.string(),
 		})
 		.optional(),
+	// When the current stale episode's nudge was sent; cleared once the pane changes.
+	nudgedAt: z.number().optional(),
+	// The run passed the wall-clock cap and the epic was told.
+	overCap: z.boolean().optional(),
+	// The awaitingInput comment whose replies are typed into the pane; cleared when the episode ends.
+	questionCommentId: z.string().optional(),
+	// The agent's result file and which parts of it are already on the PR, so a restart never posts one twice.
+	result: z.object({ file: resultFileSchema, posted: z.array(z.enum(['summary', 'review'])) }).optional(),
 });
 
 export type Claim = z.infer<typeof claimSchema>;

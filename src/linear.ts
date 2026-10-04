@@ -36,6 +36,16 @@ const EPIC_FIELDS = `
 	children(first: 1) { nodes { id } }
 `;
 
+const replySchema = z.object({
+	id: z.string(),
+	body: z.string(),
+	createdAt: z.string(),
+	parent: z.object({ id: z.string() }),
+	reactions: z.array(z.object({ emoji: z.string() })),
+});
+
+export type Reply = z.infer<typeof replySchema>;
+
 const responseSchema = z.object({
 	data: z.unknown().nullable().optional(),
 	errors: z.array(z.object({ message: z.string() })).optional(),
@@ -91,8 +101,9 @@ export class LinearClient {
 		return result.teams.nodes;
 	}
 
-	// Top-level issues in the ready states, plus the claimed issues wherever they are now.
-	async poll(readyStateIds: string[], claimedIds: string[]) {
+	// Top-level issues in the ready states, the claimed issues wherever they are now, and the replies to the
+	// given question comments.
+	async poll(readyStateIds: string[], claimedIds: string[], questionIds: string[]) {
 		// A truncated page would make the dispatcher release claims whose epics still exist.
 		if (claimedIds.length > MAX_PAGE_SIZE) {
 			throw new Error(`${claimedIds.length} claims exceed the ${MAX_PAGE_SIZE} issues one poll can read`);
@@ -102,17 +113,21 @@ export class LinearClient {
 			z.object({
 				ready: z.object({ nodes: z.array(epicSchema) }),
 				claimed: z.object({ nodes: z.array(epicSchema) }),
+				replies: z.object({ nodes: z.array(replySchema) }),
 			}),
-			`query Poll($readyStateIds: [ID!], $claimedIds: [ID!]) {
+			`query Poll($readyStateIds: [ID!], $claimedIds: [ID!], $questionIds: [ID!]) {
 				ready: issues(first: 50, filter: { state: { id: { in: $readyStateIds } }, parent: { null: true } }) {
 					nodes { ${EPIC_FIELDS} }
 				}
 				claimed: issues(first: ${MAX_PAGE_SIZE}, filter: { id: { in: $claimedIds } }) { nodes { ${EPIC_FIELDS} } }
+				replies: comments(first: ${MAX_PAGE_SIZE}, filter: { parent: { id: { in: $questionIds } } }) {
+					nodes { id body createdAt parent { id } reactions { emoji } }
+				}
 			}`,
-			{ readyStateIds, claimedIds },
+			{ readyStateIds, claimedIds, questionIds },
 		);
 
-		return { ready: result.ready.nodes, claimed: result.claimed.nodes };
+		return { ready: result.ready.nodes, claimed: result.claimed.nodes, replies: result.replies.nodes };
 	}
 
 	async moveIssue(issueId: string, stateId: string) {
@@ -125,13 +140,26 @@ export class LinearClient {
 		);
 	}
 
-	async comment(issueId: string, body: string) {
-		await this.request(
-			z.object({ commentCreate: successSchema }),
-			`mutation Comment($issueId: String!, $body: String!) {
-				commentCreate(input: { issueId: $issueId, body: $body }) { success }
+	// Returns the new comment's ID. With parentId the comment is a reply in that comment's thread.
+	async comment(issueId: string, body: string, parentId?: string) {
+		const result = await this.request(
+			z.object({ commentCreate: z.object({ success: z.literal(true), comment: z.object({ id: z.string() }) }) }),
+			`mutation Comment($issueId: String!, $body: String!, $parentId: String) {
+				commentCreate(input: { issueId: $issueId, body: $body, parentId: $parentId }) { success comment { id } }
 			}`,
-			{ issueId, body },
+			{ issueId, body, parentId },
+		);
+
+		return result.commentCreate.comment.id;
+	}
+
+	async react(commentId: string, emoji: string) {
+		await this.request(
+			z.object({ reactionCreate: successSchema }),
+			`mutation React($commentId: String!, $emoji: String!) {
+				reactionCreate(input: { commentId: $commentId, emoji: $emoji }) { success }
+			}`,
+			{ commentId, emoji },
 		);
 	}
 

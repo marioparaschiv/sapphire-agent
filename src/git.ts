@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
+import { z } from 'zod';
+import { type ResultFile, resultFileSchema } from './protocol.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -111,4 +113,37 @@ export async function removeWorktree(repoPath: string, branch: string, path: str
 	if (await branchExists(repoPath, branch)) {
 		await git(repoPath, ['branch', '--delete', '--force', branch]);
 	}
+}
+
+// The agent writes its result into the worktree's own git dir (`.git` is a file in a linked worktree), so it can
+// never be committed. The orchestrate skill resolves the same path with `git rev-parse --git-dir`.
+export const resultFilePath = async (path: string) => join(await git(path, ['rev-parse', '--absolute-git-dir']), 'herdr-result.json');
+
+export type ResultFileRead = { ok: true; result: ResultFile } | { ok: false; error: string };
+
+// Undefined while the agent has not written the file.
+export async function readResultFile(path: string): Promise<ResultFileRead | undefined> {
+	const text = await readFile(await resultFilePath(path), 'utf8').catch((error: NodeJS.ErrnoException) => {
+		if (error.code === 'ENOENT') {
+			return undefined;
+		}
+
+		throw error;
+	});
+
+	if (text === undefined) {
+		return undefined;
+	}
+
+	let json: unknown;
+
+	try {
+		json = JSON.parse(text);
+	} catch (error) {
+		return { ok: false, error: `not JSON: ${(error as Error).message}` };
+	}
+
+	const parsed = resultFileSchema.safeParse(json);
+
+	return parsed.success ? { ok: true, result: parsed.data } : { ok: false, error: z.prettifyError(parsed.error) };
 }
