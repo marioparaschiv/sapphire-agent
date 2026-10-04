@@ -1,0 +1,56 @@
+# Overview
+
+What herdr-linear does end to end, the Linear column flow, and who moves an issue between columns.
+
+## In one paragraph
+
+A dispatcher (systemd user service, `node src/main.ts`) polls Linear every `pollSeconds`. Top-level issues ("epics") in "Ready For Agent" that have sub-issues get claimed on disk, then a worker creates a git worktree on the epic's Linear branch, opens a herdr tab in the `agents` workspace and starts Claude Code with a one-line `/orchestrate` prompt. The dispatcher then watches the run and the GitHub PR, and updates Linear.
+
+## End-to-end steps
+
+1. Human moves an epic to **Ready For Agent**.
+2. Dispatcher claims it (`claims.json`, status `claimed`) and sends `dispatch` to the worker.
+3. Worker prepares the worktree, trusts it for Claude, opens a tab, starts Claude, replies `started`.
+4. Dispatcher moves the epic to **Implementing** (`dispatcher.ts:89-91`).
+5. Agent works through sub-issues, moves the epic to **In Review** when it starts `/sreview`, then runs `/pr`.
+6. Dispatcher sees a live PR via `gh`, moves the epic to **To Review**, removes `agent-stuck` if present, drops the claim (`dispatcher.ts:252-267`).
+
+If the agent stops without a PR, see `claims-and-lifecycle.md`.
+
+## Columns and who moves what
+
+Epic columns:
+
+| Column | Config key | Moved in by |
+| --- | --- | --- |
+| To Do | none | Human. The plugin never reads or sets it. |
+| Ready For Agent | `states.ready` | Human. Also where a failed epic stays until retried. |
+| Implementing | `states.implementing` | Plugin, after the worker confirms Claude started. |
+| In Review | `states.inReview` | Agent, when it starts `/sreview` (told so in the prompt). |
+| To Review | `states.toReview` | Plugin, when a PR for the branch is open or merged. |
+| Shipped | `states.shipped` | Not this code. Linear's GitHub integration on merge. |
+
+Sub-issue columns (all moved by the agent, as instructed in the prompt, `dispatcher.ts:336-342`):
+
+- **Implementing** when it starts a sub-issue.
+- **Done** (`states.subIssueDone`) when that slice lands.
+
+## Things worth knowing up front
+
+- Every role in `states` must exist in a team's workflow, including `shipped` and `subIssueDone` which the plugin never sets. A team missing one is skipped (`dispatcher.ts:163-176`).
+- Epics without sub-issues are ignored with a one-time log line (`dispatcher.ts:296-299`).
+- Only issues with no parent count as epics (`linear.ts:99`).
+- Order is Linear board order (`sortOrder` ascending); at most `maxInFlight` runs at once.
+- The dispatcher is the only component that talks to Linear; the worker only touches git, herdr and `~/.claude.json`.
+
+## The prompt the agent gets
+
+Built in `buildJob` (`dispatcher.ts:331-352`). It tells Claude to:
+
+- `/orchestrate` the epic's sub-issues in the current worktree.
+- Move sub-issues and the epic as in the table above.
+- Commit as it goes (overrides `/orchestrate`'s "don't commit").
+- Run `/pr` against the default branch after `/sreview`.
+- Comment a question on the epic and stop if blocked on a human decision.
+
+Changing the column flow means editing this prompt as well as the dispatcher.
