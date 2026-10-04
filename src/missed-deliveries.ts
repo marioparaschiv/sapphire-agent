@@ -12,8 +12,6 @@ const retention = Duration.days(3);
 // mention is idempotent.
 const overlap = Duration.minutes(10);
 
-const deliveredAt = (delivery: Delivery) => Date.parse(delivery.deliveredAt);
-
 const succeeded = ({ statusCode }: Delivery) => statusCode >= 200 && statusCode < 300;
 
 // For each event (`guid`) whose newest attempt failed, that attempt. `deliveries` is newest first.
@@ -58,7 +56,7 @@ export class MissedDeliveries extends Context.Service<
 				const mark = yield* journal.deliveryMark;
 				const oldest = (yield* Clock.currentTimeMillis) - Duration.toMillis(retention);
 				const since = Option.match(mark, { onNone: () => oldest, onSome: (at) => Math.max(oldest, at - Duration.toMillis(overlap)) });
-				const isRecent = (delivery: Delivery) => deliveredAt(delivery) >= since;
+				const isRecent = (delivery: Delivery) => delivery.deliveredAt >= since;
 
 				const recentFrom = (cursor: Option.Option<string>): Effect.Effect<ReadonlyArray<Delivery>, CallError> =>
 					app.deliveries(cursor).pipe(
@@ -85,7 +83,7 @@ export class MissedDeliveries extends Context.Service<
 				}
 
 				if (recent.length > 0) {
-					yield* journal.setDeliveryMark(Math.max(...recent.map(deliveredAt)));
+					yield* journal.setDeliveryMark(Math.max(...recent.map(({ deliveredAt }) => deliveredAt)));
 				}
 			});
 

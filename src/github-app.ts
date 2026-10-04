@@ -1,5 +1,5 @@
 import { type KeyObject, sign } from 'node:crypto';
-import { Clock, Context, Duration, Effect, Layer, Option, Redacted, Schema } from 'effect';
+import { Clock, Context, Duration, Effect, Layer, Option, Redacted, Schema, SchemaGetter } from 'effect';
 import { HttpClient, type HttpClientError, HttpClientRequest, HttpClientResponse } from 'effect/http';
 import { type CallError, callTimeouts, Permanent, Transient, transportFailure, withCallPolicy } from './call-policy.ts';
 import { AppConfig } from './config.ts';
@@ -13,7 +13,15 @@ const AccessToken = Schema.Struct({ token: Schema.String, expiresAt: Schema.Stri
 const ErrorJson = Schema.Struct({ message: Schema.String });
 
 // One attempt to deliver a webhook event. A redelivery is a new attempt with the event's `guid`.
-export const Delivery = Schema.Struct({ id: Schema.Int, guid: Schema.String, deliveredAt: Schema.String, statusCode: Schema.Int }).pipe(
+export const Delivery = Schema.Struct({
+	id: Schema.Int,
+	guid: Schema.String,
+	// In ms.
+	deliveredAt: Schema.String.pipe(
+		Schema.decodeTo(Schema.Int, { decode: SchemaGetter.transform(Date.parse), encode: SchemaGetter.transform((millis) => new Date(millis).toISOString()) }),
+	),
+	statusCode: Schema.Int,
+}).pipe(
 	Schema.encodeKeys({ deliveredAt: 'delivered_at', statusCode: 'status_code' }),
 );
 
