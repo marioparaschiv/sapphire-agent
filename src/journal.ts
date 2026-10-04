@@ -98,12 +98,6 @@ export type Command = typeof Command.Type;
 
 export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${command.id}`;
 
-// A GitHub notification thread whose comments are not scanned for mentions yet. `since`: comments created before it
-// were scanned already, or written before mentions were first read.
-export const MentionThread = Schema.Struct({ threadId: Schema.String, repo: Schema.String, number: Schema.Int, since: Millis });
-
-export type MentionThread = typeof MentionThread.Type;
-
 // What `scripts/ctl.sh` asks the reconciler to do on its next tick. The CLI only appends these, so it never races a
 // rule over a row; the rule that acts on one deletes it.
 export const Request = Schema.Union([
@@ -198,6 +192,12 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0002_drop_mention_threads': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`DROP TABLE mention_threads`;
+			yield* sql`DROP TABLE mention_floor`;
+		}),
 	}),
 });
 
@@ -220,13 +220,6 @@ export class Journal extends Context.Service<
 		// Does nothing when a command for the same comment exists.
 		readonly addCommand: (command: NewCommand) => Effect.Effect<void, JournalError>;
 		readonly putCommand: (command: Command) => Effect.Effect<void, JournalError>;
-		// When mentions were first read; earlier ones are never run.
-		readonly mentionFloor: Effect.Effect<number, JournalError>;
-		// The oldest `limit` threads.
-		readonly listMentionThreads: (limit: number) => Effect.Effect<ReadonlyArray<MentionThread>, JournalError>;
-		// Does nothing when the thread is listed already, so its earlier `since` stays.
-		readonly addMentionThread: (thread: MentionThread) => Effect.Effect<void, JournalError>;
-		readonly deleteMentionThread: (threadId: string) => Effect.Effect<void, JournalError>;
 		// Returns the request's id.
 		readonly addRequest: (request: Request) => Effect.Effect<number, JournalError>;
 		// Oldest first.
@@ -304,32 +297,6 @@ export class Journal extends Context.Service<
 					execute: (row) => sql`INSERT OR REPLACE INTO commands ${sql.insert(row)}`,
 				});
 
-				const mentionFloor = SqlSchema.findOne({
-					Request: Schema.Void,
-					Result: Schema.Struct({ since: Millis }),
-					execute: () => sql`SELECT since FROM mention_floor`,
-				})(undefined).pipe(
-					Effect.map(({ since }) => since),
-					// The migration inserts the row.
-					Effect.catchTag('NoSuchElementError', Effect.die),
-				);
-
-				const listMentionThreads = SqlSchema.findAll({
-					Request: Schema.Int,
-					Result: MentionThread,
-					execute: (limit) => sql`SELECT * FROM mention_threads ORDER BY since LIMIT ${limit}`,
-				});
-
-				const addMentionThread = SqlSchema.void({
-					Request: MentionThread,
-					execute: (row) => sql`INSERT INTO mention_threads ${sql.insert(row)} ON CONFLICT (thread_id) DO NOTHING`,
-				});
-
-				const deleteMentionThread = SqlSchema.void({
-					Request: Schema.String,
-					execute: (threadId) => sql`DELETE FROM mention_threads WHERE thread_id = ${threadId}`,
-				});
-
 				const insertRequest = SqlSchema.findOne({
 					Request: RequestRow.mapFields(({ request, createdAt }) => ({ request, createdAt })),
 					Result: Schema.Struct({ id: Schema.Int }),
@@ -366,10 +333,6 @@ export class Journal extends Context.Service<
 					listCommands,
 					addCommand,
 					putCommand,
-					mentionFloor,
-					listMentionThreads,
-					addMentionThread,
-					deleteMentionThread,
 					addRequest,
 					listRequests,
 					deleteRequest,

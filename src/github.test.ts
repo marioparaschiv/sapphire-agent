@@ -305,82 +305,6 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
-	it.effect("reads the bot's unread notifications through its gh config dir, with the number of each issue or PR", () =>
-		Effect.gen(function* () {
-			const notification = (id: string, type: string, url: string | null, lastReadAt: string | null) => ({
-				id,
-				unread: true,
-				reason: 'mention',
-				updated_at: '2026-10-04T09:40:00Z',
-				last_read_at: lastReadAt,
-				subject: { title: 'Sync plugin settings', url, latest_comment_url: null, type },
-				repository: { full_name: repo },
-			});
-			const { calls, layer } = liveWithGh(() => ({
-				stdout: JSON.stringify([
-					notification('18', 'PullRequest', `https://api.github.com/repos/${repo}/pulls/7`, '2026-10-04T09:30:00Z'),
-					notification('19', 'Issue', `https://api.github.com/repos/${repo}/issues/12`, null),
-					notification('20', 'Release', null, null),
-				]),
-			}));
-			const found = yield* GitHub.use((github) => Effect.andThen(github.notifications, (unread) => github.markNotificationRead('18').pipe(Effect.as(unread)))).pipe(
-				Effect.provide(layer),
-			);
-
-			assert.deepStrictEqual(found, [
-				{ threadId: '18', repo, number: 7, lastReadAt: Option.some(Date.UTC(2026, 9, 4, 9, 30)) },
-				{ threadId: '19', repo, number: 12, lastReadAt: Option.none() },
-			]);
-			assert.deepStrictEqual(
-				calls.map(({ args, env }) => [args.join(' '), env]),
-				[
-					['api notifications?participating=true&per_page=50', { GH_CONFIG_DIR: '/tmp/herdr-linear-test/gh-bot' }],
-					['api --method PATCH notifications/threads/18', { GH_CONFIG_DIR: '/tmp/herdr-linear-test/gh-bot' }],
-				],
-			);
-		}),
-	);
-
-	it.effect("reads the comments, reviews and review comments of a PR and the comments of an issue, with an App's login as `<slug>[bot]`", () =>
-		Effect.gen(function* () {
-			const comment = (id: string, body: string, author: string | null = 'marioparaschiv', type = 'User') => ({
-				id,
-				url: `https://github.com/${repo}/pull/7#${id}`,
-				body,
-				createdAt: '2026-10-04T09:40:00Z',
-				author: author === null ? null : { __typename: type, login: author },
-			});
-			const { calls, layer } = liveWithGh((call) =>
-				call.input.includes('"number":7')
-					? data({
-							repository: {
-								issueOrPullRequest: {
-									comments: { nodes: [comment('IC_1', '@orchestratorbot stop HL-12'), comment('IC_3', 'Stopped HL-12.', 'orchestratorbot', 'Bot')] },
-									reviews: { nodes: [{ ...comment('PRR_1', 'A few things. @orchestratorbot'), comments: { nodes: [comment('PRRC_1', 'Rename this.', null)] } }] },
-								},
-							},
-						})
-					: data({ repository: { issueOrPullRequest: call.input.includes('"number":12') ? { comments: { nodes: [comment('IC_2', '@orchestratorbot start HL-14')] } } : null } }),
-			);
-			const [pullRequest, issue, missing] = yield* GitHub.use((github) =>
-				Effect.all([github.conversation(repo, 7), github.conversation(repo, 12), github.conversation(repo, 99).pipe(Effect.flip)]),
-			).pipe(Effect.provide(layer));
-
-			assert.deepStrictEqual(
-				pullRequest.map(({ id, author }) => [id, author?.login ?? null]),
-				[
-					['IC_1', 'marioparaschiv'],
-					['IC_3', 'orchestratorbot[bot]'],
-					['PRR_1', 'marioparaschiv'],
-					['PRRC_1', null],
-				],
-			);
-			assert.deepStrictEqual(issue.map(({ id }) => id), ['IC_2']);
-			assert.deepStrictEqual(missing, new Permanent({ message: `${repo}#99 is no issue or PR` }));
-			assert.match(graphqlRequest(calls[0]).query, /reviews\(last: 100\) \{ nodes \{ id url body createdAt author \{ __typename login \} comments\(first: 100\)/);
-		}),
-	);
-
 	it.effect('retries a gh call that times out as Transient', () =>
 		Effect.gen(function* () {
 			const { calls, layer } = liveWithGh(() => (calls.length === 1 ? 'hang' : { stdout: JSON.stringify([pullRequestJson(8, 'OPEN')]) }));
@@ -467,43 +391,6 @@ describe('classifyGhFailure', () => {
 });
 
 describe('FakeGitHub', () => {
-	it.effect("notifies the bot of a mention by anyone but itself, until it reads the notification, and lists the PR's comments, the App's included", () =>
-		Effect.gen(function* () {
-			const fake = yield* FakeGitHub;
-			const github = yield* GitHub;
-			const { number } = fake.addPullRequest({ repo, branch: 'mario/hl-11-github', author: 'marioparaschiv' });
-
-			fake.addComment(repo, number, 'Looks good.');
-			assert.deepStrictEqual(yield* github.notifications, []);
-
-			const thread = fake.addThread(repo, number, { comments: [{ body: 'Rename this. @OrchestratorBot' }] });
-			const [unread] = yield* github.notifications;
-
-			yield* github.markNotificationRead(unread.threadId);
-			assert.deepStrictEqual(yield* github.notifications, []);
-
-			yield* github.postAsBot(repo, number, withMarker('On it.', { identifier: 'CMD-1', purpose: 'commandReply', key: '1' }));
-			assert.deepStrictEqual(yield* github.notifications, []);
-
-			fake.addReview(repo, number, '@orchestratorbot handle these', 'reviewer');
-
-			assert.deepStrictEqual(
-				(yield* github.notifications).map(({ threadId, number: notified, lastReadAt }) => [threadId, notified, Option.isSome(lastReadAt)]),
-				[[unread.threadId, number, true]],
-			);
-			assert.deepStrictEqual(
-				(yield* github.conversation(repo, number)).map(({ body, author }) => [body.split('\n')[0], author?.login]),
-				[
-					['Looks good.', 'marioparaschiv'],
-					['On it.', 'orchestratorbot[bot]'],
-					['@orchestratorbot handle these', 'reviewer'],
-					['Rename this. @OrchestratorBot', 'marioparaschiv'],
-				],
-			);
-			assert.deepStrictEqual(fake.thread(thread).comments.map(({ body }) => body), ['Rename this. @OrchestratorBot']);
-		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(GitHubAppFixture.layer), Layer.provide(config)))),
-	);
-
 	it.effect('finds the open PR first, as the live layer does', () =>
 		Effect.gen(function* () {
 			const fake = yield* FakeGitHub;

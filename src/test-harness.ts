@@ -1,16 +1,17 @@
 import { execFileSync } from 'node:child_process';
+import { createHmac, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
-import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
+import { Console, Context, Effect, Exit, Layer, Option, Redacted, Scope } from 'effect';
 import { TestConsole } from 'effect/testing';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { runCtl } from './ctl.ts';
 import { GitHubAppFixture } from './github-app-fixture.ts';
-import { FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
+import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
 import { Git } from './git.ts';
 import { Herdr, type HerdrAgentStatus } from './herdr.ts';
 import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
@@ -21,7 +22,10 @@ import { parseMarker } from './markers.ts';
 import { type Observation, Observer, type StartedRun } from './observation.ts';
 import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
+import { Pause } from './pause.ts';
+import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { WebhookServer } from './webhook-server.ts';
 
 // `<purpose>:<key>` of each marked body, in order; unmarked bodies are left out.
 export const markerKeys = (bodies: ReadonlyArray<string>) =>
@@ -30,6 +34,84 @@ export const markerKeys = (bodies: ReadonlyArray<string>) =>
 // Runs git in `cwd` with a test identity.
 export const git = (cwd: string, ...args: Array<string>) =>
 	execFileSync('git', ['-C', cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
+
+// A GitHub App webhook delivery: the X-GitHub-Event header and the JSON payload.
+export type WebhookDelivery = { readonly event: string; readonly payload: unknown };
+
+// The comment as GitHub's webhook payloads carry it. `id` is the node id.
+const webhookComment = ({ id, url, body, author }: Pick<FakeComment, 'id' | 'url' | 'author'> & { readonly body: string | null }) => ({
+	id: Number(/\d+$/.exec(id)?.[0]),
+	node_id: id,
+	html_url: url,
+	body,
+	user: { login: author, type: author.endsWith('[bot]') ? 'Bot' : 'User' },
+	author_association: 'OWNER',
+	created_at: '2026-10-04T09:40:00Z',
+});
+
+const webhookRepository = (repo: string) => ({ id: 1_000_001, full_name: repo, name: repo.split('/')[1], private: true, owner: { login: repo.split('/')[0] } });
+
+const webhookPullRequest = (repo: string, number: number) => ({ number, html_url: `https://github.com/${repo}/pull/${number}`, state: 'open' });
+
+// Deliveries as GitHub sends them for a new comment on an issue or PR, a new review comment and a submitted review.
+export const deliveries = {
+	issueComment: (repo: string, number: number, comment: FakeComment, action = 'created'): WebhookDelivery => ({
+		event: 'issue_comment',
+		payload: {
+			action,
+			issue: { number, html_url: `https://github.com/${repo}/pull/${number}`, pull_request: { url: `https://api.github.com/repos/${repo}/pulls/${number}` } },
+			comment: webhookComment(comment),
+			repository: webhookRepository(repo),
+			sender: { login: comment.author },
+			installation: { id: 1001 },
+		},
+	}),
+	reviewComment: (repo: string, number: number, comment: FakeComment): WebhookDelivery => ({
+		event: 'pull_request_review_comment',
+		payload: {
+			action: 'created',
+			pull_request: webhookPullRequest(repo, number),
+			comment: { ...webhookComment(comment), path: 'src/sync/merge.ts', line: 3 },
+			repository: webhookRepository(repo),
+			sender: { login: comment.author },
+			installation: { id: 1001 },
+		},
+	}),
+	review: (repo: string, number: number, review: { readonly id: string; readonly body: string | null; readonly author: string }, action = 'submitted'): WebhookDelivery => ({
+		event: 'pull_request_review',
+		payload: {
+			action,
+			pull_request: webhookPullRequest(repo, number),
+			review: { ...webhookComment({ ...review, url: `https://github.com/${repo}/pull/${number}#pullrequestreview-${/\d+$/.exec(review.id)?.[0]}` }), state: 'commented' },
+			repository: webhookRepository(repo),
+			sender: { login: review.author },
+			installation: { id: 1001 },
+		},
+	}),
+};
+
+export const signDelivery = (secret: Redacted.Redacted<string>, body: string) => `sha256=${createHmac('sha256', Redacted.value(secret)).update(body).digest('hex')}`;
+
+// POSTs the delivery as GitHub does, signed with `secret` unless `signature` overrides the header (null leaves it out).
+export const postDelivery = (url: string, secret: Redacted.Redacted<string>, { event, payload }: WebhookDelivery, signature?: string | null) =>
+	Effect.promise(async () => {
+		const body = JSON.stringify(payload);
+		const header = signature === undefined ? signDelivery(secret, body) : signature;
+		const response = await fetch(url, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				'x-github-event': event,
+				'x-github-delivery': randomUUID(),
+				...(header === null ? {} : { 'x-hub-signature-256': header }),
+			},
+			body,
+		});
+
+		await response.arrayBuffer();
+
+		return response.status;
+	});
 
 export type Harness = {
 	// Holds the config's paths: repo, worktrees, claude.json, journal.db.
@@ -42,6 +124,9 @@ export type Harness = {
 	readonly linear: LinearFixtureShape;
 	readonly github: FakeGitHubControls;
 	readonly herdr: FakeHerdrControls;
+	// Sends the delivery to the current webhook server, as postDelivery does with the configured secret; returns the HTTP
+	// status.
+	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
 	// One tick of the current planner, with every rule in production order.
 	readonly tick: Effect.Effect<void>;
 	readonly pausedTick: Effect.Effect<void>;
@@ -92,7 +177,7 @@ const makeRepos = (dir: string) => {
 };
 
 // Real temp git repos, the Linear and GitHub App fixture servers, the GitHub and herdr fakes and a temp-file SQLite
-// journal, wired to the production rules. Needs a Scope; everything is removed when it closes.
+// journal, wired to the production rules and the webhook server. Needs a Scope; everything is removed when it closes.
 export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
 	Effect.gen(function* () {
 		const dir = yield* Effect.acquireRelease(
@@ -134,8 +219,6 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					deleteRun: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteRun(epicId))),
 					addCommand: (command) => crashPoint.pipe(Effect.andThen(journal.addCommand(command))),
 					putCommand: (command) => crashPoint.pipe(Effect.andThen(journal.putCommand(command))),
-					addMentionThread: (thread) => crashPoint.pipe(Effect.andThen(journal.addMentionThread(thread))),
-					deleteMentionThread: (threadId) => crashPoint.pipe(Effect.andThen(journal.deleteMentionThread(threadId))),
 					addRequest: (request) => crashPoint.pipe(Effect.andThen(journal.addRequest(request))),
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
 					claimFollowUp: (run, requestId) => crashPoint.pipe(Effect.andThen(journal.claimFollowUp(run, requestId))),
@@ -143,8 +226,9 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
 
-		const stack = Planner.layer(rules).pipe(
-			Layer.provide(Observer.layer),
+		const stack = WebhookServer.layer.pipe(
+			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
+			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
 			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, Comments.layer, Prompts.layer)),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
@@ -173,7 +257,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 		const linear = Context.get(fixtures, LinearFixture);
 		const herdr = Context.get(fixtures, FakeHerdr);
-		const { workspaceLabel } = Context.get(fixtures, AppConfig);
+		const { workspaceLabel, webhookSecret } = Context.get(fixtures, AppConfig);
 		const journal = Effect.map(services, Context.get(Journal));
 
 		const startedRun = ({ agentStatus, tail, ...seed }: EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string }) =>
@@ -221,6 +305,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			linear,
 			github: Context.get(fixtures, FakeGitHub),
 			herdr,
+			deliver: (delivery: WebhookDelivery, signature?: string | null) => services.pipe(Effect.flatMap((context) => postDelivery(Context.get(context, WebhookServer).url, webhookSecret, delivery, signature))),
 			tick: tick(false),
 			pausedTick: tick(true),
 			restart,

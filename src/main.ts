@@ -18,14 +18,14 @@ import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { WebhookServer } from './webhook-server.ts';
 
 const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
 
 const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, Herdr.layer, Comments.layer, Prompts.layer).pipe(Layer.provideMerge(GitHubApp.layer()));
 
-const MainLive = Reconciler.layer.pipe(
-	Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
-	Layer.provide(Pause.layer),
+const MainLive = WebhookServer.layer.pipe(
+	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
 	Layer.provideMerge(ServicesLive),
 	Layer.provideMerge(JournalLive),
 	Layer.provide(FetchHttpClient.layer),

@@ -39,7 +39,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 
 ### `commands`
 
-One row per comment that mentioned the bot, written before anything else happens for it, so a comment is handled at most once. `id` numbers them (`CMD-<id>`); `comment_id` (the comment's GitHub node id) is unique, and recording a comment again does nothing.
+One row per comment that mentioned the bot, written by the webhook server before it answers the delivery and before anything else happens for it, so a comment is handled at most once. `id` numbers them (`CMD-<id>`); `comment_id` (the comment's GitHub node id, the delivery's `node_id`) is unique, and recording a comment again does nothing, so a duplicated or redelivered delivery starts no second run.
 
 | Column | What and why |
 | --- | --- |
@@ -51,17 +51,13 @@ One row per comment that mentioned the bot, written before anything else happens
 | `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
 | `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
 
-### `mention_threads` and `mention_floor`
-
-`mention_threads`: notification threads of the bot's that are read but not scanned yet (`thread_id`, `repo`, `number`, `since`). A thread is added before its notification is marked read and dropped once its comments are recorded, so a crash in between never loses a mention (`rules.md`). `mention_floor`: one row, when the journal was created; mentions written before it are never run.
-
 ### `requests`
 
 What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `mentionFloor`, `listMentionThreads`, `addMentionThread` (keeps the earlier `since`), `deleteMentionThread`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
 The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, worktree), the commands in flight and the requests waiting.
 
@@ -110,7 +106,7 @@ Every multi-step action is ordered so that a crash at any step leaves something 
 
 - Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, and Claude found in the pane is not started again. Commands start the same way.
 - A follow-up claim and the drop of its request are one transaction.
-- A mention's thread is recorded before its notification is marked read, its comments as commands before the thread is dropped; a command is keyed by its comment.
+- A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, to be redelivered; a command is keyed by its comment, so a redelivery records nothing twice.
 - A reply or a failure notice of a command is posted before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
 - Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
 - Flags put the label on first, then the comment, then the journal update.

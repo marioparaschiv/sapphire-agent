@@ -1,6 +1,6 @@
 # Rules
 
-What each rule of the reconciler does, the run and command statuses they move between, flags, the question relay, the command agent and its lockdown, when tabs close, which tabs and worktrees herdr-linear owns, how to retry, and the known limits. The rules run in the order below every tick (see `architecture.md`).
+What each rule of the reconciler does, the run and command statuses they move between, flags, the question relay, the command agent and its lockdown, when tabs close, which tabs and worktrees herdr-linear owns, how to retry, and the known limits. The rules run in the order below every tick (see `architecture.md`); mentions arrive through the webhook server between ticks.
 
 ## Runs and statuses
 
@@ -105,19 +105,20 @@ Not paused, so a claim made before a pause still starts. Takes each `claimed` ru
 
 A step that fails Permanently, or a claim not confirmed within `startTimeoutSeconds` (counted from the claim, or from the process start if later, so a restart gets a full window), fails the start: a `startFailed` flag with the pane tail if there is one. An initial run becomes `error` and stays in Ready. A follow-up goes back to `ended` in To Review (moving the epic back if needed), keeping its worktree; its request is gone, so once the label is removed it takes a new one.
 
-## 8. Mentions
+## Mentions
 
-Not paused. Turns comments that mention the bot into commands, at most once per comment:
+Not a rule: mentions come in as GitHub App webhook deliveries, which the webhook server (`webhook-server.ts`, on `127.0.0.1:<bot.app.webhookPort>`) turns into commands as they arrive, at most once per comment:
 
-1. Read the bot's unread GitHub notifications (`notifications?participating=true`, as the bot, the newest 50). The reason is not looked at: it can change with later comments on a thread.
-2. For each, record its thread in the journal (`mention_threads`, with `since`: when the bot last read it, or the journal's creation if later), then mark the notification read.
-3. Scan each recorded thread (up to 50 a tick): read the issue's or PR's comments, reviews and review comments (the newest 100 of each), and record every one created since `since` that mentions the bot as a command, oldest first: `queued` when its author is in `bot.allowedUsers` (any case), `ignored` otherwise. Then drop the thread.
+1. Verify `X-Hub-Signature-256` (HMAC-SHA256 of the raw body with the secret in `bot.app.webhookSecretFile`, compared in constant time). A missing or wrong signature gets 401.
+2. Take `issue_comment` (`created`), `pull_request_review_comment` (`created`) and `pull_request_review` (`submitted`; a review without a body mentions no one). Any other event or action gets 204 and nothing happens. A handled event whose payload does not match its schema gets 400.
+3. A comment that mentions the bot is recorded as a command keyed by its GitHub node id: `queued` when its author is in `bot.allowedUsers` (any case), `ignored` otherwise. A queued one wakes the reconciler, so the commands rule starts it at once.
+4. Answer 204 only once the journal write succeeded. A failed write gets 500, so the delivery shows as failed in the App's delivery log.
 
 A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` counts, `@orchestratorbotx` and `a@orchestratorbot` do not. Comments by the GitHub App (author `<slug>[bot]`, the slug read from `GET /app` at startup), whose replies may mention the bot, and comments carrying the onBehalfOf block (the agent's own, on the user's account), are never commands.
 
-Why this is crash-safe and drops nothing: the thread is in the journal before its notification is read, and it stays there until its comments are recorded, so a crash at any point leaves it for the next tick. A command is keyed by the comment's GitHub node id, so scanning a thread again records nothing twice. Notifications only point at a thread's latest comment, so the whole thread is scanned since the bot last read it: two mentions written between ticks both become commands. A comment written while this runs either lands before the scan (which happens after the notification is marked read) or makes the notification unread again. Mentions written before the journal existed are never run.
+Why a mention runs once: the command row's `comment_id` is unique and recording a comment again does nothing, so a delivery that arrives twice, or is redelivered after it failed, never starts a second run.
 
-## 9. Commands
+## 8. Commands
 
 Not paused. Runs the command agents, one at a time, oldest first. Command statuses: `ignored`, `queued` (waiting for its turn), `claimed` (its turn came; being started), `running`, `ended` (the agent said it was done; tab closed), `error` (failed; the comment got a reply saying so; tab closed). Commands hold no `maxInFlight` slot: a stop or a pause must work while every slot is taken, so at most `maxInFlight` runs plus one command agent are alive.
 
@@ -218,4 +219,4 @@ A new claim reuses the existing worktree if it is on the same branch and opens a
 - A run whose agent keeps reporting `working` holds its slot and its tab until it stops or is flagged `stale`.
 - A crash after a message was typed into the pane but before its `send` request was dropped types it again, as with question replies.
 - The command agent's replies go to the issue's or PR's conversation, also for a mention in a review thread.
-- A thread with more than 100 comments, reviews or review comments since the bot last read it only has its newest 100 of each scanned.
+- GitHub does not redeliver a failed webhook delivery by itself: a mention made while the service was down, or whose journal write failed, waits until the delivery is redelivered from the App's delivery log.
