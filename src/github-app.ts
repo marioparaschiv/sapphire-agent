@@ -1,7 +1,7 @@
 import { type KeyObject, sign } from 'node:crypto';
 import { Clock, Context, Duration, Effect, Layer, Option, Redacted, Schema } from 'effect';
 import { HttpClient, type HttpClientError, HttpClientRequest, HttpClientResponse } from 'effect/http';
-import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
+import { type CallError, callTimeouts, Permanent, Transient, transportFailure, withCallPolicy } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 
 const AppJson = Schema.Struct({ slug: Schema.String });
@@ -42,11 +42,6 @@ const appJwt = (appId: number, key: KeyObject, nowMillis: number) => {
 	return `${unsigned}.${sign('sha256', Buffer.from(unsigned), key).toString('base64url')}`;
 };
 
-const transportFailure = (error: HttpClientError.HttpClientError) =>
-	error.reason._tag === 'TransportError'
-		? new Transient({ message: `GitHub could not be reached: ${error.message}`, cause: error })
-		: new Permanent({ message: `GitHub request failed: ${error.message}`, cause: error });
-
 export class GitHubApp extends Context.Service<
 	GitHubApp,
 	{
@@ -81,7 +76,7 @@ export class GitHubApp extends Context.Service<
 					Effect.gen(function* () {
 						const where = `${request.method} ${request.url}`;
 						const jwt = appJwt(bot.app.id, appPrivateKey, yield* Clock.currentTimeMillis);
-						const response = yield* client.execute(HttpClientRequest.bearerToken(request, jwt)).pipe(Effect.mapError(transportFailure));
+						const response = yield* client.execute(HttpClientRequest.bearerToken(request, jwt)).pipe(Effect.mapError(transportFailure('GitHub')));
 						const { status } = response;
 
 						if (status === 429 || status >= 500) {
@@ -96,7 +91,7 @@ export class GitHubApp extends Context.Service<
 
 						return yield* read(response).pipe(
 							Effect.catchTags({
-								HttpClientError: (error) => Effect.fail(transportFailure(error)),
+								HttpClientError: (error) => Effect.fail(transportFailure('GitHub')(error)),
 								SchemaError: (error) => Effect.fail(new Permanent({ message: `GitHub answered ${where} with unexpected data: ${error.message}`, cause: error })),
 							}),
 						);

@@ -1,4 +1,5 @@
 import { Duration, Effect, Schedule, Schema } from 'effect';
+import type { HttpClientError } from 'effect/http';
 
 // Worth retrying: a timeout, a 5xx, a network error, a git lock. `retryAfter` is the server's Retry-After.
 export class Transient extends Schema.TaggedError<Transient>()('Transient', {
@@ -14,6 +15,11 @@ export class Permanent extends Schema.TaggedError<Permanent>()('Permanent', {
 }) {}
 
 export type CallError = Transient | Permanent;
+
+export const transportFailure = (service: string) => (error: HttpClientError.HttpClientError) =>
+	error.reason._tag === 'TransportError'
+		? new Transient({ message: `${service} could not be reached: ${error.message}`, cause: error })
+		: new Permanent({ message: `${service} request failed: ${error.message}`, cause: error });
 
 export const callTimeouts = {
 	herdr: Duration.seconds(30),

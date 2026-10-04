@@ -1,6 +1,6 @@
 import { Context, Duration, Effect, Layer, Option, Redacted, Schema } from 'effect';
-import { Headers, HttpClient, type HttpClientError, HttpClientRequest, type HttpClientResponse } from 'effect/http';
-import { callTimeouts, Permanent, Transient, withCallPolicy, type CallError } from './call-policy.ts';
+import { Headers, HttpClient, HttpClientRequest, type HttpClientResponse } from 'effect/http';
+import { callTimeouts, Permanent, Transient, transportFailure, withCallPolicy, type CallError } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { hasMarker, type MarkedComment } from './markers.ts';
 
@@ -99,11 +99,6 @@ const rateLimited = (response: HttpClientResponse.HttpClientResponse) => {
 	return new Transient({ message: `Linear answered HTTP ${response.status}: rate limited`, ...(Option.isSome(wait) ? { retryAfter: wait.value } : {}) });
 };
 
-const transportFailure = (error: HttpClientError.HttpClientError) =>
-	error.reason._tag === 'TransportError'
-		? new Transient({ message: `Linear could not be reached: ${error.message}`, cause: error })
-		: new Permanent({ message: `Linear request failed: ${error.message}`, cause: error });
-
 export type LinearShape = {
 	// Teams by exact name, with all their workflow states.
 	readonly teams: (names: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Team>, CallError>;
@@ -140,7 +135,7 @@ const make = (endpoint: string) =>
 					HttpClientRequest.setHeader('authorization', Redacted.value(linearApiKey)),
 					HttpClientRequest.bodyJsonUnsafe({ query, variables }),
 					client.execute,
-					Effect.mapError(transportFailure),
+					Effect.mapError(transportFailure('Linear')),
 				);
 				const { status } = response;
 
@@ -152,7 +147,7 @@ const make = (endpoint: string) =>
 					return yield* new Transient({ message: `Linear answered HTTP ${status}` });
 				}
 
-				const text = yield* response.text.pipe(Effect.mapError(transportFailure));
+				const text = yield* response.text.pipe(Effect.mapError(transportFailure('Linear')));
 				const body = yield* Schema.decodeEffect(GraphqlResponse)(text).pipe(
 					Effect.mapError((cause) => new Permanent({ message: `Linear answered HTTP ${status} with an unreadable body`, cause })),
 				);
