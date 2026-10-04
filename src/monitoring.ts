@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { Clock, Effect, Option } from 'effect';
-import { Permanent } from './call-policy.ts';
 import { Comments, type FlaggedRun } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Herdr } from './herdr.ts';
@@ -83,8 +82,9 @@ export const monitoringRule = Effect.gen(function* () {
 	});
 
 	// The reply is typed, then recorded, then marked: a recorded reply is never typed again, and one without the emoji
-	// gets it next tick. A crash between typing and recording types it again after the restart, which beats losing it. A refused reply (e.g. the agent sits at a dialog) gets a notice under the question,
-	// whose marker also keeps it from being typed later.
+	// gets it next tick. A crash between typing and recording types it again after the restart, which beats losing it.
+	// A refused reply (e.g. the agent sits at a dialog) gets a notice under the question, whose marker also keeps it
+	// from being typed later.
 	const deliverReplies = (initial: StartedRun, question: string, replies: ReadonlyArray<Reply>) =>
 		Effect.gen(function* () {
 			let run = initial;
@@ -106,13 +106,11 @@ export const monitoringRule = Effect.gen(function* () {
 
 				const typed = yield* herdr.prompt(run.paneId, reply.body).pipe(
 					Effect.as(true),
-					Effect.catchIf(
-						(error): error is Permanent => error instanceof Permanent,
-						(error) =>
-							Effect.logWarning(`typing reply ${reply.id} failed: ${error.message}`).pipe(
-								Effect.andThen(linear.comment(run.epicId, comments.replyFailed({ identifier: run.identifier, replyCommentId: reply.id, error: error.message }), question)),
-								Effect.as(false),
-							),
+					Effect.catchTag('Permanent', (error) =>
+						Effect.logWarning(`typing reply ${reply.id} failed: ${error.message}`).pipe(
+							Effect.andThen(linear.comment(run.epicId, comments.replyFailed({ identifier: run.identifier, replyCommentId: reply.id, error: error.message }), question)),
+							Effect.as(false),
+						),
 					),
 				);
 

@@ -144,8 +144,6 @@ export const dispatchRule = Effect.gen(function* () {
 	return { name: 'dispatch', pausable: true, plan } satisfies Rule;
 });
 
-const isPermanent = (error: unknown): error is Permanent => error instanceof Permanent;
-
 const isClaude = (pane: Option.Option<Pane>) => Option.exists(pane, (found) => Option.contains(found.agent, 'claude'));
 
 const describeAgent = (pane: Option.Option<Pane>) =>
@@ -286,7 +284,7 @@ export const startRule = Effect.gen(function* () {
 				return yield* failStart(observation, claimed, epic, `the agent was not confirmed running within ${config.startTimeoutSeconds} s`);
 			}
 
-			yield* starts.withPermit(steps).pipe(Effect.catchIf(isPermanent, (error) => failStart(observation, run, epic, error.message)));
+			yield* starts.withPermit(steps).pipe(Effect.catchTag('Permanent', (error) => failStart(observation, run, epic, error.message)));
 		});
 	};
 
