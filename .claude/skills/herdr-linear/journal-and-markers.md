@@ -57,7 +57,7 @@ What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `stop`, `s
 
 ### `delivery_mark`
 
-At most one row: `delivery_id`, the id of the newest App webhook delivery the last complete scan saw. Every delivery at or below it either succeeded, has a later successful attempt of the same event, or was redelivered with a newer id, so the next scan pages back only to it (and never more than 3 days, GitHub's retention). It is moved only after every redelivery request of the scan succeeded; without a row, a scan goes back the full 3 days (`rules.md`, Missed deliveries).
+At most one row: `delivered_at` (ms), when the newest App webhook delivery the last complete scan saw was delivered. Every delivery listed before it either succeeded, has a later successful attempt of the same event, or was redelivered as a newer attempt. GitHub lists an attempt only once it ends, so a slow one can show up after a newer one was scanned; the next scan pages back to 10 minutes before the mark (and never more than 3 days, GitHub's retention). It is moved only after every redelivery request of the scan succeeded; without a row, a scan goes back the full 3 days (`rules.md`, Missed deliveries).
 
 ### Journal service
 

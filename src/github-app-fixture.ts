@@ -70,6 +70,9 @@ export type GitHubAppFixtureShape = {
 	readonly deliver: (delivery: WebhookDelivery) => Effect.Effect<FixtureDelivery>;
 	// Logs an attempt with the given status without sending it, as a new event unless `guid` names an earlier one's.
 	readonly addDelivery: (delivery: WebhookDelivery, statusCode: number, guid?: string) => Effect.Effect<FixtureDelivery>;
+	// Like addDelivery, but the attempt is listed only once `list` runs, as GitHub lists a slow attempt once it ends,
+	// after newer ones.
+	readonly addSlowDelivery: (delivery: WebhookDelivery, statusCode: number) => Effect.Effect<{ readonly attempt: FixtureDelivery; readonly list: Effect.Effect<void> }>;
 	// Answers `POST /app/hook/deliveries/{id}/attempts` for the delivery with 422 and sends nothing, `times` times.
 	readonly refuseRedelivery: (id: number, times: number) => void;
 	// The delivery log, newest first.
@@ -117,10 +120,14 @@ const make = Effect.gen(function* () {
 	let webhookUrl: string | undefined;
 	let lastDeliveryId = 90_000_000_000;
 
-	const record = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number) => {
+	const attempt = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number): FixtureDelivery => {
 		lastDeliveryId += 1;
 
-		const entry = { id: lastDeliveryId, guid, deliveredAt: isoSeconds(nowMillis), redelivery: log.some((earlier) => earlier.guid === guid), statusCode, delivery };
+		return { id: lastDeliveryId, guid, deliveredAt: isoSeconds(nowMillis), redelivery: log.some((earlier) => earlier.guid === guid), statusCode, delivery };
+	};
+
+	const record = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number) => {
+		const entry = attempt(delivery, guid, nowMillis, statusCode);
 
 		log.unshift(entry);
 
@@ -277,6 +284,17 @@ const make = Effect.gen(function* () {
 		},
 		deliver: (delivery) => Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.promise(() => send(delivery, randomUUID(), now))),
 		addDelivery: (delivery, statusCode, guid = randomUUID()) => Effect.map(Clock.currentTimeMillis, (now) => record(delivery, guid, now, statusCode)),
+		addSlowDelivery: (delivery, statusCode) =>
+			Effect.map(Clock.currentTimeMillis, (now) => {
+				const entry = attempt(delivery, randomUUID(), now, statusCode);
+				const list = Effect.sync(() => {
+					const olderAt = log.findIndex(({ id }) => id < entry.id);
+
+					log.splice(olderAt === -1 ? log.length : olderAt, 0, entry);
+				});
+
+				return { attempt: entry, list };
+			}),
 		refuseRedelivery: (id, times) => {
 			refusals.set(id, times);
 		},

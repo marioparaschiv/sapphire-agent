@@ -49,7 +49,7 @@ Each rule details: `rules.md`.
 
 Mentions are not a rule: they arrive as GitHub App webhook deliveries. `WebhookServer` (`webhook-server.ts`) is an Effect-managed `node:http` server (`NodeHttpServer`) on `127.0.0.1:<bot.app.webhookPort>`, built as a layer beside the reconciler, so it listens while the service runs and closes on shutdown. nginx terminates TLS at `https://herdr.marioparaschiv.com/github` and forwards to it (`operations.md`). Each delivery's signature is checked against the webhook secret, its payload is decoded with `Schema`, and a comment that mentions the bot is recorded as a command by `makeRecordMention` (`mentions.ts`, which holds the mention and allowed-user decisions), before the delivery is answered. See `rules.md` (Mentions).
 
-GitHub does not redeliver a failed delivery by itself. `MissedDeliveries` (`missed-deliveries.ts`), forked by `main.ts` beside the reconciler, scans the App's delivery log at startup and every `deliveryScanSeconds` and asks GitHub to redeliver each event whose newest attempt failed, back to the journal's delivery mark and at most 3 days. The redeliveries arrive at the webhook server like any other. A failed scan is logged and tried again on the next. See `rules.md` (Missed deliveries).
+GitHub does not redeliver a failed delivery by itself. `MissedDeliveries` (`missed-deliveries.ts`), forked by `main.ts` beside the reconciler, scans the App's delivery log at startup and every `deliveryScanSeconds` and asks GitHub to redeliver each event whose newest attempt failed, back to 10 minutes before the journal's delivery mark and at most 3 days. The redeliveries arrive at the webhook server like any other. A failed scan is logged and tried again on the next. See `rules.md` (Missed deliveries).
 
 ## Services
 

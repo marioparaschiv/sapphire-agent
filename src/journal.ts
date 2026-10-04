@@ -205,7 +205,7 @@ const migrations = SqliteMigrator.layer({
 			yield* sql`
 				CREATE TABLE delivery_mark (
 					id INTEGER PRIMARY KEY CHECK (id = 1),
-					delivery_id INTEGER NOT NULL
+					delivered_at INTEGER NOT NULL
 				)
 			`;
 		}),
@@ -239,10 +239,9 @@ export class Journal extends Context.Service<
 		// Records the follow-up's claim and drops the request that asked for it in one transaction, so a crash never
 		// claims it twice or loses it.
 		readonly claimFollowUp: (run: Run, requestId: number) => Effect.Effect<void, JournalError>;
-		// The newest webhook delivery id at or below which every delivery succeeded or was redelivered; none before the
-		// first scan.
+		// When the newest webhook delivery the last complete scan saw was delivered, in ms; none before the first scan.
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
-		readonly setDeliveryMark: (deliveryId: number) => Effect.Effect<void, JournalError>;
+		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
 	}
 >()('herdr-linear/Journal') {
 	static readonly layer = (filename: string) =>
@@ -340,13 +339,13 @@ export class Journal extends Context.Service<
 
 				const deliveryMark = SqlSchema.findOneOption({
 					Request: Schema.Void,
-					Result: Schema.Struct({ deliveryId: Schema.Int }),
-					execute: () => sql`SELECT delivery_id FROM delivery_mark`,
-				})(undefined).pipe(Effect.map(Option.map(({ deliveryId }) => deliveryId)));
+					Result: Schema.Struct({ deliveredAt: Millis }),
+					execute: () => sql`SELECT delivered_at FROM delivery_mark`,
+				})(undefined).pipe(Effect.map(Option.map(({ deliveredAt }) => deliveredAt)));
 
 				const setDeliveryMark = SqlSchema.void({
-					Request: Schema.Int,
-					execute: (deliveryId) => sql`INSERT OR REPLACE INTO delivery_mark (id, delivery_id) VALUES (1, ${deliveryId})`,
+					Request: Millis,
+					execute: (deliveredAt) => sql`INSERT OR REPLACE INTO delivery_mark (id, delivered_at) VALUES (1, ${deliveredAt})`,
 				});
 
 				return Journal.of({

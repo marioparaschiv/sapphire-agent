@@ -74,7 +74,7 @@ describe('MissedDeliveries', () => {
 		}).pipe(Effect.provide(layer)),
 	);
 
-	it.effect('pages back at most 3 days on the first scan, then only back to the newest delivery it saw', () =>
+	it.effect('pages back at most 3 days on the first scan, then only back to 10 minutes before the newest delivery it saw', () =>
 		Effect.gen(function* () {
 			const app = yield* GitHubAppFixture;
 			const { url } = yield* listener;
@@ -104,7 +104,30 @@ describe('MissedDeliveries', () => {
 
 			assert.deepStrictEqual(app.deliveryPages().slice(3), [null]);
 			assert.deepStrictEqual(app.redelivered().slice(3), [later.id]);
-			assert.deepStrictEqual(yield* Journal.use((journal) => journal.deliveryMark), Option.some(later.id));
+			assert.deepStrictEqual(yield* Journal.use((journal) => journal.deliveryMark), Option.some(Date.parse(later.deliveredAt)));
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('redelivers a failed attempt GitHub listed after a newer one was scanned, up to 10 minutes behind the mark', () =>
+		Effect.gen(function* () {
+			const app = yield* GitHubAppFixture;
+
+			yield* TestClock.setTime(Date.UTC(2026, 9, 4, 11, 40));
+			const tooOld = yield* app.addSlowDelivery(ping, 502);
+			yield* TestClock.setTime(Date.UTC(2026, 9, 4, 12));
+			const slow = yield* app.addSlowDelivery(ping, 502);
+			yield* TestClock.adjust('5 seconds');
+			yield* app.addDelivery(ping, 200);
+
+			yield* scan;
+			assert.deepStrictEqual(app.redelivered(), []);
+
+			yield* tooOld.list;
+			yield* slow.list;
+			yield* TestClock.adjust('5 minutes');
+			yield* scan;
+
+			assert.deepStrictEqual(app.redelivered(), [slow.attempt.id]);
 		}).pipe(Effect.provide(layer)),
 	);
 
@@ -125,10 +148,9 @@ describe('MissedDeliveries', () => {
 			assert.deepStrictEqual(yield* journal.deliveryMark, Option.none());
 
 			yield* scan;
-			const mark = yield* journal.deliveryMark;
 
 			assert.deepStrictEqual(app.redelivered(), [other.id, refused.id]);
-			assert.isTrue(Option.isSome(mark) && mark.value > other.id);
+			assert.deepStrictEqual(yield* journal.deliveryMark, Option.some(Date.parse(other.deliveredAt)));
 
 			yield* scan;
 			assert.deepStrictEqual(app.redelivered(), [other.id, refused.id]);

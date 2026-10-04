@@ -7,6 +7,12 @@ import { Journal, type JournalError } from './journal.ts';
 // GitHub keeps an App's webhook deliveries this long.
 const retention = Duration.days(3);
 
+// GitHub lists an attempt only once it ends, so one can show up after a newer one was already scanned. Each scan looks
+// this far behind the mark again; redelivering twice is safe, as recording a mention is idempotent.
+const overlap = Duration.minutes(10);
+
+const deliveredAt = (delivery: Delivery) => Date.parse(delivery.deliveredAt);
+
 const succeeded = ({ statusCode }: Delivery) => statusCode >= 200 && statusCode < 300;
 
 // For each event (`guid`) whose newest attempt failed, that attempt. `deliveries` is newest first.
@@ -31,9 +37,9 @@ const toRedeliver = (deliveries: ReadonlyArray<Delivery>) => {
 export class MissedDeliveries extends Context.Service<
 	MissedDeliveries,
 	{
-		// Pages the App's deliveries back to the journal's delivery mark, at most 3 days back, redelivers the events whose
-		// newest attempt failed, then moves the mark to the newest delivery seen. A redelivery GitHub refuses leaves the mark
-		// where it was, so the next scan looks at it again.
+		// Pages the App's deliveries back to 10 minutes before the journal's delivery mark, at most 3 days back, redelivers
+		// the events whose newest attempt failed, then moves the mark to when the newest delivery seen was delivered. A
+		// redelivery GitHub refuses leaves the mark where it was, so the next scan looks at it again.
 		readonly scan: Effect.Effect<void, CallError | JournalError>;
 		// Scans at once, then every deliveryScanSeconds, until interrupted. A failed scan is logged and tried again on
 		// the next one.
@@ -50,20 +56,21 @@ export class MissedDeliveries extends Context.Service<
 			const scan = Effect.gen(function* () {
 				const mark = yield* journal.deliveryMark;
 				const oldest = (yield* Clock.currentTimeMillis) - Duration.toMillis(retention);
-				const isUnseen = (delivery: Delivery) => Option.match(mark, { onNone: () => true, onSome: (at) => delivery.id > at }) && Date.parse(delivery.deliveredAt) >= oldest;
+				const since = Option.match(mark, { onNone: () => oldest, onSome: (at) => Math.max(oldest, at - Duration.toMillis(overlap)) });
+				const isRecent = (delivery: Delivery) => deliveredAt(delivery) >= since;
 
-				const unseenFrom = (cursor: Option.Option<string>): Effect.Effect<ReadonlyArray<Delivery>, CallError> =>
+				const recentFrom = (cursor: Option.Option<string>): Effect.Effect<ReadonlyArray<Delivery>, CallError> =>
 					app.deliveries(cursor).pipe(
 						Effect.flatMap(({ deliveries, next }) => {
-							const seenAt = deliveries.findIndex((delivery) => !isUnseen(delivery));
-							const unseen = seenAt === -1 ? deliveries : deliveries.slice(0, seenAt);
+							const olderAt = deliveries.findIndex((delivery) => !isRecent(delivery));
+							const newer = olderAt === -1 ? deliveries : deliveries.slice(0, olderAt);
 
-							return seenAt !== -1 || Option.isNone(next) ? Effect.succeed(unseen) : Effect.map(unseenFrom(next), (older) => [...unseen, ...older]);
+							return olderAt !== -1 || Option.isNone(next) ? Effect.succeed(newer) : Effect.map(recentFrom(next), (older) => [...newer, ...older]);
 						}),
 					);
 
-				const unseen = yield* unseenFrom(Option.none());
-				const [, refused] = yield* Effect.partition(toRedeliver(unseen).reverse(), (delivery) =>
+				const recent = yield* recentFrom(Option.none());
+				const [, refused] = yield* Effect.partition(toRedeliver(recent).reverse(), (delivery) =>
 					app.redeliver(delivery.id).pipe(
 						Effect.tap(() => Effect.log(`redelivered webhook delivery ${delivery.id} (${delivery.guid}), which failed with HTTP ${delivery.statusCode}`)),
 						Effect.mapError((error) => ({ delivery, error })),
@@ -76,8 +83,8 @@ export class MissedDeliveries extends Context.Service<
 					return;
 				}
 
-				if (unseen.length > 0) {
-					yield* journal.setDeliveryMark(unseen[0].id);
+				if (recent.length > 0) {
+					yield* journal.setDeliveryMark(Math.max(...recent.map(deliveredAt)));
 				}
 			});
 

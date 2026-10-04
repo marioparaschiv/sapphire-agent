@@ -203,7 +203,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					addRequest: (request) => crashPoint.pipe(Effect.andThen(journal.addRequest(request))),
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
 					claimFollowUp: (run, requestId) => crashPoint.pipe(Effect.andThen(journal.claimFollowUp(run, requestId))),
-					setDeliveryMark: (deliveryId) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveryId))),
+					setDeliveryMark: (deliveredAt) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveredAt))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
