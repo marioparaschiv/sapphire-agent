@@ -104,6 +104,7 @@ describe('MissedDeliveries', () => {
 
 			assert.deepStrictEqual(app.deliveryPages().slice(3), [null]);
 			assert.deepStrictEqual(app.redelivered().slice(3), [later.id]);
+			assert.deepStrictEqual(yield* Journal.use((journal) => journal.deliveryMark), Option.some(later.id));
 		}).pipe(Effect.provide(layer)),
 	);
 

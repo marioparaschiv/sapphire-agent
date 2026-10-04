@@ -18,7 +18,16 @@ describe('GitHubApp', () => {
 
 			yield* TestClock.setTime(now * 1000);
 
-			const [login, jwts] = yield* Effect.all([GitHubApp.useSync(({ login }) => login), GitHubAppFixture.useSync(({ jwts }) => jwts())]).pipe(Effect.provide(layer));
+			const mentionHandle = AppConfig.layerTest('/tmp/herdr-linear-test', {
+				bot: {
+					login: 'mention-handle',
+					app: { id: 424242, privateKeyFile: '/tmp/herdr-linear-test/app.pem', webhookSecretFile: '/tmp/herdr-linear-test/webhook-secret', webhookPort: 0 },
+					allowedUsers: ['marioparaschiv'],
+				},
+			});
+			const [login, jwts] = yield* Effect.all([GitHubApp.useSync(({ login }) => login), GitHubAppFixture.useSync(({ jwts }) => jwts())]).pipe(
+				Effect.provide(GitHubAppFixture.layer.pipe(Layer.provideMerge(mentionHandle))),
+			);
 
 			assert.strictEqual(login, 'orchestratorbot[bot]');
 			assert.deepStrictEqual(jwts, [{ iat: now - 60, exp: now + 540, iss: 424242 }]);

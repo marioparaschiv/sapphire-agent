@@ -108,9 +108,10 @@ describe('WebhookServer', () => {
 					yield* h.deliver(sent, null),
 					yield* h.deliver(sent, signDelivery(Redacted.make('not-the-secret'), JSON.stringify(sent.payload))),
 					yield* h.deliver(sent, signDelivery(Redacted.make('test-webhook-secret'), otherBody)),
-					yield* h.deliver(sent, 'sha1=0123456789abcdef'),
+					yield* h.deliver(sent, signDelivery(Redacted.make('test-webhook-secret'), JSON.stringify(sent.payload)).replace('sha256=', 'sha512=')),
+					yield* h.deliver(sent, 'sha256=0123456789abcdef'),
 				],
-				[401, 401, 401, 401],
+				[401, 401, 401, 401, 401],
 			);
 			assert.deepStrictEqual(
 				[
