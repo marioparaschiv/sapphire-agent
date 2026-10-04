@@ -79,7 +79,8 @@ export class GitHub extends Context.Service<
 			const encoder = new TextEncoder();
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
-			// The user's account is gh's default login, for reads. `token` switches it to a GitHub App installation token.
+			// The user's account is gh's default login, for reads. Every write passes `token`, the installation token of the
+			// GitHub App on the repo it lands on.
 			const run = (args: ReadonlyArray<string>, input: string, token?: Redacted.Redacted<string>) => {
 				const command = `gh ${args.join(' ')}`;
 				const options = token ? { env: { GH_TOKEN: Redacted.value(token) }, extendEnv: true } : {};
@@ -172,9 +173,6 @@ export class GitHub extends Context.Service<
 					withPolicy,
 				);
 
-			// Every write is the GitHub App's, through the installation token of the repo it lands on.
-			const asApp = (repo: string, write: (token: Redacted.Redacted<string>) => Effect.Effect<void, CallError>) => Effect.flatMap(app.installationToken(repo), write);
-
 			return GitHub.of({
 				findPullRequest: (repo, branch) =>
 					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']).pipe(
@@ -183,7 +181,7 @@ export class GitHub extends Context.Service<
 					),
 
 				postFlagsReview: (repo, number, { marker, body }, flags) =>
-					asApp(repo, (token) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
 						unlessMarked(
 							reviewBodies(repo, number),
 							marker,
@@ -197,7 +195,7 @@ export class GitHub extends Context.Service<
 					),
 
 				replyToThread: (repo, threadId, { marker, body }) =>
-					asApp(repo, (token) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
 						unlessMarked(
 							Effect.map(reviewThread(threadId), ({ comments }) => comments),
 							marker,
@@ -214,7 +212,7 @@ export class GitHub extends Context.Service<
 					),
 
 				resolveThread: (repo, threadId) =>
-					asApp(repo, (token) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
 						reviewThread(threadId).pipe(
 							Effect.flatMap(({ isResolved }) =>
 								isResolved
@@ -233,7 +231,7 @@ export class GitHub extends Context.Service<
 					),
 
 				postComment: (repo, number, { marker, body }) =>
-					asApp(repo, (token) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
 						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, token)),
 					),
 			});
