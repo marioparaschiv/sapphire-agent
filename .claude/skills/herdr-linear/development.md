@@ -57,8 +57,8 @@ Inject fake crashes with a `Transient` error, so the epic's work stops without a
 - `tick`, `pausedTick`: drive the planner as the service does.
 - `deliver(delivery, signature?)`: POSTs a webhook delivery to the current webhook server, signed with the test secret (or the given `X-Hub-Signature-256`, `null` for none), and returns the HTTP status. `deliveries.issueComment`, `deliveries.reviewComment` and `deliveries.review` build GitHub-shaped deliveries for a fake's comment; `postDelivery` and `signDelivery` do the same for any server.
 - `app`: the `GitHubAppFixture`, pointed at the current webhook server. `stop`: the first half of a restart, so deliveries `app.deliver` sends fail as when the service is down. `scanDeliveries`: one scan of the current `MissedDeliveries`.
-- `restart`: a process restart. The planner, rules, webhook server and journal connection are built again on the same journal file, while Linear, GitHub, herdr and the repos keep their state.
-- `crashAtJournalWrite(n)`, `crashed()`, `journalWrites()`: the nth journal write of the reconciler or the webhook server from now dies before it is applied.
+- `restart`: a process restart. The planner, rules, webhook server, delivery scan and journal connection are built again on the same journal file, while Linear, GitHub, herdr and the repos keep their state.
+- `crashAtJournalWrite(n)`, `crashed()`, `journalWrites()`: the nth journal write of the reconciler, the webhook server or the delivery scan from now dies before it is applied.
 - `startedRun(seed)`: an epic in Implementing with a real worktree, a tab running Claude and a `running` row.
 - `ctl(...args)`: runs `ctl.sh <args>` in process, as a command's agent would, through its own journal connection; returns the lines it printed or fails with its refusal.
 - `runs`, `commands`, `epicMarkers(issueId)` (the `<purpose>:<key>` of each marked comment, as `markerKeys` gives for any bodies), `moveEpic`, `renameTab`, `writeResultFile`, `worktrees()`, `hasBranch`, plus `git(cwd, ...args)` for test commits and pushes.

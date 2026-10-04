@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { TestConsole } from 'effect/testing';
+import type { CallError } from './call-policy.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
@@ -14,15 +15,15 @@ import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-
 import { Git } from './git.ts';
 import { Herdr, type HerdrAgentStatus } from './herdr.ts';
 import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
-import { type Command, Journal, type Run } from './journal.ts';
+import { type Command, Journal, type JournalError, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
 import { MissedDeliveries } from './missed-deliveries.ts';
 import { type Observation, Observer, type StartedRun } from './observation.ts';
+import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
-import { Pause } from './pause.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
 import { WebhookServer } from './webhook-server.ts';
@@ -104,17 +105,17 @@ export type Harness = {
 	// status.
 	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
 	// One scan of the current MissedDeliveries for failed deliveries in the App fixture's log.
-	readonly scanDeliveries: Effect.Effect<void, unknown>;
+	readonly scanDeliveries: Effect.Effect<void, CallError | JournalError>;
 	// One tick of the current planner, with every rule in production order.
 	readonly tick: Effect.Effect<void>;
 	readonly pausedTick: Effect.Effect<void>;
-	// A process restart: the planner, its rules and the journal connection are built again on the same journal file,
-	// while Linear, GitHub, herdr and the repos keep their state.
+	// A process restart: the planner, its rules, the webhook server, the delivery scan and the journal connection are
+	// built again on the same journal file, while Linear, GitHub, herdr and the repos keep their state.
 	readonly restart: Effect.Effect<void>;
 	// The first half of a restart: the service is down, so deliveries the App fixture sends fail.
 	readonly stop: Effect.Effect<void>;
-	// Counted from this call: the nth journal write the reconciler, the webhook server or the delivery scan makes dies without being applied, as if the process
-	// crashed right before recording what it had just done.
+	// Counted from this call: the nth journal write the reconciler, the webhook server or the delivery scan makes dies
+	// without being applied, as if the process crashed right before recording what it had just done.
 	readonly crashAtJournalWrite: (nth: number) => void;
 	// As the user renames a tab in herdr.
 	readonly renameTab: (tabId: string, label: string) => Effect.Effect<void>;
