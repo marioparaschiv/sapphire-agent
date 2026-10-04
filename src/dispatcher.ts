@@ -202,7 +202,7 @@ export class Dispatcher {
 
 				case 'replyFailed': {
 					log(`${claim.identifier}: typing reply ${message.commentId} failed: ${message.error}`);
-					await this.options.linear.comment(claim.epicId, replyFailedComment(message.error), message.commentId);
+					await this.options.linear.comment(claim.epicId, replyFailedComment(message.error), claim.questionCommentId);
 				}
 			}
 		});
@@ -745,7 +745,7 @@ function replyMismatchComment(config: Config, job: Job, mismatch: string) {
 }
 
 function replyFailedComment(error: string) {
-	return `**herdr-linear:** couldn't type this reply into the agent's pane: ${error}. Answer the agent in its tab.`;
+	return `**herdr-linear:** couldn't type your last reply into the agent's pane: ${error}. Answer the agent in its tab.`;
 }
 
 function failureComment(config: Config, error: string, tail?: string) {

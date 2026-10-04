@@ -524,8 +524,8 @@ test('asks the question on the epic once and types the user\'s reply into the pa
 	assert.equal(h.linear.comments.filter((comment) => comment.body.includes('Use Postgres or SQLite?')).length, 1, 'the question is asked once');
 
 	await restarted.handle({ type: 'replyFailed', epicId: epic.id, commentId: answer.id, error: 'herdr agent_blocked: agent is blocked' });
-	assert.equal(h.linear.comments.at(-1)?.parentId, answer.id);
-	assert.match(h.linear.comments.at(-1)!.body, /couldn't type this reply into the agent's pane: herdr agent_blocked/);
+	assert.equal(h.linear.comments.at(-1)?.parentId, question.id, 'Linear threads are one level deep');
+	assert.match(h.linear.comments.at(-1)!.body, /couldn't type your last reply into the agent's pane: herdr agent_blocked/);
 
 	await restarted.handle({ type: 'status', epicId: epic.id, status: 'working', tail: 'Using SQLite' });
 	assert.equal(claimsOnDisk(h)[0].status, 'running');
