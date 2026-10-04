@@ -1,7 +1,8 @@
-import { Context, Effect, Layer, Option, Schema, Stream } from 'effect';
+import { Context, Effect, Layer, Option, Redacted, Schema, SchemaGetter, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
 import { AppConfig } from './config.ts';
+import { GitHubApp } from './github-app.ts';
 import { hasMarker, type MarkedComment, type Marker } from './markers.ts';
 import type { ResultFile } from './result-file.ts';
 
@@ -33,13 +34,21 @@ const NotificationJson = Schema.Struct({
 	repository: Schema.Struct({ fullName: Schema.String }).pipe(Schema.encodeKeys({ fullName: 'full_name' })),
 }).pipe(Schema.encodeKeys({ lastReadAt: 'last_read_at' }));
 
+// GraphQL gives an App's comments the App's slug as the login, where REST and webhooks give `<slug>[bot]`.
+const Author = Schema.Struct({ __typename: Schema.String, login: Schema.String }).pipe(
+	Schema.decodeTo(Schema.Struct({ login: Schema.String }), {
+		decode: SchemaGetter.transform(({ __typename, login }) => ({ login: __typename === 'Bot' ? `${login}[bot]` : login })),
+		encode: SchemaGetter.forbiddenEncoding,
+	}),
+);
+
 // A comment on an issue or PR, a review, or a review comment. The author is null for a deleted account.
-export const GitHubComment = Schema.Struct({
+const GitHubComment = Schema.Struct({
 	id: Schema.String,
 	url: Schema.String,
 	body: Schema.String,
 	createdAt: Schema.String,
-	author: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+	author: Schema.NullOr(Author),
 });
 
 export type GitHubComment = typeof GitHubComment.Type;
@@ -51,11 +60,9 @@ const Conversation = Schema.Struct({
 
 export type Conversation = typeof Conversation.Type;
 
-const commentFields = 'id url body createdAt author { login }';
+const commentFields = 'id url body createdAt author { __typename login }';
 
 export type Flags = ResultFile['flags'];
-
-type Account = 'user' | 'bot';
 
 // Linear shows a GitHub comment carrying this block as written by Claude. The agent and the user share one GitHub
 // account, so it is the only way to tell the agent's comments from the user's.
@@ -135,7 +142,7 @@ export class GitHub extends Context.Service<
 		readonly markNotificationRead: (threadId: string) => Effect.Effect<void, CallError>;
 		// The newest comments of the issue or PR (see conversationComments), up to maxNodes of each kind.
 		readonly conversation: (repo: string, number: number) => Effect.Effect<ReadonlyArray<GitHubComment>, CallError>;
-		// A comment on the issue or PR as the bot.
+		// A comment on the issue or PR as the GitHub App.
 		readonly postAsBot: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 	}
 >()('herdr-linear/GitHub') {
@@ -144,17 +151,21 @@ export class GitHub extends Context.Service<
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const { bot } = yield* AppConfig;
+			const app = yield* GitHubApp;
 			const encoder = new TextEncoder();
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
-			// The user's account is gh's default login; the bot's is its own gh config dir.
-			const run = (args: ReadonlyArray<string>, input: string, account: Account) => {
+			// The user's account is gh's default login. `env` switches it: to the bot user's gh config dir, or to a GitHub App
+			// installation token.
+			const asBotUser = { GH_CONFIG_DIR: bot.ghConfigDirectory };
+
+			const run = (args: ReadonlyArray<string>, input: string, env?: Record<string, string>) => {
 				const command = `gh ${args.join(' ')}`;
-				const env = account === 'bot' ? { env: { GH_CONFIG_DIR: bot.ghConfigDirectory }, extendEnv: true } : {};
+				const options = env ? { env, extendEnv: true } : {};
 
 				return Effect.scoped(
 					Effect.gen(function* () {
-						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)), ...env }));
+						const handle = yield* spawner.spawn(ChildProcess.make('gh', args, { stdin: Stream.make(encoder.encode(input)), ...options }));
 						const [stdout, stderr, exitCode] = yield* Effect.all([text(handle.stdout), text(handle.stderr), handle.exitCode], { concurrency: 'unbounded' });
 
 						if (exitCode !== 0) {
@@ -166,8 +177,8 @@ export class GitHub extends Context.Service<
 				).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail(new Permanent({ message: `${command}: ${error.message}`, cause: error }))));
 			};
 
-			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', account: Account = 'user') =>
-				run(args, input, account).pipe(
+			const gh = <A>(schema: Schema.Decoder<A>, args: ReadonlyArray<string>, input = '', env?: Record<string, string>) =>
+				run(args, input, env).pipe(
 					Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(schema))),
 					Effect.catchTag('SchemaError', (error) => Effect.fail(new Permanent({ message: `gh ${args.join(' ')}: ${error.message}`, cause: error }))),
 				);
@@ -176,8 +187,8 @@ export class GitHub extends Context.Service<
 			const graphql = <A>(schema: Schema.Decoder<A>, query: string, variables: Record<string, unknown>) =>
 				gh(Schema.Struct({ data: schema }), ['api', 'graphql', '--input', '-'], JSON.stringify({ query, variables })).pipe(Effect.map(({ data }) => data));
 
-			const post = (endpoint: string, body: Record<string, unknown>, account: Account = 'user') =>
-				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), account).pipe(Effect.asVoid);
+			const post = (endpoint: string, body: Record<string, unknown>, env?: Record<string, string>) =>
+				gh(Schema.Struct({ id: Schema.Int }), ['api', '--method', 'POST', endpoint, '--input', '-'], JSON.stringify(body), env).pipe(Effect.asVoid);
 
 			const ownerAndName = (repo: string) => {
 				const [owner, name] = repo.split('/');
@@ -297,12 +308,12 @@ export class GitHub extends Context.Service<
 						withPolicy,
 					),
 
-				notifications: gh(Schema.Array(NotificationJson), ['api', `notifications?participating=true&per_page=${notificationsPerTick}`], '', 'bot').pipe(
+				notifications: gh(Schema.Array(NotificationJson), ['api', `notifications?participating=true&per_page=${notificationsPerTick}`], '', asBotUser).pipe(
 					Effect.map((found) => found.flatMap((notification) => Option.toArray(notificationOf(notification)))),
 					withPolicy,
 				),
 
-				markNotificationRead: (threadId) => run(['api', '--method', 'PATCH', `notifications/threads/${threadId}`], '', 'bot').pipe(Effect.asVoid, withPolicy),
+				markNotificationRead: (threadId) => run(['api', '--method', 'PATCH', `notifications/threads/${threadId}`], '', asBotUser).pipe(Effect.asVoid, withPolicy),
 
 				conversation: (repo, number) =>
 					graphql(
@@ -329,7 +340,9 @@ export class GitHub extends Context.Service<
 					),
 
 				postAsBot: (repo, number, { marker, body }) =>
-					unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, 'bot')),
+					Effect.flatMap(app.installationToken(repo), (token) =>
+						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, { GH_TOKEN: Redacted.value(token) })),
+					),
 			});
 		}),
 	);

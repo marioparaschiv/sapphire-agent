@@ -1,6 +1,7 @@
 import { Clock, Effect, Option } from 'effect';
 import { AppConfig } from './config.ts';
 import { GitHub, type GitHubComment, isClaude, mentions, notificationsPerTick } from './github.ts';
+import { GitHubApp } from './github-app.ts';
 import { Journal, type MentionThread } from './journal.ts';
 import type { Rule } from './planner.ts';
 
@@ -16,13 +17,15 @@ export const mentionsRule = Effect.gen(function* () {
 	const { bot } = yield* AppConfig;
 	const journal = yield* Journal;
 	const github = yield* GitHub;
+	const app = yield* GitHubApp;
 
-	// The agent shares the user's account, so its own comments carry the onBehalfOf block instead.
+	// The App's replies may mention the bot too. The agent shares the user's account, so its own comments carry the
+	// onBehalfOf block instead.
 	const isRequest = (since: number) => (comment: GitHubComment) =>
 		Date.parse(comment.createdAt) >= since &&
 		mentions(bot.login, comment.body) &&
 		!isClaude(comment.body) &&
-		!Option.exists(Option.fromNullishOr(comment.author), ({ login }) => sameLogin(login, bot.login));
+		!Option.exists(Option.fromNullishOr(comment.author), ({ login }) => sameLogin(login, app.login));
 
 	const scan = ({ threadId, repo, number, since }: MentionThread) =>
 		Effect.gen(function* () {

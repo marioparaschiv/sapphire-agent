@@ -113,7 +113,7 @@ Not paused. Turns comments that mention the bot into commands, at most once per 
 2. For each, record its thread in the journal (`mention_threads`, with `since`: when the bot last read it, or the journal's creation if later), then mark the notification read.
 3. Scan each recorded thread (up to 50 a tick): read the issue's or PR's comments, reviews and review comments (the newest 100 of each), and record every one created since `since` that mentions the bot as a command, oldest first: `queued` when its author is in `bot.allowedUsers` (any case), `ignored` otherwise. Then drop the thread.
 
-A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` counts, `@orchestratorbotx` and `a@orchestratorbot` do not. Comments by the bot, and comments carrying the onBehalfOf block (the agent's own, on the user's account), are never commands.
+A mention is `@<bot.login>` as a whole word in any case: `@OrchestratorBot` counts, `@orchestratorbotx` and `a@orchestratorbot` do not. Comments by the GitHub App (author `<slug>[bot]`, the slug read from `GET /app` at startup), whose replies may mention the bot, and comments carrying the onBehalfOf block (the agent's own, on the user's account), are never commands.
 
 Why this is crash-safe and drops nothing: the thread is in the journal before its notification is read, and it stays there until its comments are recorded, so a crash at any point leaves it for the next tick. A command is keyed by the comment's GitHub node id, so scanning a thread again records nothing twice. Notifications only point at a thread's latest comment, so the whole thread is scanned since the bot last read it: two mentions written between ticks both become commands. A comment written while this runs either lands before the scan (which happens after the notification is marked read) or makes the notification unread again. Mentions written before the journal existed are never run.
 
@@ -133,7 +133,7 @@ A Permanent failure or a claim not confirmed within `startTimeoutSeconds` fails 
 
 While running, the agent is tracked as monitoring tracks a run (status and pane output, the same timers and nudge). It ends, tab closed and `ended`, once it ran `ctl.sh done CMD-<n>` and is not working. It fails when it exits or its tab vanishes, sits quiet for `awaitingInputAfterSeconds` without saying it is done, stays unchanged for `nudgeGraceSeconds` after a nudge, or runs past `maxRunSeconds` from its claim. These are the command's flags: there is no epic to put a label on, so the bot replies on the issue or PR the comment is on, once (`commandFailed` marker), with the reason, the pane tail, and `Mention @<bot> again to retry.`; then the tab is closed and it is `error`.
 
-`ctl.sh reply <comment-url> <text>` only accepts the URL of a command's comment. The rule posts each reply as the bot on that issue or PR (a conversation comment, `commandReply` marker keyed by the request), before ending the command. A request for a command that does not exist is dropped.
+`ctl.sh reply <comment-url> <text>` only accepts the URL of a command's comment. The rule posts each reply as the GitHub App on that issue or PR (a conversation comment, `commandReply` marker keyed by the request), before ending the command. A request for a command that does not exist is dropped.
 
 ### What the command agent can do
 
@@ -148,7 +148,7 @@ Claude is started for a command with (`commandClaudeArgs`):
 - `--tools Bash,Read,Grep,Glob`: no tool that edits or fetches.
 - `--settings` with a permissions block: `defaultMode: dontAsk`, so anything not allowed is denied without asking; allowed: `Bash(sh <ctl.sh> *)`, `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `git log`, `git show`, `git diff`, `git status` (with or without arguments), `Read`, `Grep`, `Glob`; denied: `Bash(git * --output*)`.
 
-Claude Code checks each part of a compound command, so `sh ctl.sh status; touch x` is denied as a whole. Only allowed users' comments reach an agent at all. What it can still do is what `ctl.sh` does (`reply` posts as the bot only on a command's thread), and what a run it messages or a follow-up it asks for then does.
+Claude Code checks each part of a compound command, so `sh ctl.sh status; touch x` is denied as a whole. Only allowed users' comments reach an agent at all. What it can still do is what `ctl.sh` does (`reply` posts as the GitHub App only on a command's thread), and what a run it messages or a follow-up it asks for then does.
 
 ## Flags
 

@@ -9,6 +9,7 @@ import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { runCtl } from './ctl.ts';
+import { GitHubAppFixture } from './github-app-fixture.ts';
 import { FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
 import { Git } from './git.ts';
 import { Herdr, type HerdrAgentStatus } from './herdr.ts';
@@ -90,8 +91,8 @@ const makeRepos = (dir: string) => {
 	return { origin, repo };
 };
 
-// Real temp git repos, the Linear fixture server, the GitHub and herdr fakes and a temp-file SQLite journal, wired to
-// the production rules. Needs a Scope; everything is removed when it closes.
+// Real temp git repos, the Linear and GitHub App fixture servers, the GitHub and herdr fakes and a temp-file SQLite
+// journal, wired to the production rules. Needs a Scope; everything is removed when it closes.
 export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
 	Effect.gen(function* () {
 		const dir = yield* Effect.acquireRelease(
@@ -103,7 +104,9 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		writeFileSync(join(dir, 'claude.json'), '{}\n');
 
 		const config = AppConfig.layerTest(dir, settings);
-		const fixtures = yield* Layer.build(Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer, FakeHerdr.layer).pipe(Layer.provideMerge(config)));
+		const fixtures = yield* Layer.build(
+			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakeHerdr.layer).pipe(Layer.provideMerge(config)),
+		);
 		let journalWrites = 0;
 		let crashAt = Option.none<number>();
 		let crashed = false;

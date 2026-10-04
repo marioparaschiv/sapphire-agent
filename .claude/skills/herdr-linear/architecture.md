@@ -38,7 +38,7 @@ Rules run in this order (`rules.ts`):
 | 6 | dispatch | yes | Claims ready epics up to `maxInFlight`. |
 | 7 | start | no | Takes each claimed run through worktree, trust, tab, Claude and the move to Implementing. |
 | 8 | mentions | no | Reads the bot's GitHub notifications and records each comment that mentions the bot as a command (queued, or ignored when its author is not allowed). |
-| 9 | commands | no | Runs the command agents one at a time: starts the next, watches the running one, posts its replies as the bot, ends it when it is done or fails it. |
+| 9 | commands | no | Runs the command agents one at a time: starts the next, watches the running one, posts its replies as the GitHub App, ends it when it is done or fails it. |
 
 Why this order: requests come first, so a stopped run is ended before any other rule looks at it. Cleanup and results end runs before monitoring looks at them, so one tick never flags a run it just ended. Claims come next, follow-ups before ready epics since both count against `maxInFlight`, so the start rule starts them in the same tick. Mentions are read last, and the commands rule starts the new command in the same tick. Mentions and commands are not pausable: `resume` itself comes in as a command. Rules run one after another, so two rules never act on the same epic at once, and each sees in the journal what the rules before it wrote. A rule that takes over a tab checks herdr again first, since an earlier rule may have closed it this tick.
 
@@ -52,9 +52,10 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 
 | Service | Module | Does | Test layer |
 | --- | --- | --- | --- |
-| `AppConfig` | `config.ts` | Env, config file and API key, read once at startup. | `AppConfig.layerTest(dir, settings)` |
+| `AppConfig` | `config.ts` | Env, config file, API key and GitHub App private key, read once at startup. | `AppConfig.layerTest(dir, settings)` |
 | `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, replies, comments, moves, labels, reactions. | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
-| `GitHub` | `github.ts` | `gh` CLI: PR lookup, summary, flags review, thread replies and resolves as the user, reading an issue's or PR's comments; notifications and comments as the bot. | `FakeGitHub.layer` |
+| `GitHub` | `github.ts` | `gh` CLI: PR lookup, summary, flags review, thread replies and resolves as the user, reading an issue's or PR's comments; notifications as the bot account; comments as the GitHub App. | `FakeGitHub.layer` |
+| `GitHubApp` | `github-app.ts` | GitHub App auth over `HttpClient`: its `<slug>[bot]` login, read at startup, and installation tokens, cached per installation. | `GitHubAppFixture.layer`: a real HTTP server with the real `GitHubApp` layer pointed at it. |
 | `Herdr` | `herdr.ts` | herdr CLI and event socket: workspaces, tabs (with extra shell variables), panes, agents, prompts, starting Claude (with extra arguments). | `FakeHerdr.layer` |
 | `Git` | `git.ts` | Worktrees, pull, unsaved-work check, removal, origin's GitHub repo, the result file. | Real git in temp repos. |
 | `ClaudeTrust` | `claude-trust.ts` | Pre-accepts Claude's folder trust in `~/.claude.json`. | Real temp files. |
@@ -70,9 +71,9 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 
 ## Startup (`main.ts`)
 
-1. `AppConfig.layer` reads env, the config file and the API key and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
+1. `AppConfig.layer` reads env, the config file, the API key and the GitHub App's private key and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$HERDR_PLUGIN_STATE_DIR/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
-3. The journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations.
+3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, and `GitHubApp` reads the App's slug from GitHub (`GET /app`). A failure there stops startup.
 4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event and one that calls it whenever the state directory's `wake` file is written, and runs the reconciler.
 
 `NodeRuntime.runMain` runs it; SIGTERM interrupts the tick cleanly. Logs go to stdout with `epic` and `rule` annotations.
@@ -104,9 +105,9 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/prompts.ts` | Tab label and prompts. |
 | `src/result-file.ts` | Result file schema. |
 | `src/call-policy.ts` | `Transient`, `Permanent`, timeouts and retries for every external call. |
-| `src/config.ts` | Config schema, env, API key, `StartupError`. |
+| `src/config.ts` | Config schema, env, API key, App private key, `StartupError`. |
 | `src/legacy-claims.ts` | Startup guard against an undrained `claims.json`. |
-| `src/linear.ts`, `src/github.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/pause.ts` | The external services. |
-| `src/linear-fixture.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
+| `src/linear.ts`, `src/github.ts`, `src/github-app.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/pause.ts` | The external services. |
+| `src/linear-fixture.ts`, `src/github-app-fixture.ts`, `src/fixture-server.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
 | `src/fixtures/herdr/` | Real herdr JSON output and events, recorded from a named session, for the herdr tests. |
 | `src/*.test.ts` | Tests beside the code. |

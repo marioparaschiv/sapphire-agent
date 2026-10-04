@@ -95,7 +95,7 @@ On the GitHub PR:
 | `flags` | `<claimedAt>` | Once per run, as the COMMENT review holding every flag. |
 | `reply` | `<threadId>.<claimedAt>` | Once per thread per run, among the thread's comments. |
 
-On the issue or PR a command came from, as the bot:
+On the issue or PR a command came from, as the GitHub App:
 
 | Purpose | Key | Posted |
 | --- | --- | --- |

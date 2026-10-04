@@ -1,10 +1,11 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit, Fiber, Layer, Option, Schema, Sink, Stream } from 'effect';
+import { Context, Effect, Exit, Fiber, Layer, Option, Schema, Sink, Stream } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 import { TestClock } from 'effect/testing';
 import { Permanent, Transient } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { asClaude, classifyGhFailure, GitHub, mentions, ON_BEHALF_OF_CLAUDE } from './github.ts';
+import { GitHubAppFixture } from './github-app-fixture.ts';
 import { FakeGitHub } from './github-fake.ts';
 import { withMarker } from './markers.ts';
 
@@ -18,7 +19,7 @@ const bytes = (text: string) => Stream.make(encoder.encode(text));
 
 const config = AppConfig.layerTest('/tmp/herdr-linear-test');
 
-// The live layer over a fake `gh` that records each call and answers it with `respond`.
+// The live layer over a fake `gh` that records each call and answers it with `respond`, with the GitHub App fixture.
 const liveWithGh = (respond: (call: GhCall) => GhReply) => {
 	const calls: Array<GhCall> = [];
 	const spawner = ChildProcessSpawner.make((command) =>
@@ -52,7 +53,10 @@ const liveWithGh = (respond: (call: GhCall) => GhReply) => {
 		}),
 	);
 
-	return { calls, layer: GitHub.layer.pipe(Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)), Layer.provide(config)) };
+	return {
+		calls,
+		layer: GitHub.layer.pipe(Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)), Layer.provideMerge(GitHubAppFixture.layer), Layer.provide(config)),
+	};
 };
 
 const GraphqlRequest = Schema.fromJsonString(
@@ -197,7 +201,8 @@ describe('GitHub live layer', () => {
 
 				return call.args[1] === '--method' && server.state.comments.length === 1 ? 'hang' : reply;
 			});
-			const fiber = yield* GitHub.use((github) => github.postSummary(repo, 7, summary)).pipe(Effect.provide(layer), Effect.forkChild);
+			const github = Context.get(yield* Layer.build(layer), GitHub);
+			const fiber = yield* github.postSummary(repo, 7, summary).pipe(Effect.forkChild);
 
 			yield* TestClock.adjust('20 seconds');
 			yield* TestClock.adjust('1200 millis');
@@ -227,24 +232,46 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
-	it.effect('posts as the bot once on an issue or PR, through its gh config dir', () =>
+	it.effect("posts as the GitHub App once on an issue or PR, with its installation's token", () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
 			const { calls, layer } = liveWithGh(server.respond);
 			const reply = withMarker('Stopped HL-12.', { identifier: 'CMD-3', purpose: 'commandReply', key: '7' });
+			const minted = yield* Effect.gen(function* () {
+				const app = yield* GitHubAppFixture;
 
-			yield* GitHub.use((github) => Effect.repeat(github.postAsBot(repo, 7, reply), { times: 1 })).pipe(Effect.provide(layer));
+				app.install(repo);
+				yield* GitHub.use((github) => Effect.repeat(github.postAsBot(repo, 7, reply), { times: 1 }));
+
+				return app.tokens();
+			}).pipe(Effect.provide(layer));
 
 			assert.deepStrictEqual(server.state.comments, [reply.body]);
+			assert.deepStrictEqual(
+				minted.map(({ token }) => token),
+				['ghs_1001_1'],
+			);
 			assert.deepStrictEqual(
 				calls.map(({ args, env, extendEnv }) => [args.join(' '), env, extendEnv]),
 				[
 					['api graphql --input -', undefined, undefined],
-					[`api --method POST repos/${repo}/issues/7/comments --input -`, { GH_CONFIG_DIR: '/tmp/herdr-linear-test/gh-bot' }, true],
+					[`api --method POST repos/${repo}/issues/7/comments --input -`, { GH_TOKEN: 'ghs_1001_1' }, true],
 					['api graphql --input -', undefined, undefined],
 				],
 			);
 			assert.match(graphqlRequest(calls[0]).query, /issueOrPullRequest\(number: \$number\)/);
+		}),
+	);
+
+	it.effect('fails Permanent without posting when the GitHub App is not installed on the repo', () =>
+		Effect.gen(function* () {
+			const server = pullRequestServer();
+			const { calls, layer } = liveWithGh(server.respond);
+			const reply = withMarker('Stopped HL-12.', { identifier: 'CMD-3', purpose: 'commandReply', key: '7' });
+			const exit = yield* GitHub.use((github) => github.postAsBot(repo, 7, reply)).pipe(Effect.provide(layer), Effect.exit);
+
+			assert.deepStrictEqual(exit, Exit.fail(new Permanent({ message: `GitHub answered HTTP 404 to GET /repos/${repo}/installation: Not Found` })));
+			assert.lengthOf(calls, 0);
 		}),
 	);
 
@@ -314,21 +341,21 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
-	it.effect('reads the comments, reviews and review comments of a PR and the comments of an issue', () =>
+	it.effect("reads the comments, reviews and review comments of a PR and the comments of an issue, with an App's login as `<slug>[bot]`", () =>
 		Effect.gen(function* () {
-			const comment = (id: string, body: string, author: string | null = 'marioparaschiv') => ({
+			const comment = (id: string, body: string, author: string | null = 'marioparaschiv', type = 'User') => ({
 				id,
 				url: `https://github.com/${repo}/pull/7#${id}`,
 				body,
 				createdAt: '2026-10-04T09:40:00Z',
-				author: author === null ? null : { login: author },
+				author: author === null ? null : { __typename: type, login: author },
 			});
 			const { calls, layer } = liveWithGh((call) =>
 				call.input.includes('"number":7')
 					? data({
 							repository: {
 								issueOrPullRequest: {
-									comments: { nodes: [comment('IC_1', '@orchestratorbot stop HL-12')] },
+									comments: { nodes: [comment('IC_1', '@orchestratorbot stop HL-12'), comment('IC_3', 'Stopped HL-12.', 'orchestratorbot', 'Bot')] },
 									reviews: { nodes: [{ ...comment('PRR_1', 'A few things. @orchestratorbot'), comments: { nodes: [comment('PRRC_1', 'Rename this.', null)] } }] },
 								},
 							},
@@ -343,20 +370,22 @@ describe('GitHub live layer', () => {
 				pullRequest.map(({ id, author }) => [id, author?.login ?? null]),
 				[
 					['IC_1', 'marioparaschiv'],
+					['IC_3', 'orchestratorbot[bot]'],
 					['PRR_1', 'marioparaschiv'],
 					['PRRC_1', null],
 				],
 			);
 			assert.deepStrictEqual(issue.map(({ id }) => id), ['IC_2']);
 			assert.deepStrictEqual(missing, new Permanent({ message: `${repo}#99 is no issue or PR` }));
-			assert.match(graphqlRequest(calls[0]).query, /reviews\(last: 100\) \{ nodes \{ id url body createdAt author \{ login \} comments\(first: 100\)/);
+			assert.match(graphqlRequest(calls[0]).query, /reviews\(last: 100\) \{ nodes \{ id url body createdAt author \{ __typename login \} comments\(first: 100\)/);
 		}),
 	);
 
 	it.effect('retries a gh call that times out as Transient', () =>
 		Effect.gen(function* () {
 			const { calls, layer } = liveWithGh(() => (calls.length === 1 ? 'hang' : { stdout: JSON.stringify([pullRequestJson(8, 'OPEN')]) }));
-			const fiber = yield* GitHub.use((github) => github.findPullRequest(repo, 'mario/hl-11-github')).pipe(Effect.provide(layer), Effect.forkChild);
+			const github = Context.get(yield* Layer.build(layer), GitHub);
+			const fiber = yield* github.findPullRequest(repo, 'mario/hl-11-github').pipe(Effect.forkChild);
 
 			yield* TestClock.adjust('20 seconds');
 			assert.lengthOf(calls, 1);
@@ -438,7 +467,7 @@ describe('classifyGhFailure', () => {
 });
 
 describe('FakeGitHub', () => {
-	it.effect("notifies the bot of a mention by anyone but itself, until it reads the notification, and lists the PR's comments", () =>
+	it.effect("notifies the bot of a mention by anyone but itself, until it reads the notification, and lists the PR's comments, the App's included", () =>
 		Effect.gen(function* () {
 			const fake = yield* FakeGitHub;
 			const github = yield* GitHub;
@@ -466,13 +495,13 @@ describe('FakeGitHub', () => {
 				(yield* github.conversation(repo, number)).map(({ body, author }) => [body.split('\n')[0], author?.login]),
 				[
 					['Looks good.', 'marioparaschiv'],
-					['On it.', 'orchestratorbot'],
+					['On it.', 'orchestratorbot[bot]'],
 					['@orchestratorbot handle these', 'reviewer'],
 					['Rename this. @OrchestratorBot', 'marioparaschiv'],
 				],
 			);
 			assert.deepStrictEqual(fake.thread(thread).comments.map(({ body }) => body), ['Rename this. @OrchestratorBot']);
-		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(config)))),
+		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(GitHubAppFixture.layer), Layer.provide(config)))),
 	);
 
 	it.effect('finds the open PR first, as the live layer does', () =>
@@ -487,7 +516,7 @@ describe('FakeGitHub', () => {
 			fake.setPullRequestState(repo, open.number, 'CLOSED');
 
 			assert.deepStrictEqual(yield* github.findPullRequest(repo, 'mario/hl-11-github'), Option.some(merged));
-		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(config)))),
+		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(GitHubAppFixture.layer), Layer.provide(config)))),
 	);
 
 	it.effect('does not post again after a crash between the write and recording it', () =>
@@ -514,6 +543,6 @@ describe('FakeGitHub', () => {
 				[fake.thread(threadId).isResolved, fake.thread(threadId).comments.map(({ body }) => body)],
 				[true, ['@orchestratorbot rename this', asClaude(reply.body)]],
 			);
-		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(config)))),
+		}).pipe(Effect.provide(FakeGitHub.layer.pipe(Layer.provide(GitHubAppFixture.layer), Layer.provide(config)))),
 	);
 });

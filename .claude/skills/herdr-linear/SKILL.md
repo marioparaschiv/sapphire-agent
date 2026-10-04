@@ -5,7 +5,7 @@ description: Use when working on, debugging, or operating the herdr-linear plugi
 
 # herdr-linear
 
-A herdr plugin plus systemd user service that watches Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses. A GitHub comment that mentions the bot account (`@orchestratorbot`), by a user in `bot.allowedUsers`, starts a command agent: Claude locked down to `scripts/ctl.sh` and read-only `gh` and `git`, which reads the request in plain language and acts on it (status, pause, start or stop an epic, message a run's agent, ask for a `/follow-up` run that changes the PR, reply as the bot). It is written on Effect 4 as one level-triggered reconciler: every tick it observes Linear, herdr, git and GitHub, compares that with a small local journal, and acts.
+A herdr plugin plus systemd user service that watches Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses. A GitHub comment that mentions the bot account (`@orchestratorbot`), by a user in `bot.allowedUsers`, starts a command agent: Claude locked down to `scripts/ctl.sh` and read-only `gh` and `git`, which reads the request in plain language and acts on it (status, pause, start or stop an epic, message a run's agent, ask for a `/follow-up` run that changes the PR, reply as the GitHub App). It is written on Effect 4 as one level-triggered reconciler: every tick it observes Linear, herdr, git and GitHub, compares that with a small local journal, and acts.
 
 Repo: `~/herdr-linear`. Read only the files you need.
 

@@ -13,7 +13,7 @@ const reviewedPullRequest = (h: Harness) => h.github.addPullRequest({ repo: h.gi
 const described = (commands: ReadonlyArray<Command>) => commands.map(({ author, body, status }) => [author, body, status]);
 
 describe('mentions', () => {
-	it.effect("queues a mention by an allowed user, ignores one by anyone else, and never counts the bot's or the agent's own comments", () =>
+	it.effect("queues a mention by an allowed user, ignores one by anyone else, and never counts the App's or the agent's own comments", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { number } = reviewedPullRequest(h);
@@ -21,7 +21,7 @@ describe('mentions', () => {
 			h.github.addComment(h.githubRepo, number, '@OrchestratorBot stop TEST-12', 'MarioParaschiv');
 			h.github.addComment(h.githubRepo, number, '@orchestratorbot merge this', 'stranger');
 			h.github.addComment(h.githubRepo, number, asClaude('Ready for review. Mention @orchestratorbot to ask for changes.'));
-			h.github.addComment(h.githubRepo, number, 'Mention @orchestratorbot again to retry.', 'orchestratorbot');
+			h.github.addComment(h.githubRepo, number, 'Mention @orchestratorbot again to retry.', 'orchestratorbot[bot]');
 			h.github.addComment(h.githubRepo, number, 'Thanks, orchestratorbot.');
 			yield* h.tick;
 

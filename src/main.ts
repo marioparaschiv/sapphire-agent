@@ -7,6 +7,7 @@ import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
+import { GitHubApp } from './github-app.ts';
 import { Herdr } from './herdr.ts';
 import { Journal } from './journal.ts';
 import { refuseUndrainedClaims } from './legacy-claims.ts';
@@ -20,16 +21,14 @@ import { rules } from './rules.ts';
 
 const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
 
-const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, Herdr.layer, Comments.layer, Prompts.layer);
+const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, Herdr.layer, Comments.layer, Prompts.layer).pipe(Layer.provideMerge(GitHubApp.layer()));
 
 const MainLive = Reconciler.layer.pipe(
 	Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
 	Layer.provide(Pause.layer),
 	Layer.provideMerge(ServicesLive),
 	Layer.provideMerge(JournalLive),
-	Layer.provideMerge(AppConfig.layer),
 	Layer.provide(FetchHttpClient.layer),
-	Layer.provideMerge(NodeServices.layer),
 );
 
 const program = Effect.gen(function* () {
@@ -38,7 +37,6 @@ const program = Effect.gen(function* () {
 	const herdr = yield* Herdr;
 	const fs = yield* FileSystem.FileSystem;
 
-	yield* refuseUndrainedClaims;
 	yield* Effect.log(`watching ${Object.keys(config.teams).join(', ')} every ${config.pollSeconds}s, at most ${config.maxInFlight} in flight`);
 
 	yield* Effect.forkChild(Stream.runForEach(herdr.events, () => reconciler.wake));
@@ -53,4 +51,5 @@ const program = Effect.gen(function* () {
 	return yield* reconciler.run;
 });
 
-NodeRuntime.runMain(program.pipe(Effect.provide(MainLive)));
+// Refused before the services are built, which reaches out to GitHub.
+NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(AppConfig.layer.pipe(Layer.provideMerge(NodeServices.layer)))));

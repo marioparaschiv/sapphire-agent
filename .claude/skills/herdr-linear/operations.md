@@ -12,7 +12,7 @@ How the live service is installed, started, paused, drained, deployed, inspected
 - herdr also starts its server on demand when a client attaches. `ExecCondition` runs `herdr status server` and skips the start if it prints `status: running`, so systemd never starts a second server. `inactive` for this unit is normal when herdr was started another way.
 - `ExecStart` pins `~/.nvm/versions/node/v24.21.0/bin/node`. Update both units after a Node upgrade.
 - Apply config or code changes with `systemctl --user restart herdr-linear` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
-- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user by default and as the bot in `bot.ghConfigDirectory` (`GH_CONFIG_DIR=<dir> gh auth login`), with the `notifications` scope, since the service reads and marks read the bot's notifications.
+- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user by default and as the bot account in `bot.ghConfigDirectory` (`GH_CONFIG_DIR=<dir> gh auth login`), with the `notifications` scope, since the service reads and marks read the bot account's notifications. The bot's comments are posted by the GitHub App (below), with no `gh` login.
 - A command agent runs `node` through `scripts/ctl.sh` in its tab's shell, so `node` (24) must be on the user's shell `PATH`.
 
 ## Install
@@ -24,6 +24,16 @@ How the live service is installed, started, paused, drained, deployed, inspected
 3. `systemctl --user daemon-reload` and `enable` both.
 
 Editing a file in `systemd/` does nothing until you rerun the install (or copy it) and `daemon-reload`.
+
+## GitHub App
+
+The bot's comments (command replies, `ctl.sh reply`, failure notices) are posted by a GitHub App and show as `<slug>[bot]`. It is created and installed by hand:
+
+1. Create it under GitHub Settings, Developer settings, GitHub Apps. Permissions: Issues read and write, Pull requests read and write, Contents read, Metadata read. Events: Issue comment, Pull request review, Pull request review comment.
+2. Generate a private key in its settings and save it as `$HERDR_PLUGIN_CONFIG_DIR/app.pem` with `chmod 600`. Put the App ID and the key's path in `bot.app` (`config.md`).
+3. Install it (its public page, Install) on every repo the bot should answer on. A reply on a repo without the installation fails with `GitHub answered HTTP 404 to GET /repos/<owner>/<name>/installation: Not Found`.
+
+For each comment the service signs a JWT with the key (RS256, `iat` 60 s back, `exp` 10 min after that), looks up the repo's installation, and mints an installation token, which it reuses until 5 min before it expires (tokens last an hour); `gh` gets it as `GH_TOKEN`. Tokens live in memory only, so a restart mints new ones. Everything else on GitHub stays on the user's `gh` login.
 
 ## Plugin manifest (`herdr-plugin.toml`)
 
@@ -42,13 +52,13 @@ sh ~/herdr-linear/scripts/ctl.sh start HL-14                 # move the epic to 
 sh ~/herdr-linear/scripts/ctl.sh stop HL-12                  # end its run, close its tab
 sh ~/herdr-linear/scripts/ctl.sh send HL-9 Use the existing helper.
 sh ~/herdr-linear/scripts/ctl.sh follow-up HL-9 Rename it --threads PRRT_kwDO1 --threads PRRT_kwDO2
-sh ~/herdr-linear/scripts/ctl.sh reply <comment-url> Done.   # as the bot; only on a command's comment
+sh ~/herdr-linear/scripts/ctl.sh reply <comment-url> Done.   # as the App; only on a command's comment
 sh ~/herdr-linear/scripts/ctl.sh done CMD-3                  # the command agent is done
 ```
 
 - Pause stops new runs only: no ready epic and no follow-up is claimed. Claimed runs still start, runs in flight are still watched, results are still posted, worktrees still cleaned up, and mentions still run commands (so `resume` can come in as one).
 - `pause`, `resume` and every recorded request write `$STATE/wake`, which makes the service tick at once; the log prints `dispatching paused` / `dispatching resumed`.
-- `status`, `start` to `done` run `node src/ctl.ts`, which reads `$HERDR_PLUGIN_CONFIG_DIR/config.json`, the Linear key and the journal (env defaults as in the unit). `stop`, `send`, `follow-up`, `reply` and `done` only record a request the service acts on (`rules.md`); `start` moves the epic in Linear itself. A refusal (no such run, not a command's comment) goes to stderr with exit code 1.
+- `status`, `start` to `done` run `node src/ctl.ts`, which reads `$HERDR_PLUGIN_CONFIG_DIR/config.json`, the Linear key, the App's private key and the journal (env defaults as in the unit). `stop`, `send`, `follow-up`, `reply` and `done` only record a request the service acts on (`rules.md`); `start` moves the epic in Linear itself. A refusal (no such run, not a command's comment) goes to stderr with exit code 1.
 - `status` prints one line per run (identifier, status, job, the epic's Linear state, claim time, tab, worktree, or `no runs`), then the commands queued or in flight (or `no commands`), then the requests waiting.
 - `pause`, `resume` and `status` are also herdr plugin actions.
 
@@ -86,14 +96,16 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Service crash-loops with `StartupError: cannot start, fix these and restart:` | Fix every listed problem (key file missing, empty or not mode 600, invalid config field, missing env var); see `config.md`. |
+| Service crash-loops with `StartupError: cannot start, fix these and restart:` | Fix every listed problem (Linear or App key file missing, empty or not mode 600, invalid config field, missing env var); see `config.md`. |
+| Service crash-loops with `GitHub answered HTTP 401 to GET /app` | `bot.app.id` and the private key do not belong to the same App, or the key was revoked. Generate a new key (GitHub App above). |
 | Service crash-loops with `... still holds N claims of the old dispatcher` | Finish the cutover (above). |
 | `team X has no workflow state "..."; skipping it until it does` | Add the named states to that team in Linear (or change `states` in config). Picked up on the next tick, but the log line is printed only once per process and nothing is logged when it recovers. |
 | `team X not found in Linear` | The config key must equal the team's exact name. |
 | Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` run or one whose agent is still working? Team skipped? |
 | A mention of the bot does nothing | `ctl.sh status`: is the command `queued` behind another? Is its author in `bot.allowedUsers` (an `ignored` command shows only in the journal)? Is `@<bot.login>` a whole word, and the comment not posted through the agent (onBehalfOf block)? Can `gh` as the bot read notifications (`GH_CONFIG_DIR=<dir> gh api notifications`)? Look for `task=mentions` errors in the log. |
 | A follow-up was asked for but does not start | `ctl.sh status` shows the request waiting: paused? `maxInFlight` used up? Epic has `agent-stuck`, or is not in To Review? Its run must be `ended`; it waits while one is in flight. A request whose epic has no run is dropped. |
-| A command failed | The bot replied on the issue or PR with the reason and the pane tail. Mention it again. |
+| A command failed | The App replied on the issue or PR with the reason and the pane tail. Mention the bot again. |
+| A command's reply never shows up | Look for `cannot reply on` or `GitHub answered HTTP` in the log. A 404 for `/installation` means the App is not installed on that repo (GitHub App above). |
 | Epic has `agent-stuck` | Read the epic comment. Retry rules: `rules.md`. |
 | PR is up but the epic stays in Implementing | The agent wrote no result file yet. It is flagged `awaitingInput` once quiet. |
 | `failed; retrying next tick` repeating for an epic | A Transient failure (network, timeout, rate limit, git lock). It retries every tick without double-posting, and comments once after `flagTransientAfterSeconds`. |

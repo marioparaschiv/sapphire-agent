@@ -1,6 +1,7 @@
 import { Context, Effect, Layer, Option } from 'effect';
 import { type CallError, Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
+import { GitHubApp } from './github-app.ts';
 import { asClaude, type Bodies, containsMarker, GitHub, type GitHubComment, maxNodes, mentions, type Notification, notificationsPerTick, preferredPullRequest, type PullRequest, type PullRequestState } from './github.ts';
 import type { MarkedComment } from './markers.ts';
 
@@ -44,7 +45,7 @@ export type FakeGitHubControls = {
 	) => string;
 	// Issue comment bodies as GitHub stores them, onBehalfOf block included.
 	readonly comments: (repo: string, number: number) => ReadonlyArray<string>;
-	// The comments the bot account posted on the PR.
+	// The comments the GitHub App posted on the PR.
 	readonly botComments: (repo: string, number: number) => ReadonlyArray<string>;
 	readonly reviews: (repo: string, number: number) => ReadonlyArray<FakeReview>;
 	readonly thread: (threadId: string) => FakeThread;
@@ -63,9 +64,9 @@ const latestBodies = (bodies: ReadonlyArray<string>): Bodies => ({ totalCount: b
 
 const toGitHubComment = ({ id, url, body, author, createdAt }: FakeComment): GitHubComment => ({ id, url, body, createdAt: new Date(createdAt).toISOString(), author: { login: author } });
 
-// The user and the agent share the PR author's account; the bot has its own. A comment that mentions the bot gives
-// the bot an unread notification about the PR, as GitHub does.
-const makeFake = (botLogin: string) => {
+// The user and the agent share the PR author's account; the bot user and the GitHub App have their own. A comment that
+// mentions the bot user, by anyone but itself, gives it an unread notification about the PR, as GitHub does.
+const makeFake = (botLogin: string, appLogin: string) => {
 	const pullRequests: Array<PullRequestRecord> = [];
 	const threads = new Map<string, ThreadRecord>();
 	const notifications = new Map<string, NotificationRecord>();
@@ -254,7 +255,7 @@ const makeFake = (botLogin: string) => {
 						found.comments.map(({ body }) => body),
 						marked,
 						`${repo}#${number} comments`,
-						() => found.comments.push(comment(repo, number, 'issuecomment', marked.body, botLogin)),
+						() => found.comments.push(comment(repo, number, 'issuecomment', marked.body, appLogin)),
 					),
 				),
 			),
@@ -306,7 +307,7 @@ const makeFake = (botLogin: string) => {
 
 		comments: (repo, number) => (findRecord(repo, number)?.comments ?? []).map(({ body }) => body),
 
-		botComments: (repo, number) => (findRecord(repo, number)?.comments ?? []).filter(({ author }) => author === botLogin).map(({ body }) => body),
+		botComments: (repo, number) => (findRecord(repo, number)?.comments ?? []).filter(({ author }) => author === appLogin).map(({ body }) => body),
 
 		reviews: (repo, number) => [...(findRecord(repo, number)?.flagReviews ?? [])],
 
@@ -339,8 +340,10 @@ const makeFake = (botLogin: string) => {
 // both GitHub and these controls, with fresh state each time it is built.
 export class FakeGitHub extends Context.Service<FakeGitHub, FakeGitHubControls>()('herdr-linear/FakeGitHub') {
 	static readonly layer = Layer.effectContext(
-		AppConfig.useSync(({ bot }) => {
-			const { github, controls } = makeFake(bot.login);
+		Effect.gen(function* () {
+			const { bot } = yield* AppConfig;
+			const app = yield* GitHubApp;
+			const { github, controls } = makeFake(bot.login, app.login);
 
 			return Context.make(GitHub, github).pipe(Context.add(FakeGitHub, controls));
 		}),

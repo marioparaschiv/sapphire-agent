@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
@@ -101,9 +102,10 @@ describe('ctl', () => {
 
 			yield* fs.writeFileString(
 				join(directory, 'config.json'),
-				JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), allowedUsers: ['marioparaschiv'] } }),
+				JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', ghConfigDirectory: join(directory, 'gh-bot'), app: { id: 424242, privateKeyFile: join(directory, 'app.pem') }, allowedUsers: ['marioparaschiv'] } }),
 			);
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'app.pem'), generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey, { mode: 0o600 });
 			yield* Journal.use((journal) => journal.putRun(run)).pipe(Effect.provide(Journal.layer(join(directory, 'journal.db'))));
 
 			assert.deepStrictEqual(yield* ctlSh(directory, 'stop', 'UNB-13'), { stdout: '', stderr: 'UNB-13 has no run in flight\n', exitCode: ChildProcessSpawner.ExitCode(1) });
