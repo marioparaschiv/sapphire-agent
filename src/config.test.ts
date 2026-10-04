@@ -28,6 +28,14 @@ test('fills defaults and expands ~ in repo paths', async (t) => {
 	assert.equal(config.worktreesDirectory, join(homedir(), '.herdr/worktrees'));
 });
 
+test('reads the old stuckAfterSeconds key as awaitingInputAfterSeconds', async (t) => {
+	const config = await load(t, JSON.stringify({ stuckAfterSeconds: 240, teams: { Unbound: { repo: '~/unbound' } } }));
+
+	assert.equal(config.awaitingInputAfterSeconds, 240);
+	assert.ok(!('stuckAfterSeconds' in config));
+	await assert.rejects(load(t, JSON.stringify({ stuckAfterSeconds: 10, teams: { Unbound: { repo: '~/unbound' } } })), /awaitingInputAfterSeconds/);
+});
+
 test('rejects an invalid config with the offending field named', async (t) => {
 	await assert.rejects(
 		load(t, JSON.stringify({ pollSeconds: 2, teams: { Unbound: { repo: '~/unbound' } } })),

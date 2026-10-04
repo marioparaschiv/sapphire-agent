@@ -15,39 +15,53 @@ const teamSchema = z.strictObject({
 
 export type TeamConfig = z.infer<typeof teamSchema>;
 
-export const configSchema = z.strictObject({
-	pollSeconds: z.number().int().min(5).default(30),
-	maxInFlight: z.number().int().min(1).default(1),
-	// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
-	awaitingInputAfterSeconds: z.number().int().min(30).default(180),
-	// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
-	// one at a time, so this covers waiting behind other starts as well as the fetch and herdr's 30 s start wait.
-	startTimeoutSeconds: z.number().int().min(60).default(300),
-	// How long herdr may report working while the pane tail stays the same before the agent is nudged.
-	staleAfterSeconds: z.number().int().min(60).default(600),
-	// How long after the nudge the tail may stay the same before the epic is flagged as stale.
-	nudgeGraceSeconds: z.number().int().min(60).default(600),
-	// How long a run may go, in any state, before the epic is flagged once.
-	maxRunSeconds: z.number().int().min(600).default(5400),
-	worktreesDirectory: pathSchema.default(join(homedir(), '.herdr/worktrees')),
-	workspaceLabel: z.string().min(1).default('agents'),
-	states: z
-		.strictObject({
-			ready: z.string().min(1).default('Ready For Agent'),
-			implementing: z.string().min(1).default('Implementing'),
-			inReview: z.string().min(1).default('In Review'),
-			toReview: z.string().min(1).default('To Review'),
-			shipped: z.string().min(1).default('Shipped'),
-		})
-		.prefault({}),
-	labels: z
-		.strictObject({
-			stuck: z.string().min(1).default('agent-stuck'),
-			repoPrefix: z.string().min(1).default('repo:'),
-		})
-		.prefault({}),
-	teams: z.record(z.string().min(1), teamSchema).refine((teams) => Object.keys(teams).length > 0, 'no teams configured'),
-});
+// Renames the key older versions used.
+const renameStuckAfterSeconds = (config: unknown) => {
+	if (typeof config !== 'object' || config === null || !('stuckAfterSeconds' in config)) {
+		return config;
+	}
+
+	const { stuckAfterSeconds, ...rest } = config;
+
+	return { awaitingInputAfterSeconds: stuckAfterSeconds, ...rest };
+};
+
+export const configSchema = z.preprocess(
+	renameStuckAfterSeconds,
+	z.strictObject({
+		pollSeconds: z.number().int().min(5).default(30),
+		maxInFlight: z.number().int().min(1).default(1),
+		// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
+		awaitingInputAfterSeconds: z.number().int().min(30).default(180),
+		// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
+		// one at a time, so this covers waiting behind other starts as well as the fetch and herdr's 30 s start wait.
+		startTimeoutSeconds: z.number().int().min(60).default(300),
+		// How long herdr may report working while the pane tail stays the same before the agent is nudged.
+		staleAfterSeconds: z.number().int().min(60).default(600),
+		// How long after the nudge the tail may stay the same before the epic is flagged as stale.
+		nudgeGraceSeconds: z.number().int().min(60).default(600),
+		// How long a run may go, in any state, before the epic is flagged once.
+		maxRunSeconds: z.number().int().min(600).default(5400),
+		worktreesDirectory: pathSchema.default(join(homedir(), '.herdr/worktrees')),
+		workspaceLabel: z.string().min(1).default('agents'),
+		states: z
+			.strictObject({
+				ready: z.string().min(1).default('Ready For Agent'),
+				implementing: z.string().min(1).default('Implementing'),
+				inReview: z.string().min(1).default('In Review'),
+				toReview: z.string().min(1).default('To Review'),
+				shipped: z.string().min(1).default('Shipped'),
+			})
+			.prefault({}),
+		labels: z
+			.strictObject({
+				stuck: z.string().min(1).default('agent-stuck'),
+				repoPrefix: z.string().min(1).default('repo:'),
+			})
+			.prefault({}),
+		teams: z.record(z.string().min(1), teamSchema).refine((teams) => Object.keys(teams).length > 0, 'no teams configured'),
+	}),
+);
 
 export type Config = z.infer<typeof configSchema>;
 

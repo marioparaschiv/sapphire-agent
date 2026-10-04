@@ -20,7 +20,7 @@ The schema is strict: unknown keys fail startup with a zod error naming the fiel
 | --- | --- | --- |
 | `pollSeconds` | `30` | int, min 5. Linear poll interval, worker reconcile interval, event resubscribe delay. |
 | `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` claims. |
-| `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle` / `done` / `blocked`) time before flagging an agent with no PR as `awaitingInput`. Was `stuckAfterSeconds`. |
+| `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle` / `done` / `blocked`) time before flagging an agent with no PR as `awaitingInput`. The old name `stuckAfterSeconds` is still read as this key. |
 | `startTimeoutSeconds` | `300` | int, min 60. Time from claim (or dispatcher start) for the worker to confirm Claude started before the claim becomes `error`. Covers queueing behind other starts, the fetch and herdr's 30 s start wait. |
 | `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane tail has not changed for this long: nudge once. |
 | `nudgeGraceSeconds` | `600` | int, min 60. Tail still unchanged this long after the nudge: claim `stale`, epic flagged. |
