@@ -251,7 +251,7 @@ describe('Git', () => {
 		}).pipe(Effect.provide(gitLayer(dir)));
 	});
 
-	it.effect('lists the worktrees on a branch inside the worktrees directory', () => {
+	it.effect('lists the worktrees on a branch inside the worktrees directory, even when its configured path ends in a slash', () => {
 		const { dir, repo, worktrees } = repos();
 		const elsewhere = join(dir, 'elsewhere');
 
@@ -268,7 +268,9 @@ describe('Git', () => {
 				{ repo, branch: 'mario/unb-20', path: first },
 				{ repo, branch: 'mario/unb-21', path: second },
 			]);
-		}).pipe(Effect.provide(gitLayer(dir)));
+		}).pipe(
+			Effect.provide(Git.layer.pipe(Layer.provide(AppConfig.layerTest(dir, { worktreesDirectory: `${worktrees}/` })), Layer.provide(NodeServices.layer))),
+		);
 	});
 
 	it('reads owner/name from GitHub remotes', () => {

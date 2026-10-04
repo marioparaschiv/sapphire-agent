@@ -1,10 +1,13 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, normalize } from 'node:path';
 import { Config, Context, Effect, FileSystem, Layer, Predicate, Redacted, Result, Schema, SchemaGetter, SchemaIssue } from 'effect';
 
 const expandHome = (path: string) => (path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path);
 
-const Path = Schema.NonEmptyString.pipe(Schema.decode({ decode: SchemaGetter.transform(expandHome), encode: SchemaGetter.passthrough() }));
+// Without a trailing slash, so a path compares equal to the paths git and herdr report.
+const toPath = (path: string) => normalize(expandHome(path)).replace(/(.)\/$/, '$1');
+
+const Path = Schema.NonEmptyString.pipe(Schema.decode({ decode: SchemaGetter.transform(toPath), encode: SchemaGetter.passthrough() }));
 
 const withDefault = <S extends Schema.Constraint>(value: S['Encoded']) => Schema.withDecodingDefaultKey<S>(Effect.succeed(value));
 
