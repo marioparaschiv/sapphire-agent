@@ -5,17 +5,23 @@
 	"type": "module",
 	"scripts": {
 		"start": "node src/main.ts",
-		"test": "node --test",
+		"test": "node --test \"src/*.test.ts\"",
+		"test:effect": "vitest run",
 		"typecheck": "tsc"
 	},
 	"dependencies": {
+		"@effect/platform-node": "4.0.0",
+		"@effect/sql-sqlite-node": "4.0.0",
+		"effect": "4.0.0",
 		"zod": "4.6.5"
 	},
 	"engines": {
 		"node": ">=24"
 	},
 	"devDependencies": {
+		"@effect/vitest": "4.0.0",
 		"@types/node": "^24.19.1",
-		"typescript": "^7.0.2"
+		"typescript": "^7.0.2",
+		"vitest": "^5.0.3"
 	}
 }
