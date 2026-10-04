@@ -26,7 +26,7 @@ export type Observation = {
 };
 
 // Runs whose agent may still be alive. They hold a maxInFlight slot, so live agents never exceed it.
-export const inFlightStatuses: ReadonlyArray<RunStatus> = ['claimed', 'running', 'awaitingInput', 'stale'];
+const inFlightStatuses: ReadonlyArray<RunStatus> = ['claimed', 'running', 'awaitingInput', 'stale'];
 
 export const isInFlight = (run: Run) => inFlightStatuses.includes(run.status);
 

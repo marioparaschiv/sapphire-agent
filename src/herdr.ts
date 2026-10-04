@@ -120,7 +120,7 @@ export const workspaceTabsOf = (commands: Commands, workspaceLabel: string): Eff
 		});
 	});
 
-export const ownedTabsOf = (commands: Commands, workspaceLabel: string): Effect.Effect<ReadonlyArray<OwnedTab>, CallError> =>
+const ownedTabsOf = (commands: Commands, workspaceLabel: string): Effect.Effect<ReadonlyArray<OwnedTab>, CallError> =>
 	workspaceTabsOf(commands, workspaceLabel).pipe(
 		Effect.map((tabs) => tabs.flatMap((tab) => (Option.isSome(tab.identifier) ? [{ ...tab, identifier: tab.identifier.value }] : []))),
 	);
@@ -166,7 +166,6 @@ export class Herdr extends Context.Service<
 		readonly createWorkspace: (label: string, cwd: string) => Effect.Effect<{ readonly workspace: Workspace; readonly tab: Tab; readonly rootPane: Pane }, CallError>;
 		readonly createTab: (workspaceId: string, label: string, cwd: string) => Effect.Effect<{ readonly tab: Tab; readonly rootPane: Pane }, CallError>;
 		readonly renameTab: (tabId: string, label: string) => Effect.Effect<void, CallError>;
-		readonly tab: (tabId: string) => Effect.Effect<Option.Option<Tab>, CallError>;
 		readonly tabs: (workspaceId: string) => Effect.Effect<ReadonlyArray<Tab>, CallError>;
 		readonly panes: (workspaceId: string) => Effect.Effect<ReadonlyArray<Pane>, CallError>;
 		readonly pane: (paneId: string) => Effect.Effect<Option.Option<Pane>, CallError>;
@@ -182,7 +181,6 @@ export class Herdr extends Context.Service<
 		readonly startClaude: (paneId: string, name: string, prompt: string) => Effect.Effect<StartOutcome, CallError>;
 		// A new tab in the workspace labelled workspaceLabel, creating the workspace when there is none.
 		readonly openTab: (label: string, cwd: string) => Effect.Effect<OpenedTab, CallError>;
-		readonly ownedTabs: Effect.Effect<ReadonlyArray<OwnedTab>, CallError>;
 		readonly workspaceTabs: Effect.Effect<ReadonlyArray<WorkspaceTab>, CallError>;
 		// Status, exit and close events of owned panes and tabs. Never fails: reconnects with backoff. Events are not
 		// durable, so they only make a tick come sooner; the poll stays authoritative.
@@ -318,7 +316,6 @@ export class Herdr extends Context.Service<
 
 			return Herdr.of({
 				...commands,
-				tab: (tabId) => find(Schema.Struct({ tab: Tab }), ['tab', 'get', tabId], ['tab_not_found']).pipe(Effect.map(Option.map(({ tab }) => tab))),
 				pane: (paneId) => find(Schema.Struct({ pane: Pane }), ['pane', 'get', paneId], ['pane_not_found']).pipe(Effect.map(Option.map(({ pane }) => pane))),
 				closeTab: (tabId) => find(Schema.Unknown, ['tab', 'close', tabId], ['tab_not_found']).pipe(Effect.map(Option.isSome)),
 				readTail: (paneId, lines = defaultTailLines) =>
@@ -339,7 +336,6 @@ export class Herdr extends Context.Service<
 						Duration.sum(callTimeouts.herdr, startWait),
 					).pipe(Effect.map(Option.match({ onNone: (): StartOutcome => 'starting', onSome: (): StartOutcome => 'ready' }))),
 				openTab: openTabWith(commands, workspaceLabel),
-				ownedTabs,
 				workspaceTabs: workspaceTabsOf(commands, workspaceLabel),
 				events: reconnecting(connect),
 			});

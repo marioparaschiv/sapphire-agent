@@ -58,7 +58,7 @@ export const maxNodes = 100;
 
 // Unresolved, and the user's latest comment asks for the agent, in its body or in the body of the review it was
 // submitted with. Comments carrying the onBehalfOf block are the agent's own and never count.
-export const isPending = (thread: ReviewThread) => {
+const isPending = (thread: ReviewThread) => {
 	const latest = thread.comments.nodes.findLast((comment) => !isClaude(comment.body));
 
 	return !thread.isResolved && !!latest && (mentionsAgent(latest.body) || mentionsAgent(latest.pullRequestReview?.body ?? ''));

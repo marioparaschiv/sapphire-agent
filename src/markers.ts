@@ -73,7 +73,7 @@ export const parseMarker = (body: string): Option.Option<Marker> => {
 	return Option.all({ identifier: Option.some(identifier), purpose: decodePurpose(purpose), key: decodeKey(key) });
 };
 
-export const isSameMarker = (a: Marker, b: Marker) => a.identifier === b.identifier && a.purpose === b.purpose && a.key === b.key;
+const isSameMarker = (a: Marker, b: Marker) => a.identifier === b.identifier && a.purpose === b.purpose && a.key === b.key;
 
 export const hasMarker = (body: string, marker: Marker) =>
 	Option.match(parseMarker(body), { onNone: () => false, onSome: (found) => isSameMarker(found, marker) });

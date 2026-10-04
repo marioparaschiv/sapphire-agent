@@ -245,7 +245,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 	});
 
 // Nothing observed: for planner and reconciler tests whose rules do not look at the world.
-export const emptyObservation: Observation = { teams: new Map(), epics: new Map(), ready: [], tabs: [], worktrees: [] };
+const emptyObservation: Observation = { teams: new Map(), epics: new Map(), ready: [], tabs: [], worktrees: [] };
 
 // What Planner.layer needs besides its rules, with an observer that sees nothing and an in-memory journal.
 export const plannerDependencies = (dir: string, settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>

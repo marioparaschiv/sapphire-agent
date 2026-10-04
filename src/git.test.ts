@@ -299,12 +299,11 @@ describe('Git', () => {
 		const { dir, repo } = repos();
 
 		return Effect.gen(function* () {
-			const { prepareWorktree, resultFilePath, readResultFile, removeResultFile } = yield* Git;
+			const { prepareWorktree, readResultFile, removeResultFile } = yield* Git;
 			const path = yield* prepareWorktree(repo, 'mario/unb-14');
 			const worktree: Worktree = { repo, branch: 'mario/unb-14', path };
-			const resultPath = yield* resultFilePath(worktree);
+			const resultPath = join(repo, '.git', 'worktrees', 'mario-unb-14', 'herdr-result.json');
 
-			assert.strictEqual(resultPath, join(repo, '.git', 'worktrees', 'mario-unb-14', 'herdr-result.json'));
 			assert.deepStrictEqual(yield* readResultFile(worktree), Option.none());
 
 			writeFileSync(resultPath, JSON.stringify({ summary: 'Done.', flags: [] }));

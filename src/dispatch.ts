@@ -18,7 +18,7 @@ const repoNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 // The local clone an epic runs in: its team's repo, or `<labelReposDirectory>/<name>` for an epic labelled
 // `<repoPrefix><name>` or labelled `<name>` inside the label group named like the prefix (Linear shows `repo/<name>`).
-export const resolveRepo = (config: AppConfigShape, epic: Epic): Result.Result<string, string> => {
+const resolveRepo = (config: AppConfigShape, epic: Epic): Result.Result<string, string> => {
 	const team = config.teams[epic.team.name];
 
 	if (!team) {
@@ -86,7 +86,7 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, job: Job
 export const adoptTab = (run: Run, tab: OpenedTab): Run => ({ ...run, tabId: tab.tabId, paneId: tab.paneId });
 
 // An owned tab of the epic that no run tracks yet.
-export const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identifier: string) =>
+const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identifier: string) =>
 	Option.fromUndefinedOr(
 		observation.tabs.find(
 			(tab) => Option.contains(tab.identifier, identifier) && !runs.some((run) => run.tabId === tab.tabId || run.paneId === tab.paneId),

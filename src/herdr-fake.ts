@@ -9,7 +9,6 @@ import {
 	type OpenedTab,
 	oneLine,
 	openTabWith,
-	ownedTabsOf,
 	type Pane,
 	reconnecting,
 	squeezeTail,
@@ -207,7 +206,6 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 
 	const herdr = Herdr.of({
 		...commands,
-		tab: (tabId) => Effect.sync(() => Option.map(byTab(tabId), toTab)),
 		pane: (paneId) => Effect.sync(() => Option.map(byPane(paneId), toPane)),
 		closeTab: (tabId) =>
 			write(() =>
@@ -251,7 +249,6 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 				return Effect.succeed<StartOutcome>(startBehaviour === 'ready' ? 'ready' : 'starting');
 			}),
 		openTab: openTabWith(commands, workspaceLabel),
-		ownedTabs: ownedTabsOf(commands, workspaceLabel),
 		workspaceTabs: workspaceTabsOf(commands, workspaceLabel),
 		events: reconnecting(
 			Stream.unwrap(

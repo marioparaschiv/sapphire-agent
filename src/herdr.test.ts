@@ -81,7 +81,6 @@ describe('Herdr', () => {
 		Effect.gen(function* () {
 			const { herdr, calls } = yield* liveHerdr({
 				...lists,
-				'tab get w1:t2': ok('tab-get.json'),
 				'pane get w1:p2': ok('pane-get.json'),
 				'agent get w1:p4': ok('agent-get.json'),
 			});
@@ -101,7 +100,6 @@ describe('Herdr', () => {
 				{ paneId: 'w1:p8', tabId: 'w1:t4', workspaceId: 'w1', agent: Option.none(), agentStatus: 'unknown' },
 				{ paneId: 'w1:p7', tabId: 'w1:t6', workspaceId: 'w1', agent: Option.none(), agentStatus: 'unknown' },
 			]);
-			assert.deepStrictEqual(yield* herdr.tab('w1:t2'), Option.some({ tabId: 'w1:t2', workspaceId: 'w1', label: 'HL-1 Some epic', agentStatus: 'unknown' }));
 			assert.deepStrictEqual(yield* herdr.pane('w1:p2'), Option.some({ paneId: 'w1:p2', tabId: 'w1:t2', workspaceId: 'w1', agent: Option.none(), agentStatus: 'unknown' }));
 			assert.deepStrictEqual(
 				yield* herdr.agent('w1:p4'),
@@ -139,38 +137,24 @@ describe('Herdr', () => {
 		}),
 	);
 
-	it.effect('lists only owned tabs: in its workspace, labelled with an identifier, with the root pane and its agent', () =>
+	it.effect('lists every tab of its workspace with its root pane and agent, and the identifier where the label starts with one', () =>
 		Effect.gen(function* () {
 			const { herdr } = yield* liveHerdr(lists);
 
-			// `notes` has a Claude in it but no identifier; the `personal` workspace is never read.
-			assert.deepStrictEqual(yield* herdr.ownedTabs, [
-				{ identifier: 'HL-2', tabId: 'w1:t4', workspaceId: 'w1', label: 'HL-2 Renamed', paneId: 'w1:p4', agent: Option.some('claude'), agentStatus: 'working' },
-				{ identifier: 'HL-7', tabId: 'w1:t6', workspaceId: 'w1', label: 'HL-7 Start', paneId: 'w1:p7', agent: Option.none(), agentStatus: 'unknown' },
+			// The `personal` workspace is never read.
+			assert.deepStrictEqual(yield* herdr.workspaceTabs, [
+				{ identifier: Option.none(), tabId: 'w1:t1', workspaceId: 'w1', label: 'notes', paneId: 'w1:p1', agent: Option.some('claude'), agentStatus: 'blocked' },
+				{ identifier: Option.some('HL-2'), tabId: 'w1:t4', workspaceId: 'w1', label: 'HL-2 Renamed', paneId: 'w1:p4', agent: Option.some('claude'), agentStatus: 'working' },
+				{ identifier: Option.some('HL-7'), tabId: 'w1:t6', workspaceId: 'w1', label: 'HL-7 Start', paneId: 'w1:p7', agent: Option.none(), agentStatus: 'unknown' },
 			]);
 		}),
 	);
 
-	it.effect('lists every tab of its workspace, with the identifier where the label starts with one', () =>
-		Effect.gen(function* () {
-			const { herdr } = yield* liveHerdr(lists);
-
-			assert.deepStrictEqual(
-				(yield* herdr.workspaceTabs).map(({ identifier, tabId, paneId, agent }) => [identifier, tabId, paneId, agent]),
-				[
-					[Option.none(), 'w1:t1', 'w1:p1', Option.some('claude')],
-					[Option.some('HL-2'), 'w1:t4', 'w1:p4', Option.some('claude')],
-					[Option.some('HL-7'), 'w1:t6', 'w1:p7', Option.none()],
-				],
-			);
-		}),
-	);
-
-	it.effect('owns no tabs while its workspace does not exist', () =>
+	it.effect('sees no tabs while its workspace does not exist', () =>
 		Effect.gen(function* () {
 			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'herdr-linear' });
 
-			assert.deepStrictEqual(yield* herdr.ownedTabs, []);
+			assert.deepStrictEqual(yield* herdr.workspaceTabs, []);
 			assert.deepStrictEqual(
 				calls.map(({ args }) => args),
 				['workspace list'],
@@ -185,10 +169,9 @@ describe('Herdr', () => {
 		);
 	});
 
-	it.effect('reading or closing a tab, pane or agent that no longer exists gives none and does not fail', () =>
+	it.effect('reading a pane or agent or closing a tab that no longer exists gives none and does not fail', () =>
 		Effect.gen(function* () {
 			const { herdr, calls } = yield* liveHerdr({
-				'tab get w1:t99': fails('error-tab-not-found.json'),
 				'pane get w1:p99': fails('error-pane-not-found.json'),
 				'agent get w1:p2': fails('error-agent-not-found.json'),
 				'agent get w1:p99': fails('error-pane-not-found.json'),
@@ -197,14 +180,13 @@ describe('Herdr', () => {
 				'pane read w1:p99 --source recent-unwrapped --lines 40': fails('error-pane-not-found.json'),
 			});
 
-			assert.deepStrictEqual(yield* herdr.tab('w1:t99'), Option.none());
 			assert.deepStrictEqual(yield* herdr.pane('w1:p99'), Option.none());
 			assert.deepStrictEqual(yield* herdr.agent('w1:p2'), Option.none());
 			assert.deepStrictEqual(yield* herdr.agent('w1:p99'), Option.none());
 			assert.isFalse(yield* herdr.closeTab('w1:t99'));
 			assert.isTrue(yield* herdr.closeTab('w1:t2'));
 			assert.deepStrictEqual(yield* herdr.readTail('w1:p99'), Option.none());
-			assert.lengthOf(calls, 7);
+			assert.lengthOf(calls, 6);
 		}),
 	);
 
@@ -396,17 +378,21 @@ describe('Herdr events', () => {
 const fakeHerdr = Effect.all([Herdr, FakeHerdr]).pipe(Effect.provide(FakeHerdr.layer.pipe(Layer.provide(AppConfig.layerTest(configDirectory)))));
 
 describe('FakeHerdr', () => {
-	it.effect('owns only identifier-labelled tabs in the configured workspace', () =>
+	it.effect('lists only the tabs of the configured workspace', () =>
 		Effect.gen(function* () {
 			const [herdr, fake] = yield* fakeHerdr;
 			const owned = fake.addTab({ label: 'HL-3 Fix login', agentStatus: 'idle', tail: 'Done.' });
+			const notes = fake.addTab({ label: 'notes' });
 
-			fake.addTab({ label: 'notes' });
 			fake.addTab({ label: 'HL-4 Elsewhere', workspace: 'personal' });
 
-			assert.deepStrictEqual(yield* herdr.ownedTabs, [
-				{ identifier: 'HL-3', tabId: owned.tabId, workspaceId: 'w1', label: 'HL-3 Fix login', paneId: owned.paneId, agent: Option.some('claude'), agentStatus: 'idle' },
-			]);
+			assert.deepStrictEqual(
+				(yield* herdr.workspaceTabs).map(({ identifier, tabId, paneId, agentStatus }) => [identifier, tabId, paneId, agentStatus]),
+				[
+					[Option.some('HL-3'), owned.tabId, owned.paneId, 'idle'],
+						[Option.none(), notes.tabId, notes.paneId, 'working'],
+				],
+			);
 		}),
 	);
 
@@ -477,7 +463,6 @@ describe('FakeHerdr', () => {
 			fake.removeTab(tabId);
 			assert.deepStrictEqual(yield* herdr.pane(paneId), Option.none());
 			assert.deepStrictEqual(yield* herdr.readTail(paneId), Option.none());
-			assert.deepStrictEqual(yield* herdr.tab(tabId), Option.none());
 		}),
 	);
 

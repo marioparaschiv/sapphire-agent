@@ -49,7 +49,6 @@ export class Git extends Context.Service<
 		readonly removeWorktree: (worktree: Worktree) => Effect.Effect<void, CallError>;
 		readonly listWorktrees: (repo: string) => Effect.Effect<ReadonlyArray<Worktree>, CallError>;
 		readonly githubRepo: (repo: string) => Effect.Effect<string, CallError>;
-		readonly resultFilePath: (worktree: Worktree) => Effect.Effect<string, CallError>;
 		readonly readResultFile: (worktree: Worktree) => Effect.Effect<Option.Option<ResultFile>, CallError | InvalidResultFile>;
 		readonly removeResultFile: (worktree: Worktree) => Effect.Effect<void, CallError>;
 	}
@@ -112,7 +111,13 @@ export class Git extends Context.Service<
 				return read.pipe(Effect.catch(() => git(repo, ['remote', 'set-head', 'origin', '--auto']).pipe(Effect.andThen(read))));
 			};
 
-			const resultFilePath = ({ path }: Worktree) => git(path, ['rev-parse', '--absolute-git-dir']).pipe(Effect.map((gitDir) => join(gitDir, 'herdr-result.json')));
+			// The agent writes its result into the worktree's own git dir (`.git` is a file in a linked worktree), so it can
+			// never be committed. The orchestrate skill resolves the same path with `git rev-parse --git-dir`.
+			const resultFilePath = ({ repo, path }: Worktree) =>
+				git(path, ['rev-parse', '--absolute-git-dir']).pipe(
+					Effect.map((gitDir) => join(gitDir, 'herdr-result.json')),
+					locked(repo),
+				);
 
 			return Git.of({
 				worktreePath: (repo, branch) => worktreePath(worktreesDirectory, repo, branch),
@@ -208,14 +213,10 @@ export class Git extends Context.Service<
 						locked(repo),
 					),
 
-				// The agent writes its result into the worktree's own git dir (`.git` is a file in a linked worktree), so it can
-				// never be committed. The orchestrate skill resolves the same path with `git rev-parse --git-dir`.
-				resultFilePath: (worktree) => resultFilePath(worktree).pipe(locked(worktree.repo)),
-
 				// None while the agent has not written the file.
 				readResultFile: (worktree) =>
 					Effect.gen(function* () {
-						const path = yield* resultFilePath(worktree).pipe(locked(worktree.repo));
+						const path = yield* resultFilePath(worktree);
 						const text = yield* fs.readFileString(path).pipe(
 							Effect.map(Option.some),
 							Effect.catchTag('PlatformError', (error) => (error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(fileSystemError(error)))),
@@ -231,7 +232,6 @@ export class Git extends Context.Service<
 				// A reused worktree may still hold the result of an earlier run.
 				removeResultFile: (worktree) =>
 					resultFilePath(worktree).pipe(
-						locked(worktree.repo),
 						Effect.flatMap((path) => fs.remove(path, { force: true }).pipe(Effect.mapError(fileSystemError))),
 					),
 			});
