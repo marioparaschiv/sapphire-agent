@@ -2,7 +2,7 @@ import { Clock, Effect, Option } from 'effect';
 import type { CallError } from './call-policy.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
-import { adoptTab, claimedRun, repoOf } from './dispatch.ts';
+import { adoptTab, claimedRun, repoOf, runsClaude } from './dispatch.ts';
 import { Git, type Worktree } from './git.ts';
 import { GitHub } from './github.ts';
 import { Herdr, type WorkspaceTab } from './herdr.ts';
@@ -106,7 +106,7 @@ export const cleanupRule = Effect.gen(function* () {
 				const repo = yield* repoOf(config, epic);
 				// Claude already in the tab runs in a session sapphire-agent never recorded. Without Claude, the start rule starts
 				// it in the new one.
-				const session = Option.contains(first.agent, 'claude') ? null : yield* newSession(epic.identifier);
+				const session = runsClaude(Option.some(first)) ? null : yield* newSession(epic.identifier);
 				const adopted = adoptTab(claimedRun(epic, repo, yield* Clock.currentTimeMillis, session), first);
 
 				yield* journal.putRun({ ...adopted, worktreePath: git.worktreePath(repo, epic.branchName) });

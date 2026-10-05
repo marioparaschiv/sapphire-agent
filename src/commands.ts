@@ -21,6 +21,9 @@ export const ctlPath = fileURLToPath(new URL('../scripts/ctl.sh', import.meta.ur
 // Read-only gh and git subcommands a command's agent may run, besides the CLI. `--output` would make git write a file.
 const readOnlyCommands = ['gh pr view', 'gh pr diff', 'gh pr checks', 'gh issue view', 'git log', 'git show', 'git diff', 'git status'];
 
+// The tools besides Bash, each allowed in full.
+const allowedTools = ['Read', 'Grep', 'Glob', 'SendMessage'];
+
 // What Claude is started with for a command. --restricted ignores the user's and the project's settings, which may allow
 // more or bypass permissions, and keeps the file tools in the working directory; --tools leaves no tool that edits, and
 // SendMessage to message a run's session; dontAsk denies, without asking, every Bash command the allow list does not
@@ -29,12 +32,12 @@ export const commandClaudeArgs = (ctl: string) => [
 	'--restricted',
 	'--strict-mcp-config',
 	'--tools',
-	'Bash,Read,Grep,Glob,SendMessage',
+	['Bash', ...allowedTools].join(','),
 	'--settings',
 	JSON.stringify({
 		permissions: {
 			defaultMode: 'dontAsk',
-			allow: [`Bash(sh ${ctl} *)`, ...readOnlyCommands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]), 'Read', 'Grep', 'Glob', 'SendMessage'],
+			allow: [`Bash(sh ${ctl} *)`, ...readOnlyCommands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]), ...allowedTools],
 			deny: ['Bash(git * --output*)'],
 		},
 	}),
