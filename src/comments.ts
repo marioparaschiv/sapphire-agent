@@ -22,6 +22,8 @@ export type FlaggedRun = {
 
 const minutesBetween = (from: number, to: number) => Math.round((to - from) / 60_000);
 
+const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
+
 const codeBlock = (text: string) => `\`\`\`\n${text.replaceAll('```', "'''")}\n\`\`\``;
 
 const describeStop = (status: AgentStatus, minutes: number) => {
@@ -78,6 +80,15 @@ const make = (config: AppConfigShape) => {
 		// Its replies are typed into the pane, so the flag's id is kept as the run's question.
 		awaitingInput: (run: FlaggedRun) =>
 			withMarker(runFlag(run, 'awaitingInput', `Reply to this comment and the reply is typed into the agent's pane. Or: ${startOver}`), {
+				identifier: run.identifier,
+				purpose: 'awaitingInput',
+				key: `${run.claimedAt}-${run.agentStatusSince}`,
+			}),
+
+		// The question a run sent its reply-to session by message, which no one answered. It stands in for the
+		// awaitingInput flag of the quiet episode, so its replies are typed into the pane the same way.
+		messageQuestion: (run: { readonly identifier: string; readonly claimedAt: number; readonly agentStatusSince: number; readonly message: string }) =>
+			withMarker(`${run.identifier} asks: ${oneLine(run.message).replace(new RegExp(`^${run.identifier}:\\s*`), '')}`, {
 				identifier: run.identifier,
 				purpose: 'awaitingInput',
 				key: `${run.claimedAt}-${run.agentStatusSince}`,

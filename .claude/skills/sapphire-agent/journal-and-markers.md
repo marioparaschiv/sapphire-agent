@@ -82,7 +82,7 @@ On the Linear epic:
 
 | Purpose | Key | Posted |
 | --- | --- | --- |
-| `awaitingInput` | `<claimedAt>-<agentStatusSince>` | Once per quiet episode of a run. |
+| `awaitingInput` | `<claimedAt>-<agentStatusSince>` | Once per quiet episode of a run: the flag, or the question a run asked by message and got no reply to. |
 | `stale` | `<claimedAt>-<nudgedAt>` | Once per nudged episode of a run. |
 | `error`, `startFailed`, `invalidResult`, `noPullRequest`, `threadMismatch`, `overCap`, `permanentFailure` | `<claimedAt>` | Once per run (`permanentFailure` without a run: once per failure streak). |
 | `keptWorktree` | `<claimedAt>`, or the worktree path for an orphan | Once per run or orphan worktree. |

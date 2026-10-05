@@ -11,6 +11,7 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 | GitHub App private key | `bot.app.privateKeyFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/app.pem` |
 | GitHub App webhook secret | `bot.app.webhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` |
 | Claude config (trust) | `~/.claude.json` (override `CLAUDE_CONFIG_PATH`) |
+| Claude session transcripts | `~/.claude/projects` (override the directory holding `projects` with `CLAUDE_CONFIG_DIR`) |
 | Journal | `$HERDR_PLUGIN_STATE_DIR/journal.db` |
 | Pause file | `$HERDR_PLUGIN_STATE_DIR/paused` |
 
@@ -26,7 +27,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` runs, follow-ups included. Command runs do not count (`rules.md`). |
 | `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle`, `done`, `blocked`) time without a result file before the epic is flagged `awaitingInput`. The old name `stuckAfterSeconds` is still read as this key. |
 | `startTimeoutSeconds` | `300` | int, min 60. Time from the claim (or the process start, if later) for Claude to be confirmed started before the start fails. Covers waiting behind other starts, the fetch and herdr's 30 s start wait. |
-| `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane output has not changed for this long: nudge once. |
+| `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane output has not changed for this long: nudge once. Also how long a run waits quietly for a reply to its message before its question is asked on Linear. |
 | `nudgeGraceSeconds` | `600` | int, min 60. Output still unchanged this long after the nudge: run `stale`, epic flagged. |
 | `maxRunSeconds` | `5400` | int, min 600. Wall-clock cap from the claim; the epic is flagged once, in any in-flight state. The run keeps going. |
 | `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` comment is posted once (see `failure-policy.md`). |
@@ -106,6 +107,7 @@ Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl
 | `HERDR_PLUGIN_STATE_DIR` | yes | `%h/.local/state/herdr/plugins/sapphire-agent` |
 | `SAPPHIRE_AGENT_LINEAR_KEY_FILE` | no | default `~/.config/sapphire-agent/linear-key` |
 | `CLAUDE_CONFIG_PATH` | no | default `~/.claude.json` |
+| `CLAUDE_CONFIG_DIR` | no | default `~/.claude`, as Claude Code reads it |
 
 ## Startup errors
 

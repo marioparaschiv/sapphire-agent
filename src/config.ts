@@ -97,6 +97,7 @@ const env = {
 	stateDirectory: Config.NonEmptyString('HERDR_PLUGIN_STATE_DIR'),
 	linearKeyFile: Config.NonEmptyString('SAPPHIRE_AGENT_LINEAR_KEY_FILE').pipe(Config.withDefault(join(homedir(), '.config/sapphire-agent/linear-key'))),
 	claudeConfigPath: Config.NonEmptyString('CLAUDE_CONFIG_PATH').pipe(Config.withDefault(join(homedir(), '.claude.json'))),
+	claudeConfigDirectory: Config.NonEmptyString('CLAUDE_CONFIG_DIR').pipe(Config.withDefault(join(homedir(), '.claude'))),
 };
 
 export type Env = { readonly [K in keyof typeof env]: Config.Success<(typeof env)[K]> };
@@ -231,6 +232,7 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 				stateDirectory: directory,
 				linearKeyFile: join(directory, 'linear-key'),
 				claudeConfigPath: join(directory, 'claude.json'),
+				claudeConfigDirectory: join(directory, 'claude'),
 			},
 			linearApiKey: Redacted.make('lin_api_test'),
 			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,

@@ -6,7 +6,8 @@ import { Option, Schema } from 'effect';
 // builds every key; `claimedAt` is the run's claim time in epoch ms.
 //
 // On the Linear epic:
-// - awaitingInput: `<claimedAt>-<agentStatusSince>`, one per quiet episode of a run.
+// - awaitingInput: `<claimedAt>-<agentStatusSince>`, one per quiet episode of a run (the flag, or the question it asked by
+//   message and got no reply to).
 // - stale: `<claimedAt>-<nudgedAt>`, one per nudged episode of a run.
 // - error, startFailed, invalidResult, noPullRequest, threadMismatch, overCap, permanentFailure: `<claimedAt>`, once per run.
 // - keptWorktree: `<claimedAt>`, once per run; `<worktreePath>` for an orphan worktree that no run tracks.

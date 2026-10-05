@@ -10,7 +10,7 @@ A run is one journal row per epic: the current or last agent run for it. Statuse
 | --- | --- | --- |
 | `claimed` | Recorded before anything is started; the start rule takes it from here. | yes |
 | `running` | Claude was confirmed started in the pane. | yes |
-| `awaitingInput` | The agent sat `idle`, `done` or `blocked` without a result file for `awaitingInputAfterSeconds`; the epic is flagged with the question. | yes |
+| `awaitingInput` | The agent sat `idle`, `done` or `blocked` without a result file for `awaitingInputAfterSeconds`, or for `staleAfterSeconds` without a reply to the question it sent by message; the epic is flagged with the question. | yes |
 | `stale` | herdr says `working` but the pane output did not change for `staleAfterSeconds`, and a nudge did not help within `nudgeGraceSeconds`; the epic is flagged. | yes |
 | `error` | The agent exited or vanished without a result file, the result file was invalid or did not match its threads, there was no PR for it, or the run never started; the epic is flagged. | no |
 | `ended` | The run is over and its tab closed (result posted, epic moved on, stopped on request, or a follow-up that never started). Kept to clean the worktree up later and so a follow-up request can be claimed for it. | no |
@@ -73,7 +73,8 @@ For each started run that is `running`, `awaitingInput` or `stale`, every tick r
 - Wall-clock cap: `maxRunSeconds` after the claim, an `overCap` flag once. The run keeps going and keeps its slot.
 - A run with a stored result, or whose epic moved on, is left to the results rule.
 - Agent `exited` (pane without Claude) or `vanished` (tab gone): `error` flag with the tail, close the tab, `error`.
-- `running` and quiet for `awaitingInputAfterSeconds`: `awaitingInput` flag with the tail; its comment id becomes the run's question.
+- `running`, quiet and waiting on a reply to its message (Question relay): not flagged or nudged. Quiet for `staleAfterSeconds`: its question is asked on the epic, which becomes the run's question, `awaitingInput`.
+- Otherwise `running` and quiet for `awaitingInputAfterSeconds`: `awaitingInput` flag with the tail; its comment id becomes the run's question.
 - `running` and working with unchanged output for `staleAfterSeconds`: record `nudgedAt`, then nudge once (Esc, then the prompt `continue`). Still unchanged `nudgeGraceSeconds` later: `stale` flag, `stale`. It keeps its slot and its tab.
 - `awaitingInput` with a question: relay replies (below).
 
@@ -81,7 +82,7 @@ For each started run that is `running`, `awaitingInput` or `stale`, every tick r
 
 ### Question relay
 
-A run with a session to reply to (`ctl.sh start --reply-to`) asks it directly: its agent sends the question as one line `<ID>: <question>` to that session (`SendMessage`) and ends its turn; the reply arrives as a message, which wakes it. It sits quiet meanwhile, so it is still flagged `awaitingInput` as below. A run without one asks on Linear:
+A run with a session to reply to (`ctl.sh start --reply-to`) asks it directly: its agent sends the question as one line `<ID>: <question>` to that session (`SendMessage`) and ends its turn; the reply arrives as a message, which wakes it. Monitoring reads the run's Claude transcript (`~/.claude/projects/<cwd with every non-alphanumeric as ->/<session id>.jsonl`): the run waits on a reply while its last `SendMessage` to that session has no input after it (a prompt, a message, an interrupt; a background task finishing does not count). A reply within `staleAfterSeconds` of the quiet start wakes the agent, which ends the episode, and nothing is posted. Otherwise the question goes on the epic as one line, `<ID> asks: <question>` (the `awaitingInput` label and marker, no tab or pane tail), and is relayed like any question. A run without a session to reply to, or no longer waiting on one, asks on Linear:
 
 - The `awaitingInput` comment is the question: it holds the pane tail and says to reply to it. It is posted once per quiet episode, also across restarts (its marker is keyed by the claim and the start of the quiet spell).
 - Each tick fetches the replies to every current question in one request. A reply counts when it is a child of the run's question, has no marker, does not start with `**sapphire-agent`, and has no `white_check_mark` reaction. Replies to any other comment are ignored.
@@ -172,7 +173,7 @@ A flag is the `agent-stuck` label plus a marked comment on the epic, once. The l
 
 | Flag | When | Status after |
 | --- | --- | --- |
-| `awaitingInput` | Quiet without a result file | `awaitingInput` |
+| `awaitingInput` | Quiet without a result file, or no reply to its message | `awaitingInput` |
 | `stale` | Working, no new output even after a nudge | `stale` |
 | `error` | Agent exited or vanished without a result file | `error` |
 | `overCap` | Over `maxRunSeconds` | unchanged |
