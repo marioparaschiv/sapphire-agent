@@ -184,8 +184,9 @@ const done = Command.make('done', { command: Argument.String('command').pipe(Arg
 		const commands = yield* Journal.use((journal) => journal.listCommands);
 		const command = commands.find((candidate) => commandIdentifier(candidate) === identifier.toUpperCase());
 
-		if (!command || command.status !== 'running') {
-			return yield* new Refused({ message: `${identifier} is not running` });
+		// The agent can finish before its start is recorded, while the command is still claimed.
+		if (!command || (command.status !== 'claimed' && command.status !== 'running')) {
+			return yield* new Refused({ message: `${identifier} is not in flight` });
 		}
 
 		yield* record({ _tag: 'done', commandId: command.id }, `${commandIdentifier(command)} ends once its agent stops`);

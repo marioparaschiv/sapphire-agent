@@ -83,8 +83,34 @@ describe('commands', () => {
 				h.herdr.starts().map(({ name }) => name),
 				['cmd-1', 'cmd-2'],
 			);
-			assert.deepStrictEqual(yield* h.ctl('done', 'CMD-1').pipe(Effect.flip), new Refused({ message: 'CMD-1 is not running' }));
+			assert.deepStrictEqual(yield* h.ctl('done', 'CMD-1').pipe(Effect.flip), new Refused({ message: 'CMD-1 is not in flight' }));
 			assert.deepStrictEqual(yield* h.ctl('reply', 'https://github.com/test/repo/pull/1#issuecomment-404', 'Hi.').pipe(Effect.flip), new Refused({ message: 'https://github.com/test/repo/pull/1#issuecomment-404 is not a comment that mentioned the bot' }));
+		}),
+	);
+
+	it.effect('accepts done from an agent that finished before its start was recorded, and ends the command once the start is', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { number } = h.github.addPullRequest({ repo: h.githubRepo, branch, author: 'marioparaschiv' });
+
+			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, h.github.addComment(h.githubRepo, number, '@orchestratorbot what is running?')));
+			h.herdr.crashAfterWrite(3, new Transient({ message: 'the process died' }));
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.herdr.starts().map(({ name }) => name), ['cmd-1']);
+			assert.deepStrictEqual(yield* statuses(h), ['claimed']);
+			assert.deepStrictEqual(yield* h.ctl('done', 'CMD-1'), ['CMD-1 ends once its agent stops']);
+
+			const tab = commandTab(h, 'CMD-1');
+
+			h.herdr.setAgentStatus(tab.paneId, 'done');
+			yield* h.restart;
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* statuses(h), ['ended']);
+			assert.deepStrictEqual(h.herdr.closedTabs(), [tab.tabId]);
+			assert.lengthOf(h.herdr.starts(), 1);
 		}),
 	);
 
