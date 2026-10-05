@@ -7,7 +7,7 @@ import { AppConfig, type AppConfigShape } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub, type PullRequest } from './github.ts';
 import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
-import { Journal, type Job, type Run } from './journal.ts';
+import { Journal, type Job, newSession, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { activeRoles, hasRole, isInFlight, type Observation, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
@@ -60,7 +60,7 @@ export const repoOf = (config: AppConfigShape, epic: Epic) =>
 	Result.match(resolveRepo(config, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed });
 
 // A run recorded before anything is started for it. The start rule takes it from here.
-export const claimedRun = (epic: Epic, repo: string, claimedAt: number, job: Job = { _tag: 'orchestrate' }): Run => ({
+export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session: Session, job: Job = { _tag: 'orchestrate' }): Run => ({
 	epicId: epic.id,
 	identifier: epic.identifier,
 	teamId: epic.team.id,
@@ -71,6 +71,7 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, job: Job
 	worktreePath: null,
 	tabId: null,
 	paneId: null,
+	session,
 	claimedAt,
 	startedAt: null,
 	agentStatus: null,
@@ -106,7 +107,7 @@ export const dispatchRule = Effect.gen(function* () {
 		Effect.gen(function* () {
 			const repo = yield* repoOf(config, epic);
 
-			yield* journal.putRun(claimedRun(epic, repo, yield* Clock.currentTimeMillis));
+			yield* journal.putRun(claimedRun(epic, repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier)));
 			yield* Effect.log(`claimed for ${repo} on ${epic.branchName}`);
 		});
 
@@ -137,6 +138,9 @@ export const dispatchRule = Effect.gen(function* () {
 
 	return { name: 'dispatch', pausable: true, plan } satisfies Rule;
 });
+
+// Claude starts in the agent's recorded session, so other sessions reach it by name.
+export const sessionClaudeArgs = (session: Session | null) => (session === null ? [] : ['--session-id', session.id, '--name', session.name]);
 
 export const runsClaude = (pane: Option.Option<Pane>) => Option.exists(pane, (found) => Option.contains(found.agent, 'claude'));
 
@@ -250,7 +254,7 @@ export const startRule = Effect.gen(function* () {
 			const { tabId, paneId } = run.tabId !== null && run.paneId !== null ? { tabId: run.tabId, paneId: run.paneId } : yield* openTab(path);
 			if (!runsClaude(yield* herdr.agent(paneId))) {
 				yield* Effect.log(`starting Claude in ${tabId} (${path})`);
-				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), yield* promptFor(run, epic));
+				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), yield* promptFor(run, epic), sessionClaudeArgs(run.session));
 
 				const agent = yield* herdr.agent(paneId);
 

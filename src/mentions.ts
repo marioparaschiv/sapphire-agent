@@ -33,6 +33,7 @@ export const makeRecordMention = Effect.gen(function* () {
 				cwd: null,
 				tabId: null,
 				paneId: null,
+				session: null,
 				recordedAt: yield* Clock.currentTimeMillis,
 				claimedAt: null,
 				startedAt: null,

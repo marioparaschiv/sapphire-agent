@@ -6,7 +6,7 @@ import { adoptTab, claimedRun, repoOf } from './dispatch.ts';
 import { Git, type Worktree } from './git.ts';
 import { GitHub } from './github.ts';
 import { Herdr, type WorkspaceTab } from './herdr.ts';
-import { Journal, type Run } from './journal.ts';
+import { Journal, newSession, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { epicWithIdentifier, hasRole, identifierOfBranch, isAgentWorking, isFinished, type Observation } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
@@ -104,7 +104,7 @@ export const cleanupRule = Effect.gen(function* () {
 			if (Option.isNone(run) && hasRole(observation, epic, ['ready', 'implementing', 'inReview'])) {
 				const [first, ...others] = tabs;
 				const repo = yield* repoOf(config, epic);
-				const adopted = adoptTab(claimedRun(epic, repo, yield* Clock.currentTimeMillis), first);
+				const adopted = adoptTab(claimedRun(epic, repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier)), first);
 
 				yield* journal.putRun({ ...adopted, worktreePath: git.worktreePath(repo, epic.branchName) });
 				yield* Effect.log(`adopted untracked tab ${first.tabId}`);

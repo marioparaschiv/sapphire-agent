@@ -1,7 +1,7 @@
 import { Clock, Effect, Option } from 'effect';
 import { AppConfig } from './config.ts';
 import { claimedRun } from './dispatch.ts';
-import { Journal, type Request, type Run } from './journal.ts';
+import { Journal, newSession, type Request, type Run } from './journal.ts';
 import type { Epic } from './linear.ts';
 import { hasRole, isInFlight, type Observation, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
@@ -18,7 +18,7 @@ export const followUpRule = Effect.gen(function* () {
 
 	const claim = (run: Run, epic: Epic, requestId: number, { threadIds, instruction }: FollowUpRequest) =>
 		Effect.gen(function* () {
-			yield* journal.claimFollowUp(claimedRun(epic, run.repo, yield* Clock.currentTimeMillis, { _tag: 'follow-up', threadIds, instruction }), requestId);
+			yield* journal.claimFollowUp(claimedRun(epic, run.repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier), { _tag: 'follow-up', threadIds, instruction }), requestId);
 			yield* Effect.log(`claimed a follow-up for ${threadIds.length} review threads${instruction === null ? '' : ' and an instruction'}`);
 		});
 

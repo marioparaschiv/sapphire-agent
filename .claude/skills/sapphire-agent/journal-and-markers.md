@@ -24,6 +24,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 | `repo`, `branch` | The local clone and the epic's branch, so cleanup finds the worktree and PR even once the epic is gone from the ready list. |
 | `worktree_path` | Set once the worktree exists. |
 | `tab_id`, `pane_id` | Set once the tab exists. Both must match herdr for the tab to count as the run's. |
+| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded. |
 | `claimed_at` | Claim time. Keys most markers, starts the wall-clock cap and the start timeout. |
 | `started_at` | When Claude was confirmed started. Decides the run's states and whether it ever started. |
 | `agent_status`, `agent_status_since` | Last observed agent status and when it or (while working) the output last changed: the awaitingInput and stale timers. |
@@ -48,6 +49,7 @@ One row per comment that mentioned the bot, written by the webhook server before
 | `status` | `ignored`, `queued`, `claimed`, `running`, `ended`, `error` (see `rules.md`). |
 | `cwd` | The directory the agent runs in, once found. |
 | `tab_id`, `pane_id` | Set once the tab exists. |
+| `session` | As for runs, named `cmd-<id>`; made when its turn comes. |
 | `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
 | `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
 
@@ -63,7 +65,7 @@ At most one row: `delivered_at` (ms), when the newest App webhook delivery the l
 
 `getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction); `deliveryMark`, `setDeliveryMark`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
-The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, worktree), the commands in flight and the requests waiting.
+The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, session, worktree), the commands in flight and the requests waiting.
 
 ## Markers
 

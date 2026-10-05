@@ -15,7 +15,7 @@ import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-
 import { Git } from './git.ts';
 import { Herdr, type HerdrAgentStatus } from './herdr.ts';
 import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
-import { type Command, Journal, type JournalError, type Run } from './journal.ts';
+import { type Command, Journal, type JournalError, newSession, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
@@ -267,6 +267,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					worktreePath: path,
 					tabId: tab.tabId,
 					paneId: tab.paneId,
+					session: yield* newSession(epic.identifier),
 					claimedAt: now,
 					startedAt: now,
 					agentStatus: null,

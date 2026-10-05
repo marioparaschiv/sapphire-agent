@@ -18,6 +18,7 @@ const describeRun = (run: Run, epicState: string) =>
 		epicState,
 		`claimed ${new Date(run.claimedAt).toISOString()}`,
 		run.tabId === null ? 'no tab' : `tab ${run.tabId}`,
+		run.session === null ? 'no session' : `session ${run.session.name}`,
 		run.worktreePath ?? 'no worktree',
 	].join(', ');
 
@@ -164,6 +165,22 @@ const followUp = Command.make(
 		}),
 ).pipe(Command.withDescription("Starts a follow-up run on the epic's PR"));
 
+const session = Command.make('session', { epic: epicArgument }, ({ epic: identifier }) =>
+	Effect.gen(function* () {
+		const run = yield* runOf(identifier);
+
+		if (Option.isNone(run)) {
+			return yield* new Refused({ message: `${identifier} has no run` });
+		}
+
+		if (run.value.session === null) {
+			return yield* new Refused({ message: `${identifier}'s run was claimed before sessions were recorded` });
+		}
+
+		yield* Console.log(run.value.session.name);
+	}),
+).pipe(Command.withDescription("Prints the name of the Claude session of the epic's run, which other Claude sessions message it by"));
+
 const commandWith = (url: string) =>
 	Journal.use((journal) => journal.listCommands).pipe(Effect.map((commands) => Option.fromUndefinedOr(commands.find((command) => command.url === url))));
 
@@ -193,7 +210,7 @@ const done = Command.make('done', { command: Argument.String('command').pipe(Arg
 	}),
 ).pipe(Command.withDescription('Says the command is done, so its tab is closed'));
 
-const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, reply, done]));
+const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, session, reply, done]));
 
 export const runCtl = Command.runWith(ctl, { version: '0.1.0' });
 

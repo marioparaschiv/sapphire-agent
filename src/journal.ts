@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
@@ -25,6 +26,14 @@ export type Job = typeof Job.Type;
 
 const Millis = Schema.Int;
 
+// The Claude session an agent runs in. Other Claude sessions on the machine message it by name.
+export const Session = Schema.Struct({ id: Schema.String, name: Schema.String });
+
+export type Session = typeof Session.Type;
+
+// Made when a run or command is claimed and kept from then on, so a start after a crash resumes into the same session.
+export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: identifier.toLowerCase() }));
+
 // Only what cannot be observed from Linear, herdr, git or GitHub. Times are epoch milliseconds.
 export const Run = Schema.Struct({
 	epicId: Schema.String,
@@ -38,6 +47,8 @@ export const Run = Schema.Struct({
 	worktreePath: Schema.NullOr(Schema.String),
 	tabId: Schema.NullOr(Schema.String),
 	paneId: Schema.NullOr(Schema.String),
+	// None for a run claimed before sessions were recorded.
+	session: Schema.NullOr(Schema.fromJsonString(Session)),
 	claimedAt: Millis,
 	// When Claude was confirmed started in the pane.
 	startedAt: Schema.NullOr(Millis),
@@ -79,6 +90,8 @@ export const NewCommand = Schema.Struct({
 	cwd: Schema.NullOr(Schema.String),
 	tabId: Schema.NullOr(Schema.String),
 	paneId: Schema.NullOr(Schema.String),
+	// Made when it is claimed.
+	session: Schema.NullOr(Schema.fromJsonString(Session)),
 	recordedAt: Millis,
 	// When its turn came. Keys its markers, starts its start timeout and its wall-clock cap.
 	claimedAt: Schema.NullOr(Millis),
@@ -208,6 +221,12 @@ const migrations = SqliteMigrator.layer({
 					delivered_at INTEGER NOT NULL
 				)
 			`;
+		}),
+		'0004_add_sessions': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN session TEXT`;
+			yield* sql`ALTER TABLE commands ADD COLUMN session TEXT`;
 		}),
 	}),
 });

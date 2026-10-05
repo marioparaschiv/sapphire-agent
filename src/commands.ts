@@ -5,11 +5,11 @@ import { Permanent } from './call-policy.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
-import { describeAgent, runsClaude } from './dispatch.ts';
+import { describeAgent, runsClaude, sessionClaudeArgs } from './dispatch.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { Herdr } from './herdr.ts';
-import { type Command, commandIdentifier, Journal } from './journal.ts';
+import { type Command, commandIdentifier, Journal, newSession } from './journal.ts';
 import { isSameWatch, quietStatuses, tailHash, trackAgent } from './monitoring.ts';
 import { type Observation, observedAgentStatus } from './observation.ts';
 import type { Rule, TaskWork } from './planner.ts';
@@ -132,7 +132,7 @@ export const commandsRule = Effect.gen(function* () {
 			let command = next;
 
 			if (command.claimedAt === null) {
-				command = { ...command, status: 'claimed', claimedAt: now };
+				command = { ...command, status: 'claimed', claimedAt: now, session: yield* newSession(identifier) };
 				yield* journal.putCommand(command);
 				yield* Effect.log(`claimed for ${command.url}`);
 			} else if (now - Math.max(command.claimedAt, bootedAt) >= config.startTimeoutSeconds * 1000) {
@@ -176,7 +176,7 @@ export const commandsRule = Effect.gen(function* () {
 						paneId,
 						identifier.toLowerCase(),
 						prompts.command({ identifier, author: command.author, url: command.url, repo: command.repo, number: command.number, body: command.body, ctl: ctlPath }),
-						commandClaudeArgs(ctlPath),
+						[...commandClaudeArgs(ctlPath), ...sessionClaudeArgs(command.session)],
 					);
 
 					const agent = yield* herdr.agent(paneId);

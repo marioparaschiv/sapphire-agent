@@ -20,6 +20,7 @@ const run: Run = {
 	worktreePath: '/home/dev/.herdr/worktrees/unbound/mario-unb-12-settings-sync',
 	tabId: 'w1:t3',
 	paneId: 'w1:p3',
+	session: { id: '3f9a6c12-8e4b-4d71-b0a5-6c2e9f8d1b47', name: 'unb-12' },
 	claimedAt: Date.UTC(2026, 9, 4, 9, 30),
 	startedAt: Date.UTC(2026, 9, 4, 9, 31),
 	agentStatus: 'working',
@@ -88,11 +89,22 @@ describe('ctl', () => {
 			yield* h.ctl('follow-up', 'TEST-10', '--threads', 'PRRT_1', 'Rename', 'it.');
 
 			assert.deepStrictEqual(yield* h.ctl('status'), [
-				`TEST-10 running (orchestrate), epic in Implementing, claimed 1970-01-01T00:00:00.000Z, tab ${started.tabId}, ${started.worktreePath}`,
+				`TEST-10 running (orchestrate), epic in Implementing, claimed 1970-01-01T00:00:00.000Z, tab ${started.tabId}, session test-10, ${started.worktreePath}`,
 				`CMD-1 running, @marioparaschiv in ${mention.url}`,
 				'request 1: send TEST-10: Wrap up.',
 				'request 2: follow-up TEST-10 threads PRRT_1: Rename it.',
 			]);
+		}),
+	);
+
+	it.effect("session prints the Claude session name of the epic's run, and refuses an epic with no run", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+
+			yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			assert.deepStrictEqual(yield* h.ctl('session', 'test-10'), ['test-10']);
+			assert.deepStrictEqual(yield* h.ctl('session', 'TEST-11').pipe(Effect.flip), new Refused({ message: 'TEST-11 has no run' }));
 		}),
 	);
 
@@ -112,6 +124,9 @@ describe('ctl', () => {
 
 			assert.deepStrictEqual(yield* ctlSh(directory, 'stop', 'UNB-13'), { stdout: '', stderr: 'UNB-13 has no run in flight\n', exitCode: ChildProcessSpawner.ExitCode(1) });
 			assert.isFalse(existsSync(join(directory, 'wake')));
+
+			assert.deepStrictEqual(yield* ctlSh(directory, 'session', 'unb-12'), { stdout: 'unb-12\n', stderr: '', exitCode: ChildProcessSpawner.ExitCode(0) });
+			assert.deepStrictEqual(yield* ctlSh(directory, 'session', 'UNB-13'), { stdout: '', stderr: 'UNB-13 has no run\n', exitCode: ChildProcessSpawner.ExitCode(1) });
 
 			assert.deepStrictEqual(yield* ctlSh(directory, 'stop', 'unb-12'), { stdout: "UNB-12's run is stopped and its tab closed on the next tick\n", stderr: '', exitCode: ChildProcessSpawner.ExitCode(0) });
 			assert.deepStrictEqual(

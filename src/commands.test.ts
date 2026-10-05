@@ -45,13 +45,16 @@ describe('commands', () => {
 
 			const tab = commandTab(h, 'CMD-1');
 			const [start] = h.herdr.starts();
+			const [command] = yield* h.commands;
 
 			assert.deepStrictEqual(yield* statuses(h), ['running', 'queued']);
 			assert.deepStrictEqual(
 				[tab.workspace, tab.cwd, tab.env.HERDR_PLUGIN_STATE_DIR, tab.env.HERDR_PLUGIN_CONFIG_DIR, tab.env.CLAUDE_CONFIG_PATH],
 				['Test', h.repo, h.dir, h.dir, join(h.dir, 'claude.json')],
 			);
-			assert.deepStrictEqual([start.paneId, start.name, start.args], [tab.paneId, 'cmd-1', commandClaudeArgs(ctlPath)]);
+			assert.isNotNull(command.session);
+			assert.strictEqual(command.session.name, 'cmd-1');
+			assert.deepStrictEqual([start.paneId, start.name, start.args], [tab.paneId, 'cmd-1', [...commandClaudeArgs(ctlPath), '--session-id', command.session.id, '--name', 'cmd-1']]);
 			assert.include(start.prompt, `You are CMD-1, the sapphire-agent command agent. @marioparaschiv mentioned the bot in ${comment.url} (test/repo#1) and wrote: "@orchestratorbot stop TEST-12 and start TEST-14".`);
 			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[h.repo].hasTrustDialogAccepted);
 			assert.deepStrictEqual(commandClaudeArgs('/srv/ctl.sh').slice(0, 5), ['--restricted', '--strict-mcp-config', '--tools', 'Bash,Read,Grep,Glob', '--settings']);
@@ -114,6 +117,31 @@ describe('commands', () => {
 			assert.deepStrictEqual(yield* statuses(h), ['ended']);
 			assert.deepStrictEqual(h.herdr.closedTabs(), [tab.tabId]);
 			assert.lengthOf(h.herdr.starts(), 1);
+		}),
+	);
+
+	it.effect('starts a command claimed before a crash in the session it was claimed with', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { number } = h.github.addPullRequest({ repo: h.githubRepo, branch, author: 'marioparaschiv' });
+
+			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, h.github.addComment(h.githubRepo, number, '@orchestratorbot what is running?')));
+			h.crashAtJournalWrite(2);
+			yield* h.tick;
+
+			const [claimed] = yield* h.commands;
+
+			assert.isTrue(h.crashed());
+			assert.isNotNull(claimed.session);
+			assert.deepStrictEqual([claimed.status, claimed.session.name], ['claimed', 'cmd-1']);
+
+			yield* h.restart;
+			yield* h.tick;
+
+			const [command] = yield* h.commands;
+
+			assert.deepStrictEqual([command.status, command.session], ['running', claimed.session]);
+			assert.deepStrictEqual(h.herdr.starts().map(({ args }) => args.slice(-4)), [['--session-id', claimed.session.id, '--name', 'cmd-1']]);
 		}),
 	);
 
