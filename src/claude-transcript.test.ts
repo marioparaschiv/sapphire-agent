@@ -35,6 +35,7 @@ describe('ClaudeTranscript', () => {
 			...entries.sentMessage(session, 'tel-434', 'TEL-435: Is your migration merged yet?'),
 			...entries.peerMessage(session, 'tel-434', 'TEL-434: Yes.'),
 			...entries.sentMessage(session, 'hivemind-ts-59', question),
+			...entries.sentMessage(session, 'tel-434', 'TEL-435: The cache moves to the new path.'),
 			...entries.text(session, 'Asked hivemind-ts-59; waiting for the reply.'),
 			...entries.taskNotification(session),
 			...entries.text(session, 'The review agent is done; still waiting for the reply on the cache.'),

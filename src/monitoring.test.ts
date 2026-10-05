@@ -267,24 +267,40 @@ describe('monitoring', () => {
 		}),
 	);
 
-	it.effect('asks nothing on Linear when the reply comes by message within staleAfterSeconds', () =>
+	it.effect('stops waiting for staleAfterSeconds once the reply comes by message, and flags the run as awaitingInput as before', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { epic, run, session, asked } = yield* askedByMessage(h);
+			const { epic, session, asked } = yield* askedByMessage(h);
 
 			yield* h.tick;
 			yield* TestClock.adjust('5 minutes');
 			yield* h.tick;
 
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+
 			h.writeTranscript(session, [...asked, entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.')]);
-			h.herdr.setAgentStatus(run.paneId, 'working');
-			h.herdr.setTail(run.paneId, '⏺ Remote wins, so the merge step keeps the remote side.');
-			yield* h.tick;
-			yield* TestClock.adjust('6 minutes');
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
-			assert.deepStrictEqual(yield* statuses(h), ['running']);
+			const [flagged] = h.linear.comments(epic.id);
+
+			assert.isFalse(flagged.body.startsWith('TEST-10 asks:'));
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
+			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
+		}),
+	);
+
+	it.effect('asks on Linear after staleAfterSeconds when that comes before awaitingInputAfterSeconds', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ awaitingInputAfterSeconds: 600, staleAfterSeconds: 180 });
+			const { epic } = yield* askedByMessage(h);
+
+			yield* h.tick;
+			yield* TestClock.adjust('180 seconds');
+			yield* h.tick;
+
+			const [asked] = h.linear.comments(epic.id);
+
+			assert.isTrue(asked.body.startsWith('TEST-10 asks: Which should win on a conflict, local or remote?'));
 		}),
 	);
 
