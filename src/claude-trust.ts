@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { Context, Effect, FileSystem, Layer, type PlatformError, Schema } from 'effect';
-import { Permanent, Transient } from './call-policy.ts';
+import { Context, Effect, FileSystem, Layer, Schema } from 'effect';
+import { fileSystemFailure, Permanent, Transient } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 
 const Loose = Schema.Record(Schema.String, Schema.Unknown);
@@ -79,7 +79,7 @@ export class ClaudeTrust extends Context.Service<
 						return yield* new Transient({ message: `${path} kept changing; could not pre-accept the trust dialog for ${folder}` });
 					}).pipe(
 						Effect.catchTags({
-							PlatformError: (error: PlatformError.PlatformError) => Effect.fail(new Permanent({ message: error.message, cause: error })),
+							PlatformError: (error) => Effect.fail(fileSystemFailure(error)),
 							SchemaError: (error) => Effect.fail(new Permanent({ message: `${path}: ${error.message}`, cause: error })),
 						}),
 					),

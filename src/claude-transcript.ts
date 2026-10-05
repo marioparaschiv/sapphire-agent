@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { Context, Effect, FileSystem, Layer, Option, Schema } from 'effect';
-import { Permanent } from './call-policy.ts';
+import { fileSystemFailure, type Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 
 // Only the entries that tell whether the agent still waits on a message; every other entry is skipped.
@@ -100,7 +100,7 @@ export class ClaudeTranscript extends Context.Service<
 						return pendingIn(text.split('\n'), to);
 					}).pipe(
 						Effect.catchTag('PlatformError', (error) =>
-							error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(new Permanent({ message: error.message, cause: error })),
+							error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(fileSystemFailure(error)),
 						),
 					),
 			});

@@ -1,4 +1,4 @@
-import { Duration, Effect, Schedule, Schema } from 'effect';
+import { Duration, Effect, type PlatformError, Schedule, Schema } from 'effect';
 import type { HttpClientError } from 'effect/http';
 
 // Worth retrying: a timeout, a 5xx, a network error, a git lock. `retryAfter` is the server's Retry-After.
@@ -20,6 +20,8 @@ export const transportFailure = (service: string) => (error: HttpClientError.Htt
 	error.reason._tag === 'TransportError'
 		? new Transient({ message: `${service} could not be reached: ${error.message}`, cause: error })
 		: new Permanent({ message: `${service} request failed: ${error.message}`, cause: error });
+
+export const fileSystemFailure = (error: PlatformError.PlatformError) => new Permanent({ message: error.message, cause: error });
 
 export const callTimeouts = {
 	herdr: Duration.seconds(30),
