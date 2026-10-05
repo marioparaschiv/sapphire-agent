@@ -42,7 +42,8 @@ export const postDelivery = (url: string, secret: Redacted.Redacted<string>, del
 
 // An entry of the App's delivery log, as `GET /app/hook/deliveries` lists it, with what was sent.
 export type FixtureDelivery = {
-	readonly id: number;
+	// The id's exact decimal digits: GitHub's delivery ids are above Number.MAX_SAFE_INTEGER.
+	readonly id: string;
 	readonly guid: string;
 	readonly deliveredAt: string;
 	readonly redelivery: boolean;
@@ -73,13 +74,13 @@ export type GitHubAppFixtureShape = {
 	// Like addDelivery, but the attempt is listed only once `list` runs, as GitHub can list a slow attempt after newer ones.
 	readonly addSlowDelivery: (delivery: WebhookDelivery, statusCode: number) => Effect.Effect<{ readonly attempt: FixtureDelivery; readonly list: Effect.Effect<void> }>;
 	// Answers `POST /app/hook/deliveries/{id}/attempts` for the delivery with 422 and sends nothing, `times` times.
-	readonly refuseRedelivery: (id: number, times: number) => void;
+	readonly refuseRedelivery: (id: string, times: number) => void;
 	// The delivery log, newest first.
 	readonly deliveries: () => ReadonlyArray<FixtureDelivery>;
 	// Answers the next `times` `GET /app/hook/deliveries` with 403, as GitHub does without the permission.
 	readonly refuseDeliveryPages: (times: number) => void;
 	// The ids of the deliveries GitHub was asked to redeliver and did, in order.
-	readonly redelivered: () => ReadonlyArray<number>;
+	readonly redelivered: () => ReadonlyArray<string>;
 	// The `cursor` of each `GET /app/hook/deliveries`, null for the first page, in order.
 	readonly deliveryPages: () => ReadonlyArray<string | null>;
 	// Completes once the fixture's GitHubApp layer has got n answers (a response or a transport error) in total, so
@@ -102,6 +103,13 @@ const isoSeconds = (millis: number) => new Date(millis).toISOString().replace(/\
 
 const Action = Schema.Struct({ action: Schema.String });
 
+declare global {
+	interface JSON {
+		// Node 24; not in TypeScript's lib yet. JSON.stringify writes `text` as is.
+		rawJSON(text: string): unknown;
+	}
+}
+
 type Answer = { readonly status: number; readonly body: unknown; readonly link?: string };
 
 const make = Effect.gen(function* () {
@@ -111,18 +119,19 @@ const make = Effect.gen(function* () {
 	const jwts: Array<AppJwtClaims> = [];
 	const tokens: Array<FixtureToken> = [];
 	const log: Array<FixtureDelivery> = [];
-	const refusals = new Map<number, number>();
+	const refusals = new Map<string, number>();
 	let pageRefusals = 0;
 	const answers = yield* SubscriptionRef.make(0);
-	const redelivered: Array<number> = [];
+	const redelivered: Array<string> = [];
 	const deliveryPages: Array<string | null> = [];
 	let webhookUrl: string | undefined;
-	let lastDeliveryId = 90_000_000_000;
+	// A real delivery id. Ids this size are a few apart in a double, so one read through JSON.parse is another's or none.
+	let lastDeliveryId = 3_846_482_596_114_464_768n;
 
 	const attempt = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number): FixtureDelivery => {
-		lastDeliveryId += 1;
+		lastDeliveryId += 1n;
 
-		return { id: lastDeliveryId, guid, deliveredAt: isoSeconds(nowMillis), redelivery: log.some((earlier) => earlier.guid === guid), statusCode, delivery };
+		return { id: String(lastDeliveryId), guid, deliveredAt: isoSeconds(nowMillis), redelivery: log.some((earlier) => earlier.guid === guid), statusCode, delivery };
 	};
 
 	const record = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number) => {
@@ -140,7 +149,7 @@ const make = Effect.gen(function* () {
 	};
 
 	const listed = ({ id, guid, deliveredAt, redelivery, statusCode, delivery }: FixtureDelivery) => ({
-		id,
+		id: JSON.rawJSON(id),
 		guid,
 		delivered_at: deliveredAt,
 		redelivery,
@@ -156,8 +165,8 @@ const make = Effect.gen(function* () {
 	const deliveriesPage = (url: URL): Answer => {
 		const perPage = Number(url.searchParams.get('per_page') ?? 30);
 		const cursor = url.searchParams.get('cursor');
-		const after = cursor === null ? Number.POSITIVE_INFINITY : Number(cursor.replace(/^v1_/, ''));
-		const older = log.filter(({ id }) => id < after);
+		const after = cursor === null ? undefined : BigInt(cursor.replace(/^v1_/, ''));
+		const older = log.filter(({ id }) => after === undefined || BigInt(id) < after);
 		const page = older.slice(0, perPage);
 
 		deliveryPages.push(cursor);
@@ -175,7 +184,7 @@ const make = Effect.gen(function* () {
 		};
 	};
 
-	const redeliver = async (id: number, nowMillis: number): Promise<Answer> => {
+	const redeliver = async (id: string, nowMillis: number): Promise<Answer> => {
 		const original = log.find((entry) => entry.id === id);
 
 		if (original === undefined) {
@@ -251,7 +260,7 @@ const make = Effect.gen(function* () {
 		}
 
 		if (request.method === 'POST' && attemptsOf) {
-			return redeliver(Number(attemptsOf[1]), nowMillis);
+			return redeliver(attemptsOf[1], nowMillis);
 		}
 
 		return { status: 404, body: { message: 'Not Found' } };
@@ -287,7 +296,7 @@ const make = Effect.gen(function* () {
 			Effect.map(Clock.currentTimeMillis, (now) => {
 				const entry = attempt(delivery, randomUUID(), now, statusCode);
 				const list = Effect.sync(() => {
-					const olderAt = log.findIndex(({ id }) => id < entry.id);
+					const olderAt = log.findIndex(({ id }) => BigInt(id) < BigInt(entry.id));
 
 					log.splice(olderAt === -1 ? log.length : olderAt, 0, entry);
 				});
