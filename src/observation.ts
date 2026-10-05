@@ -30,6 +30,9 @@ const inFlightStatuses: ReadonlyArray<RunStatus> = ['claimed', 'running', 'await
 
 export const isInFlight = (run: Run) => inFlightStatuses.includes(run.status);
 
+// A finished run's row is replaced by a new claim, and so is a run that never started once its label is removed.
+export const isOver = (run: Run) => run.status === 'ended' || run.status === 'kept' || (run.status === 'error' && run.startedAt === null);
+
 // A run that got as far as a tab in a worktree has all of these.
 export type StartedRun = Run & { readonly worktreePath: string; readonly tabId: string; readonly paneId: string };
 

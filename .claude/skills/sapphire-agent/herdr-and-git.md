@@ -45,7 +45,7 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 
 ### Starting Claude
 
-`startClaude`: `herdr agent start <identifier lowercased> --kind claude --pane <pane> --timeout 30000 -- [args...] <prompt>`. herdr quotes each argument for the shell it types the command into; a command's agent gets its lockdown arguments this way (`rules.md`).
+`startClaude`: `herdr agent start <identifier lowercased> --kind claude --pane <pane> --timeout 30000 -- [args...] <prompt>`. herdr quotes each argument for the shell it types the command into; a run's and a command's agent get `--session-id <id> --name <name>` from their recorded session (`journal-and-markers.md`) this way, and a command's agent its lockdown arguments before them (`rules.md`).
 
 - It returns only when the agent is ready for input, which with an initial prompt means after that prompt's whole turn. So it nearly always times out, which means Claude is still starting.
 - The start rule then reads `herdr agent get <pane>`: it must show `claude` with a status other than `blocked`, or the start fails with the pane tail.

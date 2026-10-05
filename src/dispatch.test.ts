@@ -31,7 +31,11 @@ describe('dispatch', () => {
 
 			const worktree = join(h.dir, 'worktrees', 'repo', 'mario-test-10-plugin-settings-sync');
 			const [tab] = ownedTabs(h);
+			const [run] = yield* h.runs;
 
+			assert.isNotNull(run.session);
+			assert.strictEqual(run.session.name, 'test-10');
+			assert.match(run.session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 			assert.deepStrictEqual(yield* started(h), {
 				runs: [['TEST-10', 'running', worktree, 'tab']],
 				worktrees: [worktree],
@@ -43,7 +47,7 @@ describe('dispatch', () => {
 					paneId: tab.paneId,
 					name: 'test-10',
 					prompt: '/orchestrate Linear epic TEST-10 autonomously',
-					args: [],
+					args: ['--session-id', run.session.id, '--name', 'test-10'],
 				},
 			]);
 			assert.strictEqual(tab.workspace, 'Test');
@@ -70,7 +74,49 @@ describe('dispatch', () => {
 		}),
 	);
 
-	it.effect('resumes after a crash before any journal write without a second worktree, tab or start', () =>
+	it.effect('claims an epic started with --reply-to replying to that session, as the newest start asked, and drops its start requests', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 3 });
+
+			h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync', state: 'To Do' });
+			h.linear.addEpic({ identifier: 'TEST-11', title: 'Fix the file leak', state: 'To Do', subIssues: 0 });
+			h.linear.addEpic({ identifier: 'TEST-12', title: 'Rename the config', state: 'To Do' });
+			yield* h.ctl('start', 'TEST-10', '--reply-to', 'planning');
+			yield* h.ctl('start', 'TEST-11', '--reply-to', 'planning');
+			yield* h.ctl('start', 'TEST-11', '--reply-to', 'triage');
+			yield* h.ctl('start', 'TEST-12', '--reply-to', 'planning');
+			yield* h.ctl('start', 'TEST-12');
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.identifier, run.replyTo]),
+				[
+					['TEST-10', 'planning'],
+					['TEST-11', 'triage'],
+					['TEST-12', null],
+				],
+			);
+			assert.deepStrictEqual(
+				h.herdr.starts().map((start) => start.prompt),
+				[
+					'/orchestrate Linear epic TEST-10 autonomously, reply-to planning',
+					'/orchestrate Linear epic TEST-11 inline autonomously, reply-to triage',
+					'/orchestrate Linear epic TEST-12 autonomously',
+				],
+			);
+
+			const status = yield* h.ctl('status');
+
+			assert.include(status[0], 'session test-10, reply-to planning, ');
+			assert.notInclude(status[2], 'reply-to');
+			assert.deepStrictEqual(
+				status.filter((line) => line.startsWith('request')),
+				[],
+			);
+		}),
+	);
+
+	it.effect('resumes after a crash before any journal write without a second worktree, tab or start, in the session it was claimed with', () =>
 		Effect.gen(function* () {
 			const crashPoints: Array<number> = [];
 
@@ -88,9 +134,18 @@ describe('dispatch', () => {
 				}
 
 				crashPoints.push(nth);
+
+				const claimed = (yield* h.runs).map((run) => run.session);
+
 				yield* h.restart;
 				yield* h.tick;
 				yield* h.tick;
+
+				const [run] = yield* h.runs;
+
+				assert.isNotNull(run.session);
+				assert.deepStrictEqual(claimed, nth === 1 ? [] : [run.session], `crash before journal write ${nth}`);
+				assert.deepStrictEqual(h.herdr.starts().map(({ args }) => args), [['--session-id', run.session.id, '--name', 'test-10']], `crash before journal write ${nth}`);
 
 				const { runs, worktrees, tabs, starts } = yield* started(h);
 

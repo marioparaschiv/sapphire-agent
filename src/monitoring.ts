@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Clock, Effect, Option } from 'effect';
+import { ClaudeTranscript } from './claude-transcript.ts';
 import { Comments, type FlaggedRun } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Herdr } from './herdr.ts';
@@ -64,7 +65,8 @@ const sameRun = (a: Run, b: Run) => a.status === b.status && isSameWatch(a, b) &
 // Watches started runs in herdr. Every tick reads herdr afresh, so an event that never arrived changes nothing: the
 // poll always wins. Flags, once each: awaitingInput (quiet too long without a result file), stale (working with an
 // unchanged pane even after a nudge), error (agent exited or vanished; its tab is then closed) and the wall-clock cap.
-// While awaitingInput, the user's replies to the question are typed into the pane.
+// A run that asked its reply-to session by message is not flagged while it waits for the reply; after staleAfterSeconds
+// its question is asked on Linear instead. While awaitingInput, the user's replies to the question are typed into the pane.
 export const monitoringRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
@@ -72,6 +74,7 @@ export const monitoringRule = Effect.gen(function* () {
 	const linear = yield* Linear;
 	const comments = yield* Comments;
 	const prompts = yield* Prompts;
+	const transcript = yield* ClaudeTranscript;
 	const flag = yield* makeFlag;
 	const { closeRunTab } = yield* makeTabActions;
 	const nudge = yield* makeNudge;
@@ -132,6 +135,9 @@ export const monitoringRule = Effect.gen(function* () {
 			}
 		});
 
+	// The question the agent sent its reply-to session and ended its turn on, while no reply came.
+	const pendingMessage = (run: StartedRun) =>
+		run.replyTo === null || run.session === null ? Effect.succeedNone : transcript.pendingMessage({ id: run.session.id, cwd: run.worktreePath }, run.replyTo);
 
 	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, replies: ReadonlyArray<Reply>) =>
 		Effect.gen(function* () {
@@ -168,10 +174,27 @@ export const monitoringRule = Effect.gen(function* () {
 				return;
 			}
 
-			if (run.status === 'running' && quietStatuses.includes(status) && now - since >= config.awaitingInputAfterSeconds * 1000) {
-				yield* Effect.log(`agent ${status} without a result file; flagging it as awaitingInput`);
+			if (run.status === 'running' && quietStatuses.includes(status) && now - since >= Math.min(config.awaitingInputAfterSeconds, config.staleAfterSeconds) * 1000) {
+				const message = yield* pendingMessage(run);
 
-				const question = yield* flag(observation, run, comments.awaitingInput(flaggedRun(observation, run, epic, tail, now)));
+				if (now - since < (Option.isSome(message) ? config.staleAfterSeconds : config.awaitingInputAfterSeconds) * 1000) {
+					return;
+				}
+
+				yield* Effect.log(
+					Option.isSome(message)
+						? `no reply to the agent's message for ${config.staleAfterSeconds} s; asking on Linear`
+						: `agent ${status} without a result file; flagging it as awaitingInput`,
+				);
+
+				const question = yield* flag(
+					observation,
+					run,
+					Option.match(message, {
+						onNone: () => comments.awaitingInput(flaggedRun(observation, run, epic, tail, now)),
+						onSome: (text) => comments.messageQuestion({ identifier: run.identifier, claimedAt: run.claimedAt, agentStatusSince: since, message: text }),
+					}),
+				);
 
 				yield* journal.putRun({ ...run, status: 'awaitingInput', questionCommentId: question });
 

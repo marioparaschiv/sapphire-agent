@@ -143,7 +143,7 @@ describe('follow-ups', () => {
 			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[1].startsWith('Renamed the sync function and added backoff.\n\nReady for review, @marioparaschiv.'));
 			assert.strictEqual(h.herdr.starts().length, 1);
 			assert.deepStrictEqual(yield* h.ctl('status'), [
-				`TEST-10 ended (follow-up), epic in To Review, claimed 1970-01-01T00:01:00.000Z, tab ${tab.tabId}, ${worktreePath}`,
+				`TEST-10 ended (follow-up), epic in To Review, claimed 1970-01-01T00:01:00.000Z, tab ${tab.tabId}, session test-10, ${worktreePath}`,
 				'no commands',
 			]);
 		}),

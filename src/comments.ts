@@ -1,5 +1,6 @@
 import { Context, Layer, Option } from 'effect';
 import { AppConfig, type AppConfigShape } from './config.ts';
+import { oneLine } from './herdr.ts';
 import type { AgentStatus, Job, RunStatus } from './journal.ts';
 import { type MarkedComment, withMarker } from './markers.ts';
 import type { ResultFile } from './result-file.ts';
@@ -21,6 +22,8 @@ export type FlaggedRun = {
 };
 
 const minutesBetween = (from: number, to: number) => Math.round((to - from) / 60_000);
+
+const withoutPrefix = (text: string, prefix: string) => (text.startsWith(prefix) ? text.slice(prefix.length).trimStart() : text);
 
 const codeBlock = (text: string) => `\`\`\`\n${text.replaceAll('```', "'''")}\n\`\`\``;
 
@@ -78,6 +81,15 @@ const make = (config: AppConfigShape) => {
 		// Its replies are typed into the pane, so the flag's id is kept as the run's question.
 		awaitingInput: (run: FlaggedRun) =>
 			withMarker(runFlag(run, 'awaitingInput', `Reply to this comment and the reply is typed into the agent's pane. Or: ${startOver}`), {
+				identifier: run.identifier,
+				purpose: 'awaitingInput',
+				key: `${run.claimedAt}-${run.agentStatusSince}`,
+			}),
+
+		// The question a run sent its reply-to session by message, which no one answered. It stands in for the
+		// awaitingInput flag of the quiet episode, so its replies are typed into the pane the same way.
+		messageQuestion: (run: Pick<FlaggedRun, 'identifier' | 'claimedAt' | 'agentStatusSince'> & { readonly message: string }) =>
+			withMarker(`${run.identifier} asks: ${withoutPrefix(oneLine(run.message), `${run.identifier}:`)}`, {
 				identifier: run.identifier,
 				purpose: 'awaitingInput',
 				key: `${run.claimedAt}-${run.agentStatusSince}`,

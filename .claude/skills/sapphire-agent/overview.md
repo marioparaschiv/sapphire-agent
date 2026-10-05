@@ -56,7 +56,7 @@ Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.m
 
 Built by the `Prompts` service, each on one line (herdr refuses newlines):
 
-`/orchestrate Linear epic <ID> autonomously`, with `inline` before `autonomously` when the epic has no sub-issues.
+`/orchestrate Linear epic <ID> autonomously`, with `inline` before `autonomously` when the epic has no sub-issues, and `, reply-to <session>` after it when the run was started with `ctl.sh start --reply-to`.
 
 `/follow-up Linear epic <ID>, PR <pr url>, threads <id1> <id2> ... (or: no threads), instruction "<text>" (when one was given)`
 
@@ -64,7 +64,7 @@ A command agent gets one line naming it (`CMD-<n>`), the author, the comment's U
 
 The workflow lives in the skills, not in this code:
 
-- Orchestrate (`~/.claude/skills/orchestrate/SKILL.md`, sections **Linear epics** and **Autonomous runs**): move sub-issues to Implementing and Done and the epic to In Review at `/sreview`. `autonomously` means: commit each verified slice, run `/pr` after `/sreview`, self-review and push fixes, write the result file, never post to GitHub; comment a question on the epic and stop if blocked.
-- Follow-up (`~/.claude/skills/follow-up/SKILL.md`): reads the sub-issues, earlier PR summaries and the threads, makes and pushes the changes (and what the instruction asks), self-reviews as orchestrate does, and writes the result file with exactly one reply per thread id (none without threads). It never posts to GitHub and never moves the epic.
+- Orchestrate (`~/.claude/skills/orchestrate/SKILL.md`, sections **Linear epics** and **Autonomous runs**): move sub-issues to Implementing and Done and the epic to In Review at `/sreview`. `autonomously` means: commit each verified slice, run `/pr` after `/sreview`, self-review and push fixes, write the result file, never post to GitHub; on a question, with `reply-to` send it as one line `<ID>: <question>` to that session (`SendMessage`) and end the turn to wait for the reply, otherwise comment it on the epic and stop.
+- Follow-up (`~/.claude/skills/follow-up/SKILL.md`): reads the sub-issues, earlier PR summaries and the threads, makes and pushes the changes (and what the instruction asks), self-reviews as orchestrate does, and writes the result file with exactly one reply per thread id (none without threads). It never posts to GitHub and never moves the epic. A question goes to the session its prompt names with `reply-to`, as in orchestrate; a follow-up prompt names none, so it is commented on the epic.
 
 Changing the column names means editing those skills as well as `states` in the config.

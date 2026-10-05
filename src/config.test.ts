@@ -73,6 +73,7 @@ describe('loadAppConfig', () => {
 			});
 			assert.isFalse('stuckAfterSeconds' in config);
 			assert.strictEqual(config.env.claudeConfigPath, join(homedir(), '.claude.json'));
+			assert.strictEqual(config.env.claudeConfigDirectory, join(homedir(), '.claude'));
 			assert.strictEqual(config.env.stateDirectory, '/state');
 			assert.strictEqual(Redacted.value(config.linearApiKey), 'lin_api_secret');
 			assert.strictEqual(config.appPrivateKey.export({ type: 'pkcs8', format: 'pem' }), appPem);

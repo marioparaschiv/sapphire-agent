@@ -33,7 +33,7 @@ Rules run in this order (`rules.ts`):
 | 1 | requests | no | Acts on `ctl.sh stop` (ends the run, closes its tab) and `ctl.sh send` (types into the agent); drops follow-up requests whose epic has no run. |
 | 2 | cleanup | no | Ends what is left of finished runs (tab, worktree, branch, row), and resolves owned tabs and worktrees that no run tracks. |
 | 3 | results | no | Ends runs whose epic moved on; reads, stores and posts result files; moves the epic to To Review. |
-| 4 | monitoring | no | Tracks agent status and pane output; flags awaitingInput, stale, error and the wall-clock cap; nudges; relays replies. |
+| 4 | monitoring | no | Tracks agent status and pane output; flags awaitingInput, stale, error and the wall-clock cap; nudges; asks on Linear what a run asked by message and got no reply to; relays replies. |
 | 5 | follow-up | yes | Claims a follow-up run for a follow-up request, once the epic's run ended. |
 | 6 | dispatch | yes | Claims ready epics up to `maxInFlight`. |
 | 7 | start | no | Takes each claimed run through worktree, trust, tab, Claude and the move to Implementing. |
@@ -64,6 +64,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Herdr` | `herdr.ts` | herdr CLI and event socket: workspaces, tabs (with extra shell variables), panes, agents, prompts, starting Claude (with extra arguments). | `FakeHerdr.layer` |
 | `Git` | `git.ts` | Worktrees, pull, unsaved-work check, removal, origin's GitHub repo, the result file. | Real git in temp repos. |
 | `ClaudeTrust` | `claude-trust.ts` | Pre-accepts Claude's folder trust in `~/.claude.json`. | Real temp files. |
+| `ClaudeTranscript` | `claude-transcript.ts` | Reads a run's Claude session transcript in `~/.claude/projects` for a message it still waits on a reply to. | Real temp files, written by `claude-transcript-fixture.ts`. |
 | `Journal` | `journal.ts` | SQLite journal of runs, transient failure streaks, commands and requests. | `Journal.layer(':memory:')` or a temp file. |
 | `Pause` | `pause.ts` | Whether the pause file exists. | Real temp dir. |
 | `Prompts` | `prompts.ts` | Tab labels and the orchestrate, follow-up and command prompts. | Pure. |
@@ -115,7 +116,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/call-policy.ts` | `Transient`, `Permanent`, timeouts and retries for every external call. |
 | `src/config.ts` | Config schema, env, API key, App private key and webhook secret, `StartupError`. |
 | `src/legacy-claims.ts` | Startup guard against an undrained `claims.json`. |
-| `src/linear.ts`, `src/github.ts`, `src/github-app.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/pause.ts` | The external services. |
-| `src/linear-fixture.ts`, `src/github-app-fixture.ts`, `src/fixture-server.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
+| `src/linear.ts`, `src/github.ts`, `src/github-app.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/claude-transcript.ts`, `src/pause.ts` | The external services. |
+| `src/linear-fixture.ts`, `src/github-app-fixture.ts`, `src/claude-transcript-fixture.ts`, `src/fixture-server.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
 | `src/fixtures/herdr/` | Real herdr JSON output and events, recorded from a named session, for the herdr tests. |
 | `src/*.test.ts` | Tests beside the code. |

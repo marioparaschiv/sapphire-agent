@@ -6,7 +6,7 @@ import { FetchHttpClient } from 'effect/http';
 import { AppConfig } from './config.ts';
 import { type Command as CommandRow, commandIdentifier, Journal, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { isInFlight, isStarted } from './observation.ts';
+import { isInFlight, isOver, isStarted } from './observation.ts';
 import { wakeFileName } from './reconciler.ts';
 
 // What the CLI refuses, said to whoever ran it: a person, or a command's agent.
@@ -18,6 +18,8 @@ const describeRun = (run: Run, epicState: string) =>
 		epicState,
 		`claimed ${new Date(run.claimedAt).toISOString()}`,
 		run.tabId === null ? 'no tab' : `tab ${run.tabId}`,
+		run.session === null ? 'no session' : `session ${run.session.name}`,
+		...(run.replyTo === null ? [] : [`reply-to ${run.replyTo}`]),
 		run.worktreePath ?? 'no worktree',
 	].join(', ');
 
@@ -25,6 +27,8 @@ const describeCommand = (command: CommandRow) => `${commandIdentifier(command)} 
 
 const describeRequest = (request: Request) => {
 	switch (request._tag) {
+		case 'start':
+			return `start ${request.identifier}${request.replyTo === null ? '' : ` reply-to ${request.replyTo}`}`;
 		case 'stop':
 			return `stop ${request.identifier}`;
 		case 'send':
@@ -87,37 +91,55 @@ const status = Command.make('status', {}, () =>
 	}),
 ).pipe(Command.withDescription('The runs with their epics, the commands in flight and the requests not acted on yet'));
 
-const start = Command.make('start', { epic: epicArgument }, ({ epic: identifier }) =>
-	Effect.gen(function* () {
-		const config = yield* AppConfig;
-		const linear = yield* Linear;
-		const [epic] = yield* linear.epicsByIdentifier([identifier]);
+const start = Command.make(
+	'start',
+	{
+		epic: epicArgument,
+		replyTo: Flag.String('reply-to').pipe(
+			Flag.withDescription('The Claude session the run asks its questions'),
+			Flag.filter((session) => session.trim() !== '', () => 'a session name'),
+			Flag.optional,
+		),
+	},
+	({ epic: identifier, replyTo }) =>
+		Effect.gen(function* () {
+			// Dispatch would not claim the epic, so its request would wait for a later claim, which would then ask an old session.
+			if (Option.exists(yield* runOf(identifier), (run) => !isOver(run))) {
+				return yield* new Refused({ message: `${identifier} has a run that is not over` });
+			}
 
-		if (!epic) {
-			return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
-		}
+			const config = yield* AppConfig;
+			const linear = yield* Linear;
+			const [epic] = yield* linear.epicsByIdentifier([identifier]);
 
-		if (!config.teams[epic.team.name]) {
-			return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
-		}
+			if (!epic) {
+				return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
+			}
 
-		const ready = Option.fromUndefinedOr((yield* linear.teams([epic.team.name]))[0]?.states.nodes.find((state) => state.name === config.states.ready));
+			if (!config.teams[epic.team.name]) {
+				return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
+			}
 
-		if (Option.isNone(ready)) {
-			return yield* new Refused({ message: `team ${epic.team.name} has no workflow state ${config.states.ready}` });
-		}
+			const ready = Option.fromUndefinedOr((yield* linear.teams([epic.team.name]))[0]?.states.nodes.find((state) => state.name === config.states.ready));
 
-		if (epic.state.id !== ready.value.id) {
-			yield* linear.moveIssue(epic.id, ready.value.id);
-		}
+			if (Option.isNone(ready)) {
+				return yield* new Refused({ message: `team ${epic.team.name} has no workflow state ${config.states.ready}` });
+			}
 
-		const stuck = epic.labels.nodes.some((label) => label.name === config.labels.stuck);
+			// Recorded before the move, so the claim that follows it finds the request.
+			yield* Journal.use((journal) => journal.addRequest({ _tag: 'start', identifier, replyTo: Option.getOrNull(replyTo) }));
 
-		yield* wake;
-		yield* Console.log(
-			`${identifier} is in ${config.states.ready}${stuck ? `, but it has the ${config.labels.stuck} label, so it is not dispatched until that is removed` : '; it is dispatched once a slot is free'}`,
-		);
-	}),
+			if (epic.state.id !== ready.value.id) {
+				yield* linear.moveIssue(epic.id, ready.value.id);
+			}
+
+			const stuck = epic.labels.nodes.some((label) => label.name === config.labels.stuck);
+
+			yield* wake;
+			yield* Console.log(
+				`${identifier} is in ${config.states.ready}${stuck ? `, but it has the ${config.labels.stuck} label, so it is not dispatched until that is removed` : '; it is dispatched once a slot is free'}`,
+			);
+		}),
 ).pipe(Command.withDescription("Moves the epic to its team's ready state, so it is dispatched"));
 
 const stop = Command.make('stop', { epic: epicArgument }, ({ epic: identifier }) =>
@@ -164,6 +186,22 @@ const followUp = Command.make(
 		}),
 ).pipe(Command.withDescription("Starts a follow-up run on the epic's PR"));
 
+const session = Command.make('session', { epic: epicArgument }, ({ epic: identifier }) =>
+	Effect.gen(function* () {
+		const run = yield* runOf(identifier);
+
+		if (Option.isNone(run)) {
+			return yield* new Refused({ message: `${identifier} has no run` });
+		}
+
+		if (run.value.session === null) {
+			return yield* new Refused({ message: `${identifier}'s run has no recorded session` });
+		}
+
+		yield* Console.log(run.value.session.name);
+	}),
+).pipe(Command.withDescription("Prints the name of the Claude session of the epic's run, which other Claude sessions message it by"));
+
 const commandWith = (url: string) =>
 	Journal.use((journal) => journal.listCommands).pipe(Effect.map((commands) => Option.fromUndefinedOr(commands.find((command) => command.url === url))));
 
@@ -193,7 +231,7 @@ const done = Command.make('done', { command: Argument.String('command').pipe(Arg
 	}),
 ).pipe(Command.withDescription('Says the command is done, so its tab is closed'));
 
-const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, reply, done]));
+const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, session, reply, done]));
 
 export const runCtl = Command.runWith(ctl, { version: '0.1.0' });
 

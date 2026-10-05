@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
@@ -25,6 +26,14 @@ export type Job = typeof Job.Type;
 
 const Millis = Schema.Int;
 
+// The Claude session an agent runs in. Other Claude sessions on the machine message it by name.
+export const Session = Schema.Struct({ id: Schema.String, name: Schema.String });
+
+export type Session = typeof Session.Type;
+
+// Made when a run or command is claimed and kept from then on, so a start after a crash resumes into the same session.
+export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: identifier.toLowerCase() }));
+
 // Only what cannot be observed from Linear, herdr, git or GitHub. Times are epoch milliseconds.
 export const Run = Schema.Struct({
 	epicId: Schema.String,
@@ -38,6 +47,10 @@ export const Run = Schema.Struct({
 	worktreePath: Schema.NullOr(Schema.String),
 	tabId: Schema.NullOr(Schema.String),
 	paneId: Schema.NullOr(Schema.String),
+	// None for a run claimed before sessions were recorded, or adopted from a tab Claude already ran in.
+	session: Schema.NullOr(Schema.fromJsonString(Session)),
+	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks on Linear.
+	replyTo: Schema.NullOr(Schema.String),
 	claimedAt: Millis,
 	// When Claude was confirmed started in the pane.
 	startedAt: Schema.NullOr(Millis),
@@ -79,6 +92,8 @@ export const NewCommand = Schema.Struct({
 	cwd: Schema.NullOr(Schema.String),
 	tabId: Schema.NullOr(Schema.String),
 	paneId: Schema.NullOr(Schema.String),
+	// Made when it is claimed.
+	session: Schema.NullOr(Schema.fromJsonString(Session)),
 	recordedAt: Millis,
 	// When its turn came. Keys its markers, starts its start timeout and its wall-clock cap.
 	claimedAt: Schema.NullOr(Millis),
@@ -101,6 +116,7 @@ export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${comman
 // What `scripts/ctl.sh` asks the reconciler to do on its next tick. The CLI only appends these, so it never races a
 // rule over a row; the rule that acts on one deletes it.
 export const Request = Schema.Union([
+	Schema.TaggedStruct('start', { identifier: Schema.String, replyTo: Schema.NullOr(Schema.String) }),
 	Schema.TaggedStruct('stop', { identifier: Schema.String }),
 	Schema.TaggedStruct('send', { identifier: Schema.String, text: Schema.String }),
 	Schema.TaggedStruct('follow-up', { identifier: Schema.String, instruction: Schema.NullOr(Schema.String), threadIds: Schema.Array(Schema.String) }),
@@ -209,6 +225,17 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0004_add_sessions': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN session TEXT`;
+			yield* sql`ALTER TABLE commands ADD COLUMN session TEXT`;
+		}),
+		'0005_add_reply_to': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN reply_to TEXT`;
+		}),
 	}),
 });
 
@@ -236,9 +263,9 @@ export class Journal extends Context.Service<
 		// Oldest first.
 		readonly listRequests: Effect.Effect<ReadonlyArray<RequestRow>, JournalError>;
 		readonly deleteRequest: (id: number) => Effect.Effect<void, JournalError>;
-		// Records the follow-up's claim and drops the request that asked for it in one transaction, so a crash never
-		// claims it twice or loses it.
-		readonly claimFollowUp: (run: Run, requestId: number) => Effect.Effect<void, JournalError>;
+		// Records the claim and drops the requests that asked for it in one transaction, so a crash never claims one twice
+		// or loses it.
+		readonly claimRun: (run: Run, requestIds: ReadonlyArray<number>) => Effect.Effect<void, JournalError>;
 		// When the newest webhook delivery the last complete scan saw was delivered, in ms; none before the first scan.
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
 		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
@@ -335,7 +362,8 @@ export class Journal extends Context.Service<
 					execute: (id) => sql`DELETE FROM requests WHERE id = ${id}`,
 				});
 
-				const claimFollowUp = (run: Run, requestId: number) => sql.withTransaction(putRun(run).pipe(Effect.andThen(deleteRequest(requestId))));
+				const claimRun = (run: Run, requestIds: ReadonlyArray<number>) =>
+					sql.withTransaction(putRun(run).pipe(Effect.andThen(Effect.forEach(requestIds, deleteRequest, { discard: true }))));
 
 				const deliveryMark = SqlSchema.findOneOption({
 					Request: Schema.Void,
@@ -361,7 +389,7 @@ export class Journal extends Context.Service<
 					addRequest,
 					listRequests,
 					deleteRequest,
-					claimFollowUp,
+					claimRun,
 					deliveryMark,
 					setDeliveryMark,
 				});

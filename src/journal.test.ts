@@ -17,6 +17,8 @@ const orchestrate: Run = {
 	worktreePath: null,
 	tabId: null,
 	paneId: null,
+	session: { id: '0d5c1a3e-6f0b-4c8e-9d2a-7b1e4f3a9c60', name: 'hl-9' },
+	replyTo: 'planning',
 	claimedAt: 1_000,
 	startedAt: null,
 	agentStatus: null,
@@ -39,6 +41,8 @@ const followUp: Run = {
 	worktreePath: '/home/dev/.herdr/worktrees/loader-ios/mario-hl-10-linear',
 	tabId: 'w1:t3',
 	paneId: 'w1:p7',
+	session: { id: '5b8e2f47-1c3d-4a9e-8f60-2d7c9b1a4e35', name: 'hl-10' },
+	replyTo: null,
 	claimedAt: 500,
 	startedAt: 2_000,
 	agentStatus: 'blocked',
@@ -108,6 +112,7 @@ describe('Journal', () => {
 				cwd: null,
 				tabId: null,
 				paneId: null,
+				session: null,
 				recordedAt: 43_000,
 				claimedAt: null,
 				startedAt: null,
@@ -127,10 +132,10 @@ describe('Journal', () => {
 				{ id: 1, ...mention },
 				{ id: 2, ...mention, commentId: 'IC_kwDO2', status: 'ignored' },
 			]);
-			yield* journal.putCommand({ ...first, status: 'running', claimedAt: 44_000, tabId: 'w1:t2', paneId: 'w1:p2' });
-			assert.deepStrictEqual((yield* journal.listCommands).map(({ id, status, tabId }) => [id, status, tabId]), [
-				[1, 'running', 'w1:t2'],
-				[2, 'ignored', null],
+			yield* journal.putCommand({ ...first, status: 'running', claimedAt: 44_000, tabId: 'w1:t2', paneId: 'w1:p2', session: { id: '9e4f7a21-3b6c-4d8e-a15f-0c2b8d7e6a43', name: 'cmd-1' } });
+			assert.deepStrictEqual((yield* journal.listCommands).map(({ id, status, tabId, session }) => [id, status, tabId, session]), [
+				[1, 'running', 'w1:t2', { id: '9e4f7a21-3b6c-4d8e-a15f-0c2b8d7e6a43', name: 'cmd-1' }],
+				[2, 'ignored', null, null],
 			]);
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
@@ -156,7 +161,7 @@ describe('Journal', () => {
 
 			const claimed: Run = { ...ended, status: 'claimed', job: { _tag: 'follow-up', threadIds: [], instruction: 'Use the existing retry helper.' }, claimedAt: 7_000 };
 
-			yield* service.claimFollowUp(claimed, ask);
+			yield* service.claimRun(claimed, [ask]);
 
 			assert.deepStrictEqual(yield* cli.listRuns, [claimed]);
 			assert.deepStrictEqual((yield* cli.listRequests).map(({ id }) => id), [stop]);

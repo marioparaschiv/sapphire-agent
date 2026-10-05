@@ -6,6 +6,8 @@ import { NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { TestConsole } from 'effect/testing';
 import type { CallError } from './call-policy.ts';
+import { writeTranscript } from './claude-transcript-fixture.ts';
+import { ClaudeTranscript, type TranscriptSession } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
@@ -15,7 +17,7 @@ import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-
 import { Git } from './git.ts';
 import { Herdr, type HerdrAgentStatus } from './herdr.ts';
 import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
-import { type Command, Journal, type JournalError, type Run } from './journal.ts';
+import { type Command, Journal, type JournalError, newSession, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
@@ -88,6 +90,8 @@ export const deliveries = {
 	}),
 };
 
+export type StartedRunSeed = EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string; readonly replyTo?: string | null };
+
 export type Harness = {
 	// Holds the config's paths: repo, worktrees, claude.json, journal.db.
 	readonly dir: string;
@@ -131,9 +135,11 @@ export type Harness = {
 	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
 	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
 	// row claimed at the current TestClock time.
-	readonly startedRun: (seed: EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string }) => Effect.Effect<{ readonly epic: Epic; readonly run: StartedRun }>;
+	readonly startedRun: (seed: StartedRunSeed) => Effect.Effect<{ readonly epic: Epic; readonly run: StartedRun & { readonly session: Session } }>;
 	// Writes the run's result file where the agent writes it.
 	readonly writeResultFile: (run: Run, contents: string) => void;
+	// Writes the Claude session's transcript where Claude Code writes it.
+	readonly writeTranscript: (session: TranscriptSession, entries: ReadonlyArray<Record<string, unknown>>) => void;
 	// Paths of the worktrees git knows under the worktrees directory.
 	readonly worktrees: () => ReadonlyArray<string>;
 	readonly hasBranch: (branch: string) => boolean;
@@ -202,7 +208,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					putCommand: (command) => crashPoint.pipe(Effect.andThen(journal.putCommand(command))),
 					addRequest: (request) => crashPoint.pipe(Effect.andThen(journal.addRequest(request))),
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
-					claimFollowUp: (run, requestId) => crashPoint.pipe(Effect.andThen(journal.claimFollowUp(run, requestId))),
+					claimRun: (run, requestIds) => crashPoint.pipe(Effect.andThen(journal.claimRun(run, requestIds))),
 					setDeliveryMark: (deliveredAt) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveredAt))),
 				});
 			}),
@@ -211,7 +217,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		const stack = Layer.mergeAll(WebhookServer.layer, MissedDeliveries.layer).pipe(
 			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
 			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
-			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, Comments.layer, Prompts.layer)),
+			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer)),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
 			Layer.provide(NodeServices.layer),
@@ -246,7 +252,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		const { webhookSecret } = Context.get(fixtures, AppConfig);
 		const journal = Effect.map(services, Context.get(Journal));
 
-		const startedRun = ({ agentStatus, tail, ...seed }: EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string }) =>
+		const startedRun = ({ agentStatus, tail, replyTo = null, ...seed }: StartedRunSeed) =>
 			Effect.gen(function* () {
 				const [epic] = yield* Context.get(fixtures, Linear)
 					.epics([linear.addEpic({ state: 'Implementing', ...seed }).id])
@@ -256,7 +262,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 				const prompts = Context.get(context, Prompts);
 				const tab = herdr.addTab({ label: prompts.tabLabel(epic), workspace: epic.team.name, agentStatus, tail });
 				const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
-				const run: StartedRun = {
+				const run: StartedRun & { readonly session: Session } = {
 					epicId: epic.id,
 					identifier: epic.identifier,
 					teamId: epic.team.id,
@@ -267,6 +273,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					worktreePath: path,
 					tabId: tab.tabId,
 					paneId: tab.paneId,
+					session: yield* newSession(epic.identifier),
+					replyTo,
 					claimedAt: now,
 					startedAt: now,
 					agentStatus: null,
@@ -326,6 +334,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 				writeFileSync(join(git(run.worktreePath, 'rev-parse', '--absolute-git-dir'), 'herdr-result.json'), contents);
 			},
+			writeTranscript: (session, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries),
 			worktrees: () =>
 				git(repo, 'worktree', 'list', '--porcelain')
 					.split('\n')

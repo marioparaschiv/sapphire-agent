@@ -26,11 +26,11 @@ case "${1:-}" in
 		echo "service: $(systemctl --user is-active sapphire-agent.service)"
 		node "$cli" status
 		;;
-	start | stop | send | follow-up | reply | done)
+	start | stop | send | follow-up | session | reply | done)
 		exec node "$cli" "$@"
 		;;
 	*)
-		echo "usage: ctl.sh pause|resume|status|start|stop|send|follow-up|reply|done" >&2
+		echo "usage: ctl.sh pause|resume|status|start|stop|send|follow-up|session|reply|done" >&2
 		exit 2
 		;;
 esac

@@ -1,7 +1,7 @@
 import { basename, join, resolve, sep } from 'node:path';
 import { Context, Effect, FileSystem, Layer, Option, type PlatformError, Semaphore, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
-import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
+import { type CallError, callTimeouts, fileSystemFailure, Permanent, Transient, withCallPolicy } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { decodeResultFile, type InvalidResultFile, type ResultFile } from './result-file.ts';
 
@@ -74,8 +74,6 @@ export class Git extends Context.Service<
 						return semaphore.withPermit(operation);
 					});
 
-			const fileSystemError = (error: PlatformError.PlatformError) => new Permanent({ message: error.message, cause: error });
-
 			const run = (cwd: string, args: ReadonlyArray<string>) => {
 				const text = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>) => Stream.mkString(Stream.decodeText(stream));
 
@@ -101,7 +99,7 @@ export class Git extends Context.Service<
 					withCallPolicy(callTimeouts.git),
 				);
 
-			const exists = (path: string) => fs.exists(path).pipe(Effect.mapError(fileSystemError));
+			const exists = (path: string) => fs.exists(path).pipe(Effect.mapError(fileSystemFailure));
 
 			const branchExists = (repo: string, branch: string) => succeeds(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
 
@@ -219,7 +217,7 @@ export class Git extends Context.Service<
 						const path = yield* resultFilePath(worktree);
 						const text = yield* fs.readFileString(path).pipe(
 							Effect.map(Option.some),
-							Effect.catchTag('PlatformError', (error) => (error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(fileSystemError(error)))),
+							Effect.catchTag('PlatformError', (error) => (error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(fileSystemFailure(error)))),
 						);
 
 						if (Option.isNone(text)) {
@@ -232,7 +230,7 @@ export class Git extends Context.Service<
 				// A reused worktree may still hold the result of an earlier run.
 				removeResultFile: (worktree) =>
 					resultFilePath(worktree).pipe(
-						Effect.flatMap((path) => fs.remove(path, { force: true }).pipe(Effect.mapError(fileSystemError))),
+						Effect.flatMap((path) => fs.remove(path, { force: true }).pipe(Effect.mapError(fileSystemFailure))),
 					),
 			});
 		}),

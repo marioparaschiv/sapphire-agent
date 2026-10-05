@@ -7,9 +7,9 @@ import { AppConfig, type AppConfigShape } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub, type PullRequest } from './github.ts';
 import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
-import { Journal, type Job, type Run } from './journal.ts';
+import { Journal, type Job, newSession, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { activeRoles, hasRole, isInFlight, type Observation, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, isInFlight, isOver, type Observation, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { makeFlag } from './run-actions.ts';
@@ -60,7 +60,7 @@ export const repoOf = (config: AppConfigShape, epic: Epic) =>
 	Result.match(resolveRepo(config, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed });
 
 // A run recorded before anything is started for it. The start rule takes it from here.
-export const claimedRun = (epic: Epic, repo: string, claimedAt: number, job: Job = { _tag: 'orchestrate' }): Run => ({
+export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session: Session | null, job: Job = { _tag: 'orchestrate' }): Run => ({
 	epicId: epic.id,
 	identifier: epic.identifier,
 	teamId: epic.team.id,
@@ -71,6 +71,8 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, job: Job
 	worktreePath: null,
 	tabId: null,
 	paneId: null,
+	session,
+	replyTo: null,
 	claimedAt,
 	startedAt: null,
 	agentStatus: null,
@@ -93,26 +95,29 @@ const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identi
 		),
 	);
 
-// A finished run's row is replaced by a new claim, and so is a run that never started once its label is removed.
-const isOver = (run: Run) => run.status === 'ended' || run.status === 'kept' || (run.status === 'error' && run.startedAt === null);
-
 // Claims ready epics up to maxInFlight, in Linear's order: a top-level epic in the ready state of a resolved team,
 // without the stuck label, and with no run or only one that is over.
 export const dispatchRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
 
-	const claim = (epic: Epic) =>
+	// The newest start request names the session the run replies to; the claim drops them all.
+	const claim = (epic: Epic, starts: ReadonlyArray<{ readonly id: number; readonly replyTo: string | null }>) =>
 		Effect.gen(function* () {
 			const repo = yield* repoOf(config, epic);
+			const replyTo = starts.at(-1)?.replyTo ?? null;
 
-			yield* journal.putRun(claimedRun(epic, repo, yield* Clock.currentTimeMillis));
+			yield* journal.claimRun(
+				{ ...claimedRun(epic, repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier)), replyTo },
+				starts.map(({ id }) => id),
+			);
 			yield* Effect.log(`claimed for ${repo} on ${epic.branchName}`);
 		});
 
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
+			const requests = yield* journal.listRequests;
 			const candidates = observation.ready
 				.filter((epic) => {
 					const run = runs.find((candidate) => candidate.epicId === epic.id);
@@ -129,7 +134,10 @@ export const dispatchRule = Effect.gen(function* () {
 				}
 
 				inFlight += 1;
-				work.push({ epicId: epic.id, identifier: epic.identifier, teamId: epic.team.id, apply: claim(epic) });
+
+				const starts = requests.flatMap(({ id, request }) => (request._tag === 'start' && request.identifier === epic.identifier ? [{ id, replyTo: request.replyTo }] : []));
+
+				work.push({ epicId: epic.id, identifier: epic.identifier, teamId: epic.team.id, apply: claim(epic, starts) });
 			}
 
 			return work;
@@ -137,6 +145,9 @@ export const dispatchRule = Effect.gen(function* () {
 
 	return { name: 'dispatch', pausable: true, plan } satisfies Rule;
 });
+
+// Claude starts in the agent's recorded session, so other sessions reach it by name.
+export const sessionClaudeArgs = (session: Session | null) => (session === null ? [] : ['--session-id', session.id, '--name', session.name]);
 
 export const runsClaude = (pane: Option.Option<Pane>) => Option.exists(pane, (found) => Option.contains(found.agent, 'claude'));
 
@@ -182,7 +193,7 @@ export const startRule = Effect.gen(function* () {
 		const { job } = run;
 
 		return job._tag === 'orchestrate'
-			? Effect.succeed(epic.children.nodes.length === 0 ? prompts.inline(epic) : prompts.orchestrate(epic))
+			? Effect.succeed(epic.children.nodes.length === 0 ? prompts.inline(epic, run.replyTo) : prompts.orchestrate(epic, run.replyTo))
 			: Effect.map(pullRequestOf(run), (pullRequest) => prompts.followUp(epic, { pullRequestUrl: pullRequest.url, threadIds: job.threadIds, instruction: job.instruction }));
 	};
 
@@ -250,7 +261,7 @@ export const startRule = Effect.gen(function* () {
 			const { tabId, paneId } = run.tabId !== null && run.paneId !== null ? { tabId: run.tabId, paneId: run.paneId } : yield* openTab(path);
 			if (!runsClaude(yield* herdr.agent(paneId))) {
 				yield* Effect.log(`starting Claude in ${tabId} (${path})`);
-				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), yield* promptFor(run, epic));
+				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), yield* promptFor(run, epic), sessionClaudeArgs(run.session));
 
 				const agent = yield* herdr.agent(paneId);
 
