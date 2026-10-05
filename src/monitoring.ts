@@ -177,25 +177,26 @@ export const monitoringRule = Effect.gen(function* () {
 			if (run.status === 'running' && quietStatuses.includes(status) && now - since >= Math.min(config.awaitingInputAfterSeconds, config.staleAfterSeconds) * 1000) {
 				const message = yield* pendingMessage(run);
 
-				if (Option.isSome(message)) {
-					if (now - since >= config.staleAfterSeconds * 1000) {
-						yield* Effect.log(`no reply to the agent's message for ${config.staleAfterSeconds} s; asking on Linear`);
-
-						const question = yield* flag(observation, run, comments.messageQuestion({ identifier: run.identifier, claimedAt: run.claimedAt, agentStatusSince: since, message: message.value }));
-
-						yield* journal.putRun({ ...run, status: 'awaitingInput', questionCommentId: question });
-					}
-
+				if (now - since < (Option.isSome(message) ? config.staleAfterSeconds : config.awaitingInputAfterSeconds) * 1000) {
 					return;
 				}
 
-				if (now - since >= config.awaitingInputAfterSeconds * 1000) {
-					yield* Effect.log(`agent ${status} without a result file; flagging it as awaitingInput`);
+				yield* Effect.log(
+					Option.isSome(message)
+						? `no reply to the agent's message for ${config.staleAfterSeconds} s; asking on Linear`
+						: `agent ${status} without a result file; flagging it as awaitingInput`,
+				);
 
-					const question = yield* flag(observation, run, comments.awaitingInput(flaggedRun(observation, run, epic, tail, now)));
+				const question = yield* flag(
+					observation,
+					run,
+					Option.match(message, {
+						onNone: () => comments.awaitingInput(flaggedRun(observation, run, epic, tail, now)),
+						onSome: (text) => comments.messageQuestion({ identifier: run.identifier, claimedAt: run.claimedAt, agentStatusSince: since, message: text }),
+					}),
+				);
 
-					yield* journal.putRun({ ...run, status: 'awaitingInput', questionCommentId: question });
-				}
+				yield* journal.putRun({ ...run, status: 'awaitingInput', questionCommentId: question });
 
 				return;
 			}
