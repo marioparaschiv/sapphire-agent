@@ -205,7 +205,7 @@ sapphire-agent owns the tabs in its own workspaces (one per team, labelled with 
 
 Owned tabs that no run tracks (cleanup rule):
 
-- The epic is in Ready, Implementing or In Review and has no run: the first such tab is adopted as a claimed run, which the start rule confirms (starting Claude in it if Claude is not there).
+- The epic is in Ready, Implementing or In Review and has no run: the first such tab is adopted as a claimed run, which the start rule confirms (starting Claude in it if Claude is not there). A tab Claude already runs in is adopted with no session, as its session id is unknown.
 - Otherwise, the agent is not working: the tab is closed.
 - The agent is working: a `workingOrphan` comment once, and the tab is left running; it is closed once the agent stops.
 - A claim whose tab was opened just before a crash is left to the start rule, which adopts it.

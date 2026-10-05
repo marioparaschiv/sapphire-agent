@@ -47,7 +47,7 @@ export const Run = Schema.Struct({
 	worktreePath: Schema.NullOr(Schema.String),
 	tabId: Schema.NullOr(Schema.String),
 	paneId: Schema.NullOr(Schema.String),
-	// None for a run claimed before sessions were recorded.
+	// None for a run claimed before sessions were recorded, or adopted from a tab Claude already ran in.
 	session: Schema.NullOr(Schema.fromJsonString(Session)),
 	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks on Linear.
 	replyTo: Schema.NullOr(Schema.String),

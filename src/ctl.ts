@@ -195,7 +195,7 @@ const session = Command.make('session', { epic: epicArgument }, ({ epic: identif
 		}
 
 		if (run.value.session === null) {
-			return yield* new Refused({ message: `${identifier}'s run was claimed before sessions were recorded` });
+			return yield* new Refused({ message: `${identifier}'s run has no recorded session` });
 		}
 
 		yield* Console.log(run.value.session.name);

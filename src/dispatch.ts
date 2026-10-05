@@ -60,7 +60,7 @@ export const repoOf = (config: AppConfigShape, epic: Epic) =>
 	Result.match(resolveRepo(config, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed });
 
 // A run recorded before anything is started for it. The start rule takes it from here.
-export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session: Session, job: Job = { _tag: 'orchestrate' }): Run => ({
+export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session: Session | null, job: Job = { _tag: 'orchestrate' }): Run => ({
 	epicId: epic.id,
 	identifier: epic.identifier,
 	teamId: epic.team.id,

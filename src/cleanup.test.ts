@@ -111,15 +111,17 @@ describe('cleanup', () => {
 		}),
 	);
 
-	it.effect('resolves owned tabs that no run tracks and never touches a user tab', () =>
+	it.effect('resolves owned tabs that no run tracks, records no session for one Claude already runs in, and never touches a user tab', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const shipped = h.linear.addEpic({ identifier: 'TEST-20', title: 'Old run', state: 'Shipped' });
 			const working = h.linear.addEpic({ identifier: 'TEST-21', title: 'Still busy', state: 'Shipped' });
 			const active = h.linear.addEpic({ identifier: 'TEST-22', title: 'Lost track', state: 'Implementing' });
+			h.linear.addEpic({ identifier: 'TEST-23', title: 'Never started', state: 'Implementing' });
 			const idleTab = h.herdr.addTab({ label: 'TEST-20 Old run', agentStatus: 'idle' });
 			const workingTab = h.herdr.addTab({ label: 'TEST-21 Still busy', agentStatus: 'working' });
 			const activeTab = h.herdr.addTab({ label: 'TEST-22 Lost track', agentStatus: 'idle' });
+			const emptyTab = h.herdr.addTab({ label: 'TEST-23 Never started', agent: null });
 			const userTab = h.herdr.addTab({ label: 'notes', agentStatus: 'idle' });
 			const otherWorkspace = h.herdr.addTab({ label: 'TEST-20 Old run', workspace: 'personal', agentStatus: 'idle' });
 
@@ -134,13 +136,20 @@ describe('cleanup', () => {
 			assert.deepStrictEqual(h.epicMarkers(working.id), [`workingOrphan:${workingTab.tabId}`]);
 			assert.deepStrictEqual(h.linear.comments(shipped.id), []);
 
-			const runs = yield* h.runs;
+			const runs = new Map((yield* h.runs).map((run) => [run.identifier, run]));
+			const lostTrack = runs.get('TEST-22');
+			const neverStarted = runs.get('TEST-23');
 
+			assert.deepStrictEqual([...runs.keys()].toSorted(), ['TEST-22', 'TEST-23']);
+			assert.isDefined(lostTrack);
+			assert.isDefined(neverStarted);
+			assert.deepStrictEqual([lostTrack.status, lostTrack.tabId, lostTrack.session], ['running', activeTab.tabId, null]);
+			assert.deepStrictEqual([neverStarted.status, neverStarted.tabId], ['running', emptyTab.tabId]);
+			assert.isNotNull(neverStarted.session);
 			assert.deepStrictEqual(
-				runs.map((run) => [run.identifier, run.status, run.tabId]),
-				[['TEST-22', 'running', activeTab.tabId]],
+				h.herdr.starts().map((start) => [start.paneId, start.args]),
+				[[emptyTab.paneId, ['--session-id', neverStarted.session.id, '--name', 'test-23']]],
 			);
-			assert.deepStrictEqual(h.herdr.starts(), []);
 			assert.strictEqual(h.linear.stateName(active.id), 'Implementing');
 		}),
 	);

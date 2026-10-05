@@ -24,7 +24,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 | `repo`, `branch` | The local clone and the epic's branch, so cleanup finds the worktree and PR even once the epic is gone from the ready list. |
 | `worktree_path` | Set once the worktree exists. |
 | `tab_id`, `pane_id` | Set once the tab exists. Both must match herdr for the tab to count as the run's. |
-| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded. |
+| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded, or adopted from an untracked tab Claude already ran in, whose session is unknown. |
 | `reply_to` | The Claude session that asked for the run (`ctl.sh start --reply-to`), taken from the newest `start` request at the claim. The prompt names it and the agent asks it its questions. Null: the agent asks on Linear. |
 | `claimed_at` | Claim time. Keys most markers, starts the wall-clock cap and the start timeout. |
 | `started_at` | When Claude was confirmed started. Decides the run's states and whether it ever started. |

@@ -104,7 +104,10 @@ export const cleanupRule = Effect.gen(function* () {
 			if (Option.isNone(run) && hasRole(observation, epic, ['ready', 'implementing', 'inReview'])) {
 				const [first, ...others] = tabs;
 				const repo = yield* repoOf(config, epic);
-				const adopted = adoptTab(claimedRun(epic, repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier)), first);
+				// Claude already in the tab runs in a session sapphire-agent never recorded. Without Claude, the start rule starts
+				// it in the new one.
+				const session = Option.contains(first.agent, 'claude') ? null : yield* newSession(epic.identifier);
+				const adopted = adoptTab(claimedRun(epic, repo, yield* Clock.currentTimeMillis, session), first);
 
 				yield* journal.putRun({ ...adopted, worktreePath: git.worktreePath(repo, epic.branchName) });
 				yield* Effect.log(`adopted untracked tab ${first.tabId}`);
