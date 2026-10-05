@@ -41,7 +41,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `bot.app.id` | required | int, above 0. The GitHub App's ID, from its settings page. The App posts every comment of the bot: command replies and failure notices. |
 | `bot.app.privateKeyFile` | required | `~` expanded. The App's private key (`.pem`, as GitHub downloads it), see below. |
 | `bot.app.webhookSecretFile` | required | `~` expanded. The App's webhook secret, see below. |
-| `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://herdr.marioparaschiv.com/github` to it (`operations.md`). 0 picks a free port (tests). |
+| `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://webhook.marioparaschiv.com/github` to it (`operations.md`). 0 picks a free port (tests). |
 | `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.

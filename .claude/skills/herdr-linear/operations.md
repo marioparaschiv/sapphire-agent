@@ -30,7 +30,7 @@ Editing a file in `systemd/` does nothing until you rerun the install (or copy i
 
 Mentions of the bot reach the service as the GitHub App's webhook deliveries, and every comment the service writes (summaries, flags reviews, thread replies and resolves, command replies, `ctl.sh reply`, failure notices) is posted by the App and shows as `<slug>[bot]`. It is created and installed by hand:
 
-1. Create it under GitHub Settings, Developer settings, GitHub Apps. Permissions: Issues read and write, Pull requests read and write, Contents read, Metadata read. Events: Issue comment, Pull request review, Pull request review comment. Webhook URL `https://herdr.marioparaschiv.com/github`, with a webhook secret.
+1. Create it under GitHub Settings, Developer settings, GitHub Apps. Permissions: Issues read and write, Pull requests read and write, Contents read, Metadata read. Events: Issue comment, Pull request review, Pull request review comment. Webhook URL `https://webhook.marioparaschiv.com/github`, with a webhook secret.
 2. Save the webhook secret as `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` and generate a private key in its settings and save it as `$HERDR_PLUGIN_CONFIG_DIR/app.pem`, both with `chmod 600`. Put the App ID and both paths in `bot.app` (`config.md`).
 3. Install it (its public page, Install) on every repo the bot should answer on. Only installed repos send deliveries, and a reply on a repo without the installation fails with `GitHub answered HTTP 404 to GET /repos/<owner>/<name>/installation: Not Found`.
 
@@ -38,7 +38,7 @@ For each comment the service signs a JWT with the key (RS256, `iat` 60 s back, `
 
 ## Webhook
 
-nginx terminates TLS for `https://herdr.marioparaschiv.com` with the `*.marioparaschiv.com` Cloudflare origin certificate and forwards only `/github` to `127.0.0.1:3790` (the site config was drafted at `/tmp/herdr-github.conf`; installing it, the DNS record and reloading nginx need sudo). Every other path gets 404.
+nginx terminates TLS for `https://webhook.marioparaschiv.com` with the `*.marioparaschiv.com` Cloudflare origin certificate and forwards only `/github` to `127.0.0.1:3790` (the site config was drafted at `/tmp/herdr-github.conf`; installing it, the DNS record and reloading nginx need sudo). Every other path gets 404.
 
 The service answers each delivery:
 

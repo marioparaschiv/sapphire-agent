@@ -14,7 +14,8 @@ const ErrorJson = Schema.Struct({ message: Schema.String });
 
 // One attempt to deliver a webhook event. A redelivery is a new attempt with the event's `guid`.
 export const Delivery = Schema.Struct({
-	id: Schema.Int,
+	// Its exact decimal digits, as read by `keepIdDigits`.
+	id: Schema.String.check(Schema.isPattern(/^\d+$/)),
 	guid: Schema.String,
 	// In ms.
 	deliveredAt: Schema.String.pipe(
@@ -26,6 +27,10 @@ export const Delivery = Schema.Struct({
 );
 
 export type Delivery = typeof Delivery.Type;
+
+// Delivery ids are above Number.MAX_SAFE_INTEGER, and GitHub answers 404 for an id JSON.parse rounded, so an `id` is
+// kept as the digits GitHub sent.
+const keepIdDigits = (key: string, value: unknown, context?: { readonly source?: string }) => (key === 'id' && typeof value === 'number' ? context?.source : value);
 
 export type DeliveryPage = { readonly deliveries: ReadonlyArray<Delivery>; readonly next: Option.Option<string> };
 
@@ -61,7 +66,7 @@ export class GitHubApp extends Context.Service<
 		// A page of the App's webhook deliveries, newest first: the first page, or the one at `cursor`.
 		readonly deliveries: (cursor: Option.Option<string>) => Effect.Effect<DeliveryPage, CallError>;
 		// Asks GitHub to send the delivery again, as a new attempt with the same `guid`.
-		readonly redeliver: (id: number) => Effect.Effect<void, CallError>;
+		readonly redeliver: (id: string) => Effect.Effect<void, CallError>;
 	}
 >()('herdr-linear/GitHubApp') {
 	// Reads the App's slug from GitHub, so it fails to build when the App id, key or GitHub is wrong.
@@ -129,7 +134,7 @@ export class GitHubApp extends Context.Service<
 
 					deliveries: (cursor) =>
 						call(HttpClientRequest.get('/app/hook/deliveries', { urlParams: { per_page: deliveriesPerPage, ...Option.match(cursor, { onNone: () => ({}), onSome: (at) => ({ cursor: at }) }) } }), (response) =>
-							HttpClientResponse.schemaBodyJson(Schema.Array(Delivery))(response).pipe(Effect.map((deliveries) => ({ deliveries, next: nextCursor(response.headers.link) }))),
+							HttpClientResponse.schemaBodyJson(Schema.Array(Delivery), { reviver: keepIdDigits })(response).pipe(Effect.map((deliveries) => ({ deliveries, next: nextCursor(response.headers.link) }))),
 						),
 
 					redeliver: (id) => call(HttpClientRequest.post(`/app/hook/deliveries/${id}/attempts`), () => Effect.void),
