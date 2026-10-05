@@ -495,7 +495,7 @@ const make = Effect.gen(function* () {
 	return { fixture, client };
 }).pipe(Effect.provide(FetchHttpClient.layer));
 
-export class LinearFixture extends Context.Service<LinearFixture, LinearFixtureShape>()('herdr-linear/LinearFixture') {
+export class LinearFixture extends Context.Service<LinearFixture, LinearFixtureShape>()('sapphire-agent/LinearFixture') {
 	// A fresh fixture server for the layer's lifetime, and a Linear service talking to it over a real HttpClient.
 	static readonly layer = Layer.unwrap(
 		Effect.map(make, ({ fixture, client }) =>

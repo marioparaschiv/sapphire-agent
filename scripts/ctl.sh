@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# The service's environment (systemd/herdr-linear.service), unless the caller has its own, as a command's tab does.
-export HERDR_PLUGIN_STATE_DIR="${HERDR_PLUGIN_STATE_DIR:-$HOME/.local/state/herdr/plugins/herdr-linear}"
-export HERDR_PLUGIN_CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr/plugins/config/herdr-linear}"
+# The service's environment (systemd/sapphire-agent.service), unless the caller has its own, as a command's tab does.
+export HERDR_PLUGIN_STATE_DIR="${HERDR_PLUGIN_STATE_DIR:-$HOME/.local/state/herdr/plugins/sapphire-agent}"
+export HERDR_PLUGIN_CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr/plugins/config/sapphire-agent}"
 export HERDR_BIN_PATH="${HERDR_BIN_PATH:-$HOME/.local/bin/herdr}"
 export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -23,7 +23,7 @@ case "${1:-}" in
 		;;
 	status)
 		if [ -e "$state_dir/paused" ]; then echo "dispatching: paused"; else echo "dispatching: active"; fi
-		echo "service: $(systemctl --user is-active herdr-linear.service)"
+		echo "service: $(systemctl --user is-active sapphire-agent.service)"
 		node "$cli" status
 		;;
 	start | stop | send | follow-up | reply | done)

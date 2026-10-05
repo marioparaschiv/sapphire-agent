@@ -162,7 +162,7 @@ const makeRepos = (dir: string) => {
 export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
 	Effect.gen(function* () {
 		const dir = yield* Effect.acquireRelease(
-			Effect.sync(() => mkdtempSync(join(tmpdir(), 'herdr-linear-harness-'))),
+			Effect.sync(() => mkdtempSync(join(tmpdir(), 'sapphire-agent-harness-'))),
 			(created) => Effect.sync(() => rmSync(created, { recursive: true, force: true })),
 		);
 		const { origin, repo } = makeRepos(dir);

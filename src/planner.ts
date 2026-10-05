@@ -101,7 +101,7 @@ export class Planner extends Context.Service<
 		// at once and each sees in the journal what the rules before it did.
 		readonly tick: (options: { readonly paused: boolean }) => Effect.Effect<void>;
 	}
->()('herdr-linear/Planner') {
+>()('sapphire-agent/Planner') {
 	// Build with every rule module, in order: `Planner.layer(Effect.all([cleanupRule, resultsRule, ...]))`.
 	static readonly layer = <E, R>(makeRules: Effect.Effect<ReadonlyArray<Rule>, E, R>) =>
 		Layer.effect(

@@ -5,7 +5,7 @@ How to change the code: commands, runtime, Effect conventions, the test harness,
 ## Commands
 
 ```sh
-cd ~/herdr-linear
+cd ~/sapphire-agent
 npm test        # vitest run, every src/**/*.test.ts
 npx tsc         # typecheck (also: npm run typecheck)
 npm start       # node src/main.ts, the service itself; never against the live herdr session or real Linear

@@ -239,7 +239,7 @@ const makeFake = (appLogin: string) => {
 
 // In-memory GitHub with the live layer's marker and cap rules. Its layer provides both GitHub and these controls, with
 // fresh state each time it is built.
-export class FakeGitHub extends Context.Service<FakeGitHub, FakeGitHubControls>()('herdr-linear/FakeGitHub') {
+export class FakeGitHub extends Context.Service<FakeGitHub, FakeGitHubControls>()('sapphire-agent/FakeGitHub') {
 	static readonly layer = Layer.effectContext(
 		Effect.gen(function* () {
 			const app = yield* GitHubApp;

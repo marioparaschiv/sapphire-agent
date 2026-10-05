@@ -7,7 +7,7 @@ import { Linear } from './linear.ts';
 import { LinearFixture, testTeam } from './linear-fixture.ts';
 import { renderMarker, withMarker } from './markers.ts';
 
-const withFixture = Effect.provide(LinearFixture.layer.pipe(Layer.provide(AppConfig.layerTest('/tmp/herdr-linear-test'))));
+const withFixture = Effect.provide(LinearFixture.layer.pipe(Layer.provide(AppConfig.layerTest('/tmp/sapphire-agent-test'))));
 
 const stateId = (name: string) => testTeam.states.nodes.find((state) => state.name === name)?.id ?? '';
 

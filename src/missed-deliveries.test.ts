@@ -10,7 +10,7 @@ import { deliveries, makeHarness } from './test-harness.ts';
 
 const layer = MissedDeliveries.layer.pipe(
 	Layer.provideMerge(Layer.mergeAll(Journal.layer(':memory:'), GitHubAppFixture.layer)),
-	Layer.provideMerge(AppConfig.layerTest('/tmp/herdr-linear-test')),
+	Layer.provideMerge(AppConfig.layerTest('/tmp/sapphire-agent-test')),
 );
 
 const ping: WebhookDelivery = { event: 'ping', payload: { zen: 'Design for failure.', hook_id: 1 } };

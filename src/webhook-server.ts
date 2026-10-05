@@ -77,7 +77,7 @@ export class WebhookServer extends Context.Service<
 		// Where it listens, e.g. `http://127.0.0.1:3790`.
 		readonly url: string;
 	}
->()('herdr-linear/WebhookServer') {
+>()('sapphire-agent/WebhookServer') {
 	static readonly layer = Layer.effect(
 		WebhookServer,
 		Effect.gen(function* () {

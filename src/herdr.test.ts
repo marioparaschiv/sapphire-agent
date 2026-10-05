@@ -22,7 +22,7 @@ const fails = (name: string): Reply => ({ stderr: fixture(name), exitCode: 1 });
 
 const noWorkspaces: Reply = { stdout: '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[]}}\n' };
 
-const configDirectory = '/tmp/herdr-linear-test';
+const configDirectory = '/tmp/sapphire-agent-test';
 
 // Stands in for the herdr executable: answers each command line from `replies` and records the calls. A command
 // without a reply fails the way an unexpected herdr failure does.
@@ -154,7 +154,7 @@ describe('Herdr', () => {
 
 	it.effect('sees no tabs while its workspace does not exist', () =>
 		Effect.gen(function* () {
-			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'herdr-linear' });
+			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'sapphire-agent' });
 
 			assert.deepStrictEqual(yield* herdr.workspaceTabs, []);
 			assert.deepStrictEqual(
@@ -325,7 +325,7 @@ describe('Herdr events', () => {
 			);
 			const received = yield* Queue.unbounded<HerdrEvent>();
 			const subscription = {
-				id: 'herdr-linear',
+				id: 'sapphire-agent',
 				method: 'events.subscribe',
 				params: {
 					subscriptions: [

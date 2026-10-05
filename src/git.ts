@@ -52,7 +52,7 @@ export class Git extends Context.Service<
 		readonly readResultFile: (worktree: Worktree) => Effect.Effect<Option.Option<ResultFile>, CallError | InvalidResultFile>;
 		readonly removeResultFile: (worktree: Worktree) => Effect.Effect<void, CallError>;
 	}
->()('herdr-linear/Git') {
+>()('sapphire-agent/Git') {
 	static readonly layer = Layer.effect(
 		Git,
 		Effect.gen(function* () {
@@ -191,7 +191,7 @@ export class Git extends Context.Service<
 						}
 					}).pipe(locked(repo)),
 
-				// Worktrees on a detached HEAD are skipped: herdr-linear always checks out a branch.
+				// Worktrees on a detached HEAD are skipped: sapphire-agent always checks out a branch.
 				listWorktrees: (repo) =>
 					git(repo, ['worktree', 'list', '--porcelain']).pipe(
 						Effect.map((porcelain) =>

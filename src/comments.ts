@@ -62,7 +62,7 @@ const make = (config: AppConfigShape) => {
 
 	const runFlag = (run: FlaggedRun, status: 'awaitingInput' | 'stale' | 'error', next: string) =>
 		[
-			`**herdr-linear** (\`${status}\`): the agent ${describeStop(run.agentStatus, minutesBetween(run.agentStatusSince, run.now))} before writing its result file.`,
+			`**sapphire-agent** (\`${status}\`): the agent ${describeStop(run.agentStatus, minutesBetween(run.agentStatusSince, run.now))} before writing its result file.`,
 			'',
 			`- Tab: \`${run.tabLabel}\` (${run.tabId}), pane ${run.paneId}`,
 			`- Worktree: \`${run.worktreePath}\` on branch \`${run.branch}\``,
@@ -97,7 +97,7 @@ const make = (config: AppConfigShape) => {
 		overCap: (run: { readonly identifier: string; readonly claimedAt: number; readonly status: RunStatus; readonly tail: string; readonly now: number }) =>
 			withMarker(
 				[
-					`**herdr-linear** (\`${run.status}\`): the run has been going for ${minutesBetween(run.claimedAt, run.now)} min, over the ${config.maxRunSeconds / 60} min cap. It keeps running.`,
+					`**sapphire-agent** (\`${run.status}\`): the run has been going for ${minutesBetween(run.claimedAt, run.now)} min, over the ${config.maxRunSeconds / 60} min cap. It keeps running.`,
 					'',
 					'Last lines of the pane:',
 					'',
@@ -111,7 +111,7 @@ const make = (config: AppConfigShape) => {
 		startFailed: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string; readonly tail: Option.Option<string> }) =>
 			withMarker(
 				[
-					`**herdr-linear** (\`error\`): couldn't start an agent for this epic: ${run.error}`,
+					`**sapphire-agent** (\`error\`): couldn't start an agent for this epic: ${run.error}`,
 					...Option.match(run.tail, { onNone: () => [], onSome: (tail) => ['', 'Last lines of the pane:', '', codeBlock(tail)] }),
 					'',
 					retryAfterFix,
@@ -120,14 +120,14 @@ const make = (config: AppConfigShape) => {
 			),
 
 		invalidResult: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string }) =>
-			withMarker([`**herdr-linear** (\`error\`): the agent's result file is invalid:`, '', codeBlock(run.error), '', startOver].join('\n'), {
+			withMarker([`**sapphire-agent** (\`error\`): the agent's result file is invalid:`, '', codeBlock(run.error), '', startOver].join('\n'), {
 				identifier: run.identifier,
 				purpose: 'invalidResult',
 				key: `${run.claimedAt}`,
 			}),
 
 		noPullRequest: (run: { readonly identifier: string; readonly claimedAt: number; readonly branch: string }) =>
-			withMarker(`**herdr-linear** (\`error\`): the agent wrote its result file, but branch \`${run.branch}\` has no open or merged PR. ${startOver}`, {
+			withMarker(`**sapphire-agent** (\`error\`): the agent wrote its result file, but branch \`${run.branch}\` has no open or merged PR. ${startOver}`, {
 				identifier: run.identifier,
 				purpose: 'noPullRequest',
 				key: `${run.claimedAt}`,
@@ -136,7 +136,7 @@ const make = (config: AppConfigShape) => {
 		// `mismatch` comes from replyMismatch.
 		threadMismatch: (run: { readonly identifier: string; readonly claimedAt: number; readonly job: Job; readonly mismatch: string }) =>
 			withMarker(
-				`**herdr-linear** (\`error\`): the agent's result file does not match the review threads it was given: ${run.mismatch}. Nothing was posted to the PR. ${
+				`**sapphire-agent** (\`error\`): the agent's result file does not match the review threads it was given: ${run.mismatch}. Nothing was posted to the PR. ${
 					run.job._tag === 'follow-up'
 						? `Remove the label, move the epic to ${config.states.toReview} and mention @${config.bot.login} to ask for the follow-up again.`
 						: startOver
@@ -146,7 +146,7 @@ const make = (config: AppConfigShape) => {
 
 		// Posted under the question comment the reply belongs to.
 		replyFailed: (reply: { readonly identifier: string; readonly replyCommentId: string; readonly error: string }) =>
-			withMarker(`**herdr-linear:** couldn't type your last reply into the agent's pane: ${reply.error}. Answer the agent in its tab.`, {
+			withMarker(`**sapphire-agent:** couldn't type your last reply into the agent's pane: ${reply.error}. Answer the agent in its tab.`, {
 				identifier: reply.identifier,
 				purpose: 'replyFailed',
 				key: reply.replyCommentId,
@@ -155,7 +155,7 @@ const make = (config: AppConfigShape) => {
 		// `claimedAt` is none for an orphan worktree that no run tracks.
 		keptWorktree: (kept: { readonly identifier: string; readonly claimedAt: Option.Option<number>; readonly worktreePath: string; readonly reason: string }) =>
 			withMarker(
-				`**herdr-linear:** kept the worktree \`${kept.worktreePath}\` because it has ${kept.reason}. Push or discard that work and it is removed on a later poll.`,
+				`**sapphire-agent:** kept the worktree \`${kept.worktreePath}\` because it has ${kept.reason}. Push or discard that work and it is removed on a later poll.`,
 				{
 					identifier: kept.identifier,
 					purpose: 'keptWorktree',
@@ -166,12 +166,12 @@ const make = (config: AppConfigShape) => {
 		// `streakStartedAt` is what Journal.recordTransient returns.
 		transientFailure: (failure: { readonly identifier: string; readonly streakStartedAt: number; readonly error: string; readonly now: number }) =>
 			withMarker(
-				`**herdr-linear** (\`error\`): calls for this epic have been failing for ${minutesBetween(failure.streakStartedAt, failure.now)} min: ${failure.error}. It keeps retrying on every poll; this comment is not repeated.`,
+				`**sapphire-agent** (\`error\`): calls for this epic have been failing for ${minutesBetween(failure.streakStartedAt, failure.now)} min: ${failure.error}. It keeps retrying on every poll; this comment is not repeated.`,
 				{ identifier: failure.identifier, purpose: 'transientFailure', key: `${failure.streakStartedAt}` },
 			),
 
 		permanentFailure: (failure: { readonly identifier: string; readonly claimedAt: number; readonly error: string }) =>
-			withMarker(`**herdr-linear** (\`error\`): a call for this epic failed and retrying cannot help: ${failure.error}\n\n${retryAfterFix}`, {
+			withMarker(`**sapphire-agent** (\`error\`): a call for this epic failed and retrying cannot help: ${failure.error}\n\n${retryAfterFix}`, {
 				identifier: failure.identifier,
 				purpose: 'permanentFailure',
 				key: `${failure.claimedAt}`,
@@ -179,7 +179,7 @@ const make = (config: AppConfigShape) => {
 
 		workingOrphan: (tab: { readonly identifier: string; readonly tabLabel: string; readonly tabId: string; readonly paneId: string }) =>
 			withMarker(
-				`**herdr-linear:** the agent in tab \`${tab.tabLabel}\` (${tab.tabId}), pane ${tab.paneId}, is working, but no run of this epic tracks it. It is left running, and its tab is closed once the agent stops working.`,
+				`**sapphire-agent:** the agent in tab \`${tab.tabLabel}\` (${tab.tabId}), pane ${tab.paneId}, is working, but no run of this epic tracks it. It is left running, and its tab is closed once the agent stops working.`,
 				{ identifier: tab.identifier, purpose: 'workingOrphan', key: tab.tabId },
 			),
 
@@ -202,7 +202,7 @@ const make = (config: AppConfigShape) => {
 		commandFailed: (command: { readonly identifier: string; readonly claimedAt: number; readonly reason: string; readonly tail: Option.Option<string> }) =>
 			withMarker(
 				[
-					`**herdr-linear** (\`error\`): ${command.identifier} ${command.reason}, so I stopped it.`,
+					`**sapphire-agent** (\`error\`): ${command.identifier} ${command.reason}, so I stopped it.`,
 					...Option.match(command.tail, { onNone: () => [], onSome: (tail) => ['', 'Last lines of the pane:', '', codeBlock(tail)] }),
 					'',
 					`Mention @${config.bot.login} again to retry.`,
@@ -212,7 +212,7 @@ const make = (config: AppConfigShape) => {
 	} satisfies Record<string, (...args: never) => MarkedComment>;
 };
 
-// Every Linear and PR comment herdr-linear writes, each ending with its marker (see markers.ts for the keys).
-export class Comments extends Context.Service<Comments, ReturnType<typeof make>>()('herdr-linear/Comments') {
+// Every Linear and PR comment sapphire-agent writes, each ending with its marker (see markers.ts for the keys).
+export class Comments extends Context.Service<Comments, ReturnType<typeof make>>()('sapphire-agent/Comments') {
 	static readonly layer = Layer.effect(Comments, AppConfig.useSync(make));
 }

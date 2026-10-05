@@ -3,7 +3,7 @@ import { Context, Duration, Effect, Layer, Option, Result, Schedule, Schema, Str
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { Socket } from 'effect/socket';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy, withWritePolicy } from './call-policy.ts';
-import { AppConfig } from './config.ts';
+import { AppConfig, type AppConfigShape } from './config.ts';
 import { AgentStatus } from './journal.ts';
 
 export const HerdrAgentStatus = AgentStatus.pick(['working', 'idle', 'done', 'blocked', 'unknown']);
@@ -190,7 +190,7 @@ export class Herdr extends Context.Service<
 		// durable, so they only make a tick come sooner; the poll stays authoritative.
 		readonly events: Stream.Stream<HerdrEvent>;
 	}
->()('herdr-linear/Herdr') {
+>()('sapphire-agent/Herdr') {
 	static readonly layer = Layer.effect(
 		Herdr,
 		Effect.gen(function* () {
@@ -365,7 +365,7 @@ const classify = ({ command, code, message }: { readonly command: string; readon
 // Lifecycle events can be subscribed to session-wide; status changes only per existing pane, one subscription
 // request per connection.
 const subscribeRequest = (paneIds: ReadonlySet<string>) => ({
-	id: 'herdr-linear',
+	id: 'sapphire-agent',
 	method: 'events.subscribe',
 	params: {
 		subscriptions: [

@@ -1,13 +1,13 @@
 ---
-name: herdr-linear
-description: Use when working on, debugging, or operating the herdr-linear plugin, the Linear epic reconciler that starts Claude Code runs in herdr tabs and keeps Linear states in sync. Covers the reconciler and its rules, the journal and markers, the failure policy, herdr/git/Linear/GitHub integration, config, systemd operation, cutover and development workflow.
+name: sapphire-agent
+description: Use when working on, debugging, or operating the sapphire-agent plugin, the Linear epic reconciler that starts Claude Code runs in herdr tabs and keeps Linear states in sync. Covers the reconciler and its rules, the journal and markers, the failure policy, herdr/git/Linear/GitHub integration, config, systemd operation, cutover and development workflow.
 ---
 
-# herdr-linear
+# sapphire-agent
 
 A herdr plugin plus systemd user service that watches Linear for epics in "Ready For Agent", starts a Claude Code `/orchestrate` run for each in its own git worktree and herdr tab, and moves the epic through Linear as the run progresses. A GitHub comment that mentions the bot (`@orchestratorbot`), by a user in `bot.allowedUsers`, reaches the service as a GitHub App webhook delivery and starts a command agent: Claude locked down to `scripts/ctl.sh` and read-only `gh` and `git`, which reads the request in plain language and acts on it (status, pause, start or stop an epic, message a run's agent, ask for a `/follow-up` run that changes the PR, reply as the GitHub App). It is written on Effect 4 as one level-triggered reconciler: every tick it observes Linear, herdr, git and GitHub, compares that with a small local journal, and acts.
 
-Repo: `~/herdr-linear`. Read only the files you need.
+Repo: `~/sapphire-agent`. Read only the files you need.
 
 | File | Covers | Read when |
 | --- | --- | --- |

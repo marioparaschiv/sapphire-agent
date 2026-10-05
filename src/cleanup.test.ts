@@ -7,7 +7,7 @@ import { git, type Harness, makeHarness } from './test-harness.ts';
 
 const open = (h: Harness, tabId: string) => Option.isSome(h.herdr.tab(tabId));
 
-// A worktree as herdr-linear (or herdr) lays it out, on a new branch from origin/main, with no run tracking it.
+// A worktree as sapphire-agent (or herdr) lays it out, on a new branch from origin/main, with no run tracking it.
 const untrackedWorktree = (h: Harness, branch: string) => {
 	const path = join(h.dir, 'worktrees', 'repo', branch.replace(/[^A-Za-z0-9._-]+/g, '-'));
 

@@ -49,7 +49,7 @@ describe('commands', () => {
 			assert.deepStrictEqual(yield* statuses(h), ['running', 'queued']);
 			assert.deepStrictEqual([tab.cwd, tab.env.HERDR_PLUGIN_STATE_DIR, tab.env.HERDR_PLUGIN_CONFIG_DIR, tab.env.CLAUDE_CONFIG_PATH], [h.repo, h.dir, h.dir, join(h.dir, 'claude.json')]);
 			assert.deepStrictEqual([start.paneId, start.name, start.args], [tab.paneId, 'cmd-1', commandClaudeArgs(ctlPath)]);
-			assert.include(start.prompt, `You are CMD-1, the herdr-linear command agent. @marioparaschiv mentioned the bot in ${comment.url} (test/repo#1) and wrote: "@orchestratorbot stop TEST-12 and start TEST-14".`);
+			assert.include(start.prompt, `You are CMD-1, the sapphire-agent command agent. @marioparaschiv mentioned the bot in ${comment.url} (test/repo#1) and wrote: "@orchestratorbot stop TEST-12 and start TEST-14".`);
 			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[h.repo].hasTrustDialogAccepted);
 			assert.deepStrictEqual(commandClaudeArgs('/srv/ctl.sh').slice(0, 5), ['--restricted', '--strict-mcp-config', '--tools', 'Bash,Read,Grep,Glob', '--settings']);
 			assert.deepStrictEqual(JSON.parse(commandClaudeArgs('/srv/ctl.sh')[5]), {
@@ -70,7 +70,7 @@ describe('commands', () => {
 			assert.deepStrictEqual(yield* h.ctl('done', 'cmd-1'), ['CMD-1 ends once its agent stops']);
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.github.botComments(h.githubRepo, number), ['Stopped TEST-12; TEST-14 is next in line.\n\n<!-- herdr-linear:CMD-1:commandReply:1 -->']);
+			assert.deepStrictEqual(h.github.botComments(h.githubRepo, number), ['Stopped TEST-12; TEST-14 is next in line.\n\n<!-- sapphire-agent:CMD-1:commandReply:1 -->']);
 			assert.deepStrictEqual(yield* statuses(h), ['running', 'queued']);
 
 			h.herdr.setAgentStatus(tab.paneId, 'done');
@@ -186,7 +186,7 @@ describe('commands', () => {
 
 				assert.deepStrictEqual(yield* statuses(h), ['error'], name);
 				assert.deepStrictEqual(others, [], name);
-				assert.isTrue(failed.startsWith(`**herdr-linear** (\`error\`): ${notice}`), `${name}: ${failed}`);
+				assert.isTrue(failed.startsWith(`**sapphire-agent** (\`error\`): ${notice}`), `${name}: ${failed}`);
 				assert.deepStrictEqual(markerKeys([failed]), [`commandFailed:${(yield* h.commands)[0].claimedAt}`], name);
 				assert.isTrue(Option.isNone(h.herdr.tab(tab.tabId)), name);
 			}
@@ -204,7 +204,7 @@ describe('commands', () => {
 			const [command] = yield* h.commands;
 
 			assert.deepStrictEqual([command.status, command.cwd], ['error', h.dir]);
-			assert.isTrue(failed.startsWith('**herdr-linear** (`error`): CMD-1 could not start: Claude did not start in '), failed);
+			assert.isTrue(failed.startsWith('**sapphire-agent** (`error`): CMD-1 could not start: Claude did not start in '), failed);
 			assert.include(failed, ': no agent is running, so I stopped it.');
 			assert.deepStrictEqual(h.herdr.tabs(), []);
 		}),
@@ -225,7 +225,7 @@ describe('commands', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual(yield* statuses(h), ['error']);
-			assert.isTrue(h.github.botComments(h.githubRepo, number)[0].startsWith('**herdr-linear** (`error`): CMD-1 was not confirmed running within 300 s'));
+			assert.isTrue(h.github.botComments(h.githubRepo, number)[0].startsWith('**sapphire-agent** (`error`): CMD-1 was not confirmed running within 300 s'));
 		}),
 	);
 });

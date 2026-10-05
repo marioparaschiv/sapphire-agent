@@ -6,8 +6,8 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 
 | What | Path |
 | --- | --- |
-| Config | `$HERDR_PLUGIN_CONFIG_DIR/config.json` = `~/.config/herdr/plugins/config/herdr-linear/config.json` |
-| Linear API key | `~/.config/herdr-linear/linear-key` (override `HERDR_LINEAR_KEY_FILE`) |
+| Config | `$HERDR_PLUGIN_CONFIG_DIR/config.json` = `~/.config/herdr/plugins/config/sapphire-agent/config.json` |
+| Linear API key | `~/.config/sapphire-agent/linear-key` (override `SAPPHIRE_AGENT_LINEAR_KEY_FILE`) |
 | GitHub App private key | `bot.app.privateKeyFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/app.pem` |
 | GitHub App webhook secret | `bot.app.webhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` |
 | Claude config (trust) | `~/.claude.json` (override `CLAUDE_CONFIG_PATH`) |
@@ -61,15 +61,15 @@ Keyed by exact Linear team name:
 - `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
 - Paths accept `~`. Repo label rules: `linear-api.md`.
 
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/herdr-linear`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs this `bot` entry before this version starts:
+Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/sapphire-agent`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs this `bot` entry before this version starts:
 
 ```json
 "bot": {
 	"login": "orchestratorbot",
 	"app": {
 		"id": 123456,
-		"privateKeyFile": "~/.config/herdr/plugins/config/herdr-linear/app.pem",
-		"webhookSecretFile": "~/.config/herdr/plugins/config/herdr-linear/webhook-secret"
+		"privateKeyFile": "~/.config/herdr/plugins/config/sapphire-agent/app.pem",
+		"webhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/webhook-secret"
 	},
 	"allowedUsers": ["marioparaschiv"]
 }
@@ -96,15 +96,15 @@ with the App's real ID (`operations.md` covers creating and installing the App).
 
 ## Env vars
 
-Read with Effect `Config`; set by `systemd/herdr-linear.service`. `scripts/ctl.sh` defaults the four required ones to the same values, and a command's tab gets the service's own values (`rules.md`).
+Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl.sh` defaults the four required ones to the same values, and a command's tab gets the service's own values (`rules.md`).
 
 | Var | Required | Value in the unit |
 | --- | --- | --- |
 | `HERDR_BIN_PATH` | yes | `%h/.local/bin/herdr` |
 | `HERDR_SOCKET_PATH` | yes | `%h/.config/herdr/herdr.sock` (default session) |
-| `HERDR_PLUGIN_CONFIG_DIR` | yes | `%h/.config/herdr/plugins/config/herdr-linear` |
-| `HERDR_PLUGIN_STATE_DIR` | yes | `%h/.local/state/herdr/plugins/herdr-linear` |
-| `HERDR_LINEAR_KEY_FILE` | no | default `~/.config/herdr-linear/linear-key` |
+| `HERDR_PLUGIN_CONFIG_DIR` | yes | `%h/.config/herdr/plugins/config/sapphire-agent` |
+| `HERDR_PLUGIN_STATE_DIR` | yes | `%h/.local/state/herdr/plugins/sapphire-agent` |
+| `SAPPHIRE_AGENT_LINEAR_KEY_FILE` | no | default `~/.config/sapphire-agent/linear-key` |
 | `CLAUDE_CONFIG_PATH` | no | default `~/.claude.json` |
 
 ## Startup errors
@@ -114,10 +114,10 @@ Env, the config file, the API key and the App's private key and webhook secret a
 ```
 StartupError: cannot start, fix these and restart:
 - HERDR_BIN_PATH: Expected string
-- /home/dev/.config/herdr/plugins/config/herdr-linear/config.json pollSeconds: Expected a value greater than or equal to 5
-- /home/dev/.config/herdr/plugins/config/herdr-linear/config.json maxInflight: Expected no excess property
-- no Linear API key: create /home/dev/.config/herdr-linear/linear-key with mode 600
-- /home/dev/.config/herdr/plugins/config/herdr-linear/app.pem is readable by other users; run chmod 600 /home/dev/.config/herdr/plugins/config/herdr-linear/app.pem
+- /home/dev/.config/herdr/plugins/config/sapphire-agent/config.json pollSeconds: Expected a value greater than or equal to 5
+- /home/dev/.config/herdr/plugins/config/sapphire-agent/config.json maxInflight: Expected no excess property
+- no Linear API key: create /home/dev/.config/sapphire-agent/linear-key with mode 600
+- /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem is readable by other users; run chmod 600 /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem
 ```
 
 A file whose path comes from a missing env var or an invalid config file is not read; that problem is already reported. Startup also stops while the old dispatcher's `claims.json` still holds claims (`operations.md`).

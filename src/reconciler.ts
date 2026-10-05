@@ -14,7 +14,7 @@ export class Reconciler extends Context.Service<
 		// Ticks at once, then every pollSeconds and on every wake, until interrupted.
 		readonly run: Effect.Effect<never>;
 	}
->()('herdr-linear/Reconciler') {
+>()('sapphire-agent/Reconciler') {
 	static readonly layer = Layer.effect(
 		Reconciler,
 		Effect.gen(function* () {

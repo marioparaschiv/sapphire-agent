@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Option, PubSub, Stream, SubscriptionRef } from 'effect';
 import { type CallError, Permanent, Transient } from './call-policy.ts';
-import { AppConfig } from './config.ts';
+import { AppConfig, type AppConfigShape } from './config.ts';
 import {
 	defaultTailLines,
 	Herdr,
@@ -19,7 +19,7 @@ import {
 	workspaceTabsOf,
 } from './herdr.ts';
 
-// One pane per tab, as herdr-linear opens them.
+// One pane per tab, as sapphire-agent opens them.
 export type FakeTab = {
 	readonly tabId: string;
 	readonly workspaceId: string;
@@ -53,7 +53,7 @@ export type FakeHerdrControls = {
 	// null: the agent exited and the pane's shell is left.
 	readonly setAgent: (paneId: string, agent: string | null) => void;
 	readonly setTail: (paneId: string, tail: string) => void;
-	// The tab and its pane disappear without herdr-linear closing them.
+	// The tab and its pane disappear without sapphire-agent closing them.
 	readonly removeTab: (tabId: string) => void;
 	readonly setStartBehaviour: (behaviour: FakeStartBehaviour) => void;
 	readonly tab: (tabId: string) => Option.Option<FakeTab>;
@@ -312,7 +312,7 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 
 // In-memory herdr whose openTab, ownedTabs, tail squeezing and event reconnection are the live layer's. Its layer
 // provides both Herdr and these controls, with fresh state each time it is built.
-export class FakeHerdr extends Context.Service<FakeHerdr, FakeHerdrControls>()('herdr-linear/FakeHerdr') {
+export class FakeHerdr extends Context.Service<FakeHerdr, FakeHerdrControls>()('sapphire-agent/FakeHerdr') {
 	static readonly layer = Layer.effectContext(
 		Effect.gen(function* () {
 			const { workspaceLabel } = yield* AppConfig;

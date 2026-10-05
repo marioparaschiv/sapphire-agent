@@ -26,7 +26,7 @@ describe('main', () => {
 						HERDR_SOCKET_PATH: join(directory, 'herdr.sock'),
 						HERDR_PLUGIN_CONFIG_DIR: directory,
 						HERDR_PLUGIN_STATE_DIR: directory,
-						HERDR_LINEAR_KEY_FILE: join(directory, 'linear-key'),
+						SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
 					},
 				}),
 			);
@@ -62,7 +62,7 @@ describe('main', () => {
 						HERDR_SOCKET_PATH: join(directory, 'herdr.sock'),
 						HERDR_PLUGIN_CONFIG_DIR: directory,
 						HERDR_PLUGIN_STATE_DIR: directory,
-						HERDR_LINEAR_KEY_FILE: join(directory, 'linear-key'),
+						SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
 						CLAUDE_CONFIG_PATH: join(directory, 'claude.json'),
 					},
 				}),

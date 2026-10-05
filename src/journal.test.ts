@@ -12,7 +12,7 @@ const orchestrate: Run = {
 	teamId: 'team-1',
 	status: 'claimed',
 	job: { _tag: 'orchestrate' },
-	repo: '/home/dev/herdr-linear',
+	repo: '/home/dev/sapphire-agent',
 	branch: 'mario/hl-9-foundation',
 	worktreePath: null,
 	tabId: null,

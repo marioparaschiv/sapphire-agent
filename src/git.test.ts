@@ -16,7 +16,7 @@ import { git } from './test-harness.ts';
 // An origin with a main branch, a clone of it, and an empty worktrees directory under `dir`, which AppConfig.layerTest
 // uses as its worktrees directory.
 const repos = () => {
-	const dir = mkdtempSync(join(tmpdir(), 'herdr-linear-git-'));
+	const dir = mkdtempSync(join(tmpdir(), 'sapphire-agent-git-'));
 
 	onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
 

@@ -67,7 +67,7 @@ export const commandsRule = Effect.gen(function* () {
 		HERDR_SOCKET_PATH: env.herdrSocketPath,
 		HERDR_PLUGIN_CONFIG_DIR: env.configDirectory,
 		HERDR_PLUGIN_STATE_DIR: env.stateDirectory,
-		HERDR_LINEAR_KEY_FILE: env.linearKeyFile,
+		SAPPHIRE_AGENT_LINEAR_KEY_FILE: env.linearKeyFile,
 		CLAUDE_CONFIG_PATH: env.claudeConfigPath,
 	};
 

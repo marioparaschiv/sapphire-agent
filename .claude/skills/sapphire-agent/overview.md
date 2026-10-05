@@ -1,6 +1,6 @@
 # Overview
 
-What herdr-linear does end to end, the Linear column flow, and who moves an issue between columns.
+What sapphire-agent does end to end, the Linear column flow, and who moves an issue between columns.
 
 ## In one paragraph
 
@@ -49,7 +49,7 @@ Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.m
 - Epics without sub-issues are ignored with a one-time log line.
 - Only issues with no parent count as epics.
 - Order is Linear board order (`sortOrder` ascending); at most `maxInFlight` runs at once, follow-ups first.
-- The agent opens and pushes the PR as the user's account. Every comment herdr-linear writes on GitHub (summaries, flags, thread replies and resolves, the command agent's replies, notices that a command failed) is the GitHub App's (`<slug>[bot]`). The bot (`@<bot.login>`) is mentioned to ask for something.
+- The agent opens and pushes the PR as the user's account. Every comment sapphire-agent writes on GitHub (summaries, flags, thread replies and resolves, the command agent's replies, notices that a command failed) is the GitHub App's (`<slug>[bot]`). The bot (`@<bot.login>`) is mentioned to ask for something.
 - Linear and GitHub are the source of truth. The journal only holds what cannot be observed (see `journal-and-markers.md`), and every comment carries a hidden marker so it is never posted twice.
 
 ## The prompts the agent gets

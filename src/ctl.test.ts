@@ -43,7 +43,7 @@ const ctlSh = (directory: string, ...args: ReadonlyArray<string>) =>
 					HOME: directory,
 					HERDR_PLUGIN_STATE_DIR: directory,
 					HERDR_PLUGIN_CONFIG_DIR: directory,
-					HERDR_LINEAR_KEY_FILE: join(directory, 'linear-key'),
+					SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
 				},
 			}),
 		);

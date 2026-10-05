@@ -1,6 +1,6 @@
 # Journal and markers
 
-What herdr-linear stores locally and why, and how markers on its comments make every write safe to repeat.
+What sapphire-agent stores locally and why, and how markers on its comments make every write safe to repeat.
 
 ## Reality first
 
@@ -10,7 +10,7 @@ Idempotency comes from markers on external writes, not from the journal: before 
 
 ## The journal
 
-SQLite through `@effect/sql-sqlite-node` (the built-in `node:sqlite`), with its migrator. Rows are typed with Effect `Schema`; there is no ORM. The file is `$HERDR_PLUGIN_STATE_DIR/journal.db` (live: `~/.local/state/herdr/plugins/herdr-linear/journal.db`). Tests use `':memory:'` or a temp file. Columns are snake_case in SQLite and camelCase in code. Times are epoch milliseconds.
+SQLite through `@effect/sql-sqlite-node` (the built-in `node:sqlite`), with its migrator. Rows are typed with Effect `Schema`; there is no ORM. The file is `$HERDR_PLUGIN_STATE_DIR/journal.db` (live: `~/.local/state/herdr/plugins/sapphire-agent/journal.db`). Tests use `':memory:'` or a temp file. Columns are snake_case in SQLite and camelCase in code. Times are epoch milliseconds.
 
 ### `runs`
 
@@ -67,10 +67,10 @@ The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the se
 
 ## Markers
 
-Every comment herdr-linear writes, on Linear or on GitHub, ends with a hidden marker on a line of its own:
+Every comment sapphire-agent writes, on Linear or on GitHub, ends with a hidden marker on a line of its own:
 
 ```
-<!-- herdr-linear:<IDENTIFIER>:<purpose>:<key> -->
+<!-- sapphire-agent:<IDENTIFIER>:<purpose>:<key> -->
 ```
 
 `<IDENTIFIER>` is the epic's, or the command's (`CMD-<n>`) for what the bot posts. The key is URI-encoded. A marker inside a quote (`> <!-- ... -->`) does not count, so a user quoting one of our comments is not mistaken for it. Purpose and key together name one comment: a retry or restart finds it and skips, while a later occurrence (a new question in the same run, a new summary from a follow-up run) has a new key and is posted. The `Comments` service builds every body and key; `claimedAt` is the run's claim time.
