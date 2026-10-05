@@ -57,7 +57,7 @@ describe('commands', () => {
 			assert.deepStrictEqual([start.paneId, start.name, start.args], [tab.paneId, 'cmd-1', [...commandClaudeArgs(ctlPath), '--session-id', command.session.id, '--name', 'cmd-1']]);
 			assert.include(start.prompt, `You are CMD-1, the sapphire-agent command agent. @marioparaschiv mentioned the bot in ${comment.url} (test/repo#1) and wrote: "@orchestratorbot stop TEST-12 and start TEST-14".`);
 			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[h.repo].hasTrustDialogAccepted);
-			assert.deepStrictEqual(commandClaudeArgs('/srv/ctl.sh').slice(0, 5), ['--restricted', '--strict-mcp-config', '--tools', 'Bash,Read,Grep,Glob', '--settings']);
+			assert.deepStrictEqual(commandClaudeArgs('/srv/ctl.sh').slice(0, 5), ['--restricted', '--strict-mcp-config', '--tools', 'Bash,Read,Grep,Glob,SendMessage', '--settings']);
 			assert.deepStrictEqual(JSON.parse(commandClaudeArgs('/srv/ctl.sh')[5]), {
 				permissions: {
 					defaultMode: 'dontAsk',
@@ -67,6 +67,7 @@ describe('commands', () => {
 						'Read',
 						'Grep',
 						'Glob',
+						'SendMessage',
 					],
 					deny: ['Bash(git * --output*)'],
 				},

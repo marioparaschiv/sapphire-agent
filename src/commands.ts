@@ -22,19 +22,19 @@ export const ctlPath = fileURLToPath(new URL('../scripts/ctl.sh', import.meta.ur
 const readOnlyCommands = ['gh pr view', 'gh pr diff', 'gh pr checks', 'gh issue view', 'git log', 'git show', 'git diff', 'git status'];
 
 // What Claude is started with for a command. --restricted ignores the user's and the project's settings, which may allow
-// more or bypass permissions, and keeps the file tools in the working directory; --tools leaves no tool that edits;
-// dontAsk denies, without asking, every Bash command the allow list does not cover, a command chained onto an allowed
-// one included.
+// more or bypass permissions, and keeps the file tools in the working directory; --tools leaves no tool that edits, and
+// SendMessage to message a run's session; dontAsk denies, without asking, every Bash command the allow list does not
+// cover, a command chained onto an allowed one included.
 export const commandClaudeArgs = (ctl: string) => [
 	'--restricted',
 	'--strict-mcp-config',
 	'--tools',
-	'Bash,Read,Grep,Glob',
+	'Bash,Read,Grep,Glob,SendMessage',
 	'--settings',
 	JSON.stringify({
 		permissions: {
 			defaultMode: 'dontAsk',
-			allow: [`Bash(sh ${ctl} *)`, ...readOnlyCommands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]), 'Read', 'Grep', 'Glob'],
+			allow: [`Bash(sh ${ctl} *)`, ...readOnlyCommands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]), 'Read', 'Grep', 'Glob', 'SendMessage'],
 			deny: ['Bash(git * --output*)'],
 		},
 	}),

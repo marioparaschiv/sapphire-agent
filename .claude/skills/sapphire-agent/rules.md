@@ -162,8 +162,8 @@ Claude is started for a command with (`commandClaudeArgs`):
 
 - `--restricted`: ignores the user's, project's and local settings files (the user's `defaultMode` is `bypassPermissions`), refuses bypassPermissions, keeps the file tools in the working directory.
 - `--strict-mcp-config` and no `--mcp-config`: no MCP servers.
-- `--tools Bash,Read,Grep,Glob`: no tool that edits or fetches.
-- `--settings` with a permissions block: `defaultMode: dontAsk`, so anything not allowed is denied without asking; allowed: `Bash(sh <ctl.sh> *)`, `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `git log`, `git show`, `git diff`, `git status` (with or without arguments), `Read`, `Grep`, `Glob`; denied: `Bash(git * --output*)`.
+- `--tools Bash,Read,Grep,Glob,SendMessage`: no tool that edits or fetches. SendMessage messages a run's session.
+- `--settings` with a permissions block: `defaultMode: dontAsk`, so anything not allowed is denied without asking; allowed: `Bash(sh <ctl.sh> *)`, `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `git log`, `git show`, `git diff`, `git status` (with or without arguments), `Read`, `Grep`, `Glob`, `SendMessage`; denied: `Bash(git * --output*)`.
 
 Claude Code checks each part of a compound command, so `sh ctl.sh status; touch x` is denied as a whole. Only allowed users' comments reach an agent at all. What it can still do is what `ctl.sh` does (`reply` posts as the GitHub App only on a command's thread), and what a run it messages or a follow-up it asks for then does.
 
