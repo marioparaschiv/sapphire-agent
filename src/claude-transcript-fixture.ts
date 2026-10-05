@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-export type TranscriptSession = { readonly id: string; readonly cwd: string };
+import { maxSlugLength, projectSlug, type TranscriptSession } from './claude-transcript.ts';
 
 type Entry = Record<string, unknown>;
 
@@ -64,11 +63,11 @@ export const transcriptEntries = {
 	],
 };
 
-// Claude Code's directory name for a cwd. Past 200 characters it appends a hash of its own, which this one only stands in for.
+// Claude Code's directory name for a cwd. When shortened it appends a hash of its own, which this one only stands in for.
 const projectDirectory = (cwd: string) => {
-	const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+	const slug = projectSlug(cwd);
 
-	return slug.length <= 200 ? slug : `${slug.slice(0, 200)}-${createHash('sha256').update(cwd).digest('hex').slice(0, 7)}`;
+	return slug.length <= maxSlugLength ? slug : `${slug.slice(0, maxSlugLength)}-${createHash('sha256').update(cwd).digest('hex').slice(0, 7)}`;
 };
 
 // Writes the session's transcript where Claude Code does.

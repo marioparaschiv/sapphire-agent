@@ -28,14 +28,18 @@ const isInput = (content: string | ReadonlyArray<unknown>) => {
 };
 
 // Claude Code names a project's directory after its path, shortened past 200 characters with a hash of the path appended.
-const maxSlugLength = 200;
+export const maxSlugLength = 200;
+
+export const projectSlug = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, '-');
+
+export type TranscriptSession = { readonly id: string; readonly cwd: string };
 
 export class ClaudeTranscript extends Context.Service<
 	ClaudeTranscript,
 	{
 		// The last message the session sent `to` with no input since: the question it ended its turn on. None when it got
 		// input after it, never sent one, or has no transcript.
-		readonly pendingMessage: (session: { readonly id: string; readonly cwd: string }, to: string) => Effect.Effect<Option.Option<string>, Permanent>;
+		readonly pendingMessage: (session: TranscriptSession, to: string) => Effect.Effect<Option.Option<string>, Permanent>;
 	}
 >()('sapphire-agent/ClaudeTranscript') {
 	static readonly layer = Layer.effect(
@@ -47,7 +51,7 @@ export class ClaudeTranscript extends Context.Service<
 
 			const projectDirectory = (cwd: string) =>
 				Effect.gen(function* () {
-					const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+					const slug = projectSlug(cwd);
 
 					if (slug.length <= maxSlugLength) {
 						return Option.some(slug);

@@ -5,8 +5,8 @@ import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Layer, Option } from 'effect';
 import { onTestFinished } from 'vitest';
-import { transcriptEntries as entries, type TranscriptSession, writeTranscript } from './claude-transcript-fixture.ts';
-import { ClaudeTranscript } from './claude-transcript.ts';
+import { transcriptEntries as entries, writeTranscript } from './claude-transcript-fixture.ts';
+import { ClaudeTranscript, type TranscriptSession } from './claude-transcript.ts';
 import { AppConfig } from './config.ts';
 
 const session: TranscriptSession = { id: '9b2f7c1e-4d3a-4e8b-a6f0-1c2d3e4f5a6b', cwd: '/home/dev/.herdr/worktrees/telecord/mario-tel-435-compression-stops-leaking' };
