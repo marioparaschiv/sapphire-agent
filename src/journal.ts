@@ -243,7 +243,7 @@ export class Journal extends Context.Service<
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
 		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
 	}
->()('herdr-linear/Journal') {
+>()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
 		Layer.effect(
 			Journal,

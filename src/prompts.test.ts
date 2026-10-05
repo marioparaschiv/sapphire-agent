@@ -7,27 +7,21 @@ const withPrompts = <A>(use: (prompts: Prompts['Service']) => A) => Prompts.useS
 const epic = {
 	identifier: 'HL-8',
 	title: 'Rewrite the orchestrator on Effect 4 as a level-triggered reconciler',
-	url: 'https://linear.app/marioparaschiv/issue/HL-8/rewrite-the-orchestrator-on-effect-4-as-a-level-triggered',
 };
 
 describe('Prompts', () => {
-	it.effect('asks the orchestrate skill to run the epic in the worktree', () =>
-		withPrompts((prompts) =>
-			assert.strictEqual(
-				prompts.orchestrate(epic),
-				'/orchestrate the sub-issues of Linear epic HL-8 (https://linear.app/marioparaschiv/issue/HL-8/rewrite-the-orchestrator-on-effect-4-as-a-level-triggered) autonomously, in the worktree you are in.',
-			),
-		),
+	it.effect('asks the orchestrate skill to run the epic', () =>
+		withPrompts((prompts) => assert.strictEqual(prompts.orchestrate(epic), '/orchestrate Linear epic HL-8 autonomously')),
 	);
 
 	it.effect('asks the follow-up skill to answer the threads it was given', () =>
 		withPrompts((prompts) =>
 			assert.strictEqual(
 				prompts.followUp(
-					{ identifier: 'UNB-130', title: 'Ready to ship', url: 'https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship' },
+					{ identifier: 'UNB-130', title: 'Ready to ship' },
 					{ pullRequestUrl: 'https://github.com/marioparaschiv/unbound/pull/120', threadIds: ['PRRT_inline', 'PRRT_accepted_flag'], instruction: null },
 				),
-				'/follow-up Linear epic UNB-130 (https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship), PR https://github.com/marioparaschiv/unbound/pull/120, threads PRRT_inline PRRT_accepted_flag, autonomously, in the worktree you are in.',
+				'/follow-up Linear epic UNB-130, PR https://github.com/marioparaschiv/unbound/pull/120, threads PRRT_inline PRRT_accepted_flag',
 			),
 		),
 	);
@@ -36,10 +30,10 @@ describe('Prompts', () => {
 		withPrompts((prompts) =>
 			assert.strictEqual(
 				prompts.followUp(
-					{ identifier: 'UNB-130', title: 'Ready to ship', url: 'https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship' },
+					{ identifier: 'UNB-130', title: 'Ready to ship' },
 					{ pullRequestUrl: 'https://github.com/marioparaschiv/unbound/pull/120', threadIds: [], instruction: 'Use the "retry" helper.\nKeep the API.' },
 				),
-				'/follow-up Linear epic UNB-130 (https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship), PR https://github.com/marioparaschiv/unbound/pull/120, no threads, instruction "Use the \\"retry\\" helper.\\nKeep the API.", autonomously, in the worktree you are in.',
+				'/follow-up Linear epic UNB-130, PR https://github.com/marioparaschiv/unbound/pull/120, no threads, instruction "Use the \\"retry\\" helper.\\nKeep the API."',
 			),
 		),
 	);
@@ -53,12 +47,12 @@ describe('Prompts', () => {
 				repo: 'marioparaschiv/unbound',
 				number: 120,
 				body: '@orchestratorbot stop UNB-12\nthen start UNB-14',
-				ctl: '/home/dev/herdr-linear/scripts/ctl.sh',
+				ctl: '/home/dev/sapphire-agent/scripts/ctl.sh',
 			});
 
 			assert.notInclude(prompt, '\n');
-			assert.include(prompt, 'You are CMD-3, the herdr-linear command agent. @marioparaschiv mentioned the bot in https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 (marioparaschiv/unbound#120) and wrote: "@orchestratorbot stop UNB-12\\nthen start UNB-14".');
-			assert.include(prompt, '`sh /home/dev/herdr-linear/scripts/ctl.sh <subcommand>`');
+			assert.include(prompt, 'You are CMD-3, the sapphire-agent command agent. @marioparaschiv mentioned the bot in https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 (marioparaschiv/unbound#120) and wrote: "@orchestratorbot stop UNB-12\\nthen start UNB-14".');
+			assert.include(prompt, '`sh /home/dev/sapphire-agent/scripts/ctl.sh <subcommand>`');
 			assert.include(prompt, 'reply https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 <text>; done CMD-3.');
 			assert.isTrue(prompt.endsWith('then run done CMD-3.'));
 			assert.strictEqual(prompts.commandTabLabel({ identifier: 'CMD-3' }), '@bot CMD-3');

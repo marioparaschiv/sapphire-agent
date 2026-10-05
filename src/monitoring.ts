@@ -100,7 +100,7 @@ export const monitoringRule = Effect.gen(function* () {
 			const notices = replies.flatMap((reply) => Option.toArray(parseMarker(reply.body)));
 			const refused = new Set(notices.filter((marker) => marker.purpose === 'replyFailed').map((marker) => marker.key));
 			const fromUser = replies
-				.filter((reply) => Option.isNone(parseMarker(reply.body)) && !reply.body.startsWith('**herdr-linear'))
+				.filter((reply) => Option.isNone(parseMarker(reply.body)) && !/^\*\*(sapphire-agent|herdr-linear)/.test(reply.body))
 				.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 
 			for (const reply of fromUser) {

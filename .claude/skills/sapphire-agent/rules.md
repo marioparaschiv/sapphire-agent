@@ -1,6 +1,6 @@
 # Rules
 
-What each rule of the reconciler does, the run and command statuses they move between, flags, the question relay, the command agent and its lockdown, when tabs close, which tabs and worktrees herdr-linear owns, how to retry, and the known limits. The rules run in the order below every tick (see `architecture.md`); mentions arrive through the webhook server between ticks.
+What each rule of the reconciler does, the run and command statuses they move between, flags, the question relay, the command agent and its lockdown, when tabs close, which tabs and worktrees sapphire-agent owns, how to retry, and the known limits. The rules run in the order below every tick (see `architecture.md`); mentions arrive through the webhook server between ticks.
 
 ## Runs and statuses
 
@@ -81,7 +81,7 @@ For each started run that is `running`, `awaitingInput` or `stale`, every tick r
 ### Question relay
 
 - The `awaitingInput` comment is the question: it holds the pane tail and says to reply to it. It is posted once per quiet episode, also across restarts (its marker is keyed by the claim and the start of the quiet spell).
-- Each tick fetches the replies to every current question in one request. A reply counts when it is a child of the run's question, has no marker, does not start with `**herdr-linear`, and has no `white_check_mark` reaction. Replies to any other comment are ignored.
+- Each tick fetches the replies to every current question in one request. A reply counts when it is a child of the run's question, has no marker, does not start with `**sapphire-agent`, and has no `white_check_mark` reaction. Replies to any other comment are ignored.
 - Delivery, oldest first: type the reply into the pane (`herdr agent prompt`, lines joined with spaces), record its id on the run, then add the `white_check_mark` reaction. A recorded reply is never typed again and gets the reaction on the next tick if it is missing.
 - herdr refuses a prompt while the agent sits at a permission or question dialog (`agent_blocked`). The reply then gets a `replyFailed` notice in the question's thread, once, saying to answer in the tab; that notice also keeps it from being typed later.
 
@@ -139,7 +139,7 @@ Start, each step looking at what is already there, as the start rule does:
 1. Claim: `claimed`, with the claim time.
 2. Directory: the local clone whose `origin` is the comment's repo, looked for in the teams' repos, `<labelReposDirectory>/<name>` and the runs' repos; the state directory when there is none (status, pause and the like still work). The agent only reads there.
 3. Trust the directory for Claude.
-4. Tab `@bot CMD-<n>` in the workspace, with the service's `HERDR_*`, `HERDR_LINEAR_KEY_FILE` and `CLAUDE_CONFIG_PATH` set in its shell so the agent's `ctl.sh` reaches this journal and config. An untracked tab with that label is adopted.
+4. Tab `@bot CMD-<n>` in the workspace, with the service's `HERDR_*`, `SAPPHIRE_AGENT_LINEAR_KEY_FILE` and `CLAUDE_CONFIG_PATH` set in its shell so the agent's `ctl.sh` reaches this journal and config. An untracked tab with that label is adopted.
 5. Claude, started with the lockdown arguments and the command prompt (below), confirmed as in the start rule. Then `running`.
 
 A Permanent failure or a claim not confirmed within `startTimeoutSeconds` fails the command.
@@ -179,7 +179,7 @@ A flag is the `agent-stuck` label plus a marked comment on the epic, once. The l
 | `threadMismatch` | Replies do not match the follow-up's threads | `error` |
 | `permanentFailure` | A call for the epic failed and retrying cannot help | unchanged |
 
-Comments start with `**herdr-linear**`, name the state, e.g. ``**herdr-linear** (`error`): ...``, and include the pane tail or error in a code block plus what to do next. The epic stays where it was. A `transientFailure` comment (no label) and the comments `keptWorktree`, `replyFailed` and `workingOrphan` are notices, not flags. See `failure-policy.md` for the failure flags. A failed command is told on GitHub instead (Commands).
+Comments start with `**sapphire-agent**`, name the state, e.g. ``**sapphire-agent** (`error`): ...``, and include the pane tail or error in a code block plus what to do next. The epic stays where it was. A `transientFailure` comment (no label) and the comments `keptWorktree`, `replyFailed` and `workingOrphan` are notices, not flags. See `failure-policy.md` for the failure flags. A failed command is told on GitHub instead (Commands).
 
 ## Tab close
 
@@ -197,7 +197,7 @@ The tab stays open while the run is `awaitingInput` or `stale`, and while the ag
 
 ## Ownership and orphans
 
-herdr-linear owns the tabs in its own workspace (`workspaceLabel`, default `agents`) whose label starts with an issue identifier (`^[A-Z]+-\d+ `), for an epic of a resolved team. It never touches any other tab or workspace, except command tabs (`@bot CMD-<n>`), which only the commands rule opens, adopts and closes.
+sapphire-agent owns the tabs in its own workspaces (one per team, labelled with the team's name, plus `workspaceLabel`, default `agents`) whose label starts with an issue identifier (`^[A-Z]+-\d+ `), for an epic of a resolved team. It never touches any other tab or workspace, except command tabs (`@bot CMD-<n>`), which only the commands rule opens, adopts and closes.
 
 Owned tabs that no run tracks (cleanup rule):
 
@@ -206,7 +206,7 @@ Owned tabs that no run tracks (cleanup rule):
 - The agent is working: a `workingOrphan` comment once, and the tab is left running; it is closed once the agent stops.
 - A claim whose tab was opened just before a crash is left to the start rule, which adopts it.
 
-Orphan worktrees: a worktree under the worktrees directory that no run tracks, whose branch is the epic's Linear branch, whose path is the one herdr-linear would build, and whose epic is finished (a completed or canceled state) with no run. It goes through the unsaved-work check: removed with its branch, or kept with a `keptWorktree` comment naming the path (once per path).
+Orphan worktrees: a worktree under the worktrees directory that no run tracks, whose branch is the epic's Linear branch, whose path is the one sapphire-agent would build, and whose epic is finished (a completed or canceled state) with no run. It goes through the unsaved-work check: removed with its branch, or kept with a `keptWorktree` comment naming the path (once per path).
 
 ## Retrying
 
@@ -225,7 +225,7 @@ A new claim reuses the existing worktree if it is on the same branch and opens a
 
 ## Known limits
 
-- The orphan-worktree sweep cannot tell herdr's own worktrees from herdr-linear's for a finished epic: both use the same directory layout and Linear's branch name. Only clean ones are removed; one with unsaved work gets a `keptWorktree` comment and stays.
+- The orphan-worktree sweep cannot tell herdr's own worktrees from sapphire-agent's for a finished epic: both use the same directory layout and Linear's branch name. Only clean ones are removed; one with unsaved work gets a `keptWorktree` comment and stays.
 - Orphan-tab adoption can start Claude while paused: adoption is part of cleanup and the start rule is not pausable.
 - A crash after a reply was typed into the pane but before it was recorded types it again after the restart. Typing and recording cannot be one step, and typing twice beats losing the reply.
 - A run whose agent keeps reporting `working` holds its slot and its tab until it stops or is flagged `stale`.

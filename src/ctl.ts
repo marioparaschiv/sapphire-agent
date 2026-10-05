@@ -98,7 +98,7 @@ const start = Command.make('start', { epic: epicArgument }, ({ epic: identifier 
 		}
 
 		if (!config.teams[epic.team.name]) {
-			return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which herdr-linear does not watch` });
+			return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
 		}
 
 		const ready = Option.fromUndefinedOr((yield* linear.teams([epic.team.name]))[0]?.states.nodes.find((state) => state.name === config.states.ready));

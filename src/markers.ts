@@ -55,12 +55,13 @@ export type MarkedComment = {
 };
 
 // The key is URI-encoded so a path or id never breaks the HTML comment or the parser.
-export const renderMarker = ({ identifier, purpose, key }: Marker) => `<!-- herdr-linear:${identifier}:${purpose}:${encodeURIComponent(key)} -->`;
+export const renderMarker = ({ identifier, purpose, key }: Marker) => `<!-- sapphire-agent:${identifier}:${purpose}:${encodeURIComponent(key)} -->`;
 
 export const withMarker = (body: string, marker: Marker): MarkedComment => ({ marker, body: `${body}\n\n${renderMarker(marker)}` });
 
 // Only a marker on a line of its own counts, so a user quoting one of our comments (`> <!-- ... -->`) is not ours.
-const markerLine = /^<!-- herdr-linear:([A-Z]+-\d+):(\w+):(\S+) -->$/m;
+// Comments posted before the rename carry `herdr-linear:`.
+const markerLine = /^<!-- (?:sapphire-agent|herdr-linear):([A-Z]+-\d+):(\w+):(\S+) -->$/m;
 
 const decodePurpose = Schema.decodeUnknownOption(MarkerPurpose);
 

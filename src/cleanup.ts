@@ -193,7 +193,7 @@ export const cleanupRule = Effect.gen(function* () {
 			for (const worktree of observation.worktrees.filter((candidate) => !isTrackedWorktree(runs, candidate))) {
 				const epic = Option.filter(
 					Option.flatMap(identifierOfBranch(worktree.branch), ownedEpic),
-					// Built the way herdr-linear builds its worktrees, for an epic whose work is over. herdr's own worktrees
+					// Built the way sapphire-agent builds its worktrees, for an epic whose work is over. herdr's own worktrees
 					// use the same layout, so a worktree of an epic still in progress is never touched.
 					(candidate) =>
 						candidate.branchName === worktree.branch &&

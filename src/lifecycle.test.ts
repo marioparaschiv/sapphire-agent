@@ -158,7 +158,7 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 		const { tickUntil, deliver, crashed, retypes } = makeDriver(h, crash);
 
 		// The workspace exists already, as in production.
-		h.herdr.addTab({ label: 'notes', agent: null });
+		h.herdr.addTab({ label: 'notes', workspace: 'Test', agent: null });
 
 		// Dispatch: Ready For Agent becomes a tab running Claude, and the epic moves to Implementing.
 		const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });

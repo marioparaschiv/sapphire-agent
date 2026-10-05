@@ -7,6 +7,6 @@ units="$HOME/.config/systemd/user"
 
 "$HOME/.local/bin/herdr" plugin link "$root" >/dev/null
 mkdir -p "$units"
-cp "$root/systemd/herdr-server.service" "$root/systemd/herdr-linear.service" "$units/"
+cp "$root/systemd/herdr-server.service" "$root/systemd/sapphire-agent.service" "$units/"
 systemctl --user daemon-reload
-systemctl --user enable herdr-server.service herdr-linear.service
+systemctl --user enable herdr-server.service sapphire-agent.service

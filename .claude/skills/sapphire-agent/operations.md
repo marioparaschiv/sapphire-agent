@@ -6,12 +6,12 @@ How the live service is installed, started, paused, drained, deployed, inspected
 
 | Unit (`~/.config/systemd/user/`) | Source | Does |
 | --- | --- | --- |
-| `herdr-linear.service` | `systemd/herdr-linear.service` | Runs `node src/main.ts` in `~/herdr-linear`. `Restart=always`, `RestartSec=30`. `Wants`/`After` herdr-server. |
+| `sapphire-agent.service` | `systemd/sapphire-agent.service` | Runs `node src/main.ts` in `~/sapphire-agent`. `Restart=always`, `RestartSec=30`. `Wants`/`After` herdr-server. |
 | `herdr-server.service` | `systemd/herdr-server.service` | Runs `herdr server`, but only if none is running. |
 
 - herdr also starts its server on demand when a client attaches. `ExecCondition` runs `herdr status server` and skips the start if it prints `status: running`, so systemd never starts a second server. `inactive` for this unit is normal when herdr was started another way.
 - `ExecStart` pins `~/.nvm/versions/node/v24.21.0/bin/node`. Update both units after a Node upgrade.
-- Apply config or code changes with `systemctl --user restart herdr-linear` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
+- Apply config or code changes with `systemctl --user restart sapphire-agent` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
 - Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user, for reads. Every comment is posted by the GitHub App (below), with no `gh` login.
 - The service listens for the App's webhook deliveries on `127.0.0.1:<bot.app.webhookPort>` (default 3790) while it runs (Webhook below).
 - A command agent runs `node` through `scripts/ctl.sh` in its tab's shell, so `node` (24) must be on the user's shell `PATH`.
@@ -20,7 +20,7 @@ How the live service is installed, started, paused, drained, deployed, inspected
 
 `sh scripts/install.sh` (idempotent):
 
-1. `herdr plugin link ~/herdr-linear`.
+1. `herdr plugin link ~/sapphire-agent`.
 2. Copy both units to `~/.config/systemd/user/`.
 3. `systemctl --user daemon-reload` and `enable` both.
 
@@ -53,7 +53,7 @@ GitHub does not redeliver a failed delivery (500, or the service down so nginx a
 
 ## Plugin manifest (`herdr-plugin.toml`)
 
-- `[[startup]]` runs `scripts/ensure-running.sh` = `systemctl --user start herdr-linear.service`. herdr runs startup hooks once and does not supervise them; systemd keeps the service alive.
+- `[[startup]]` runs `scripts/ensure-running.sh` = `systemctl --user start sapphire-agent.service`. herdr runs startup hooks once and does not supervise them; systemd keeps the service alive.
 - Actions (global context): `pause`, `resume`, `status`, each `sh scripts/ctl.sh <action>`.
 
 ## ctl.sh
@@ -61,15 +61,15 @@ GitHub does not redeliver a failed delivery (500, or the service down so nginx a
 The command agent's tools, and the operator's:
 
 ```sh
-sh ~/herdr-linear/scripts/ctl.sh pause                       # touch $STATE/paused
-sh ~/herdr-linear/scripts/ctl.sh resume                      # rm $STATE/paused
-sh ~/herdr-linear/scripts/ctl.sh status                      # paused?, service state, runs, commands, requests
-sh ~/herdr-linear/scripts/ctl.sh start HL-14                 # move the epic to its ready state
-sh ~/herdr-linear/scripts/ctl.sh stop HL-12                  # end its run, close its tab
-sh ~/herdr-linear/scripts/ctl.sh send HL-9 Use the existing helper.
-sh ~/herdr-linear/scripts/ctl.sh follow-up HL-9 Rename it --threads PRRT_kwDO1 --threads PRRT_kwDO2
-sh ~/herdr-linear/scripts/ctl.sh reply <comment-url> Done.   # as the App; only on a command's comment
-sh ~/herdr-linear/scripts/ctl.sh done CMD-3                  # the command agent is done
+sh ~/sapphire-agent/scripts/ctl.sh pause                       # touch $STATE/paused
+sh ~/sapphire-agent/scripts/ctl.sh resume                      # rm $STATE/paused
+sh ~/sapphire-agent/scripts/ctl.sh status                      # paused?, service state, runs, commands, requests
+sh ~/sapphire-agent/scripts/ctl.sh start HL-14                 # move the epic to its ready state
+sh ~/sapphire-agent/scripts/ctl.sh stop HL-12                  # end its run, close its tab
+sh ~/sapphire-agent/scripts/ctl.sh send HL-9 Use the existing helper.
+sh ~/sapphire-agent/scripts/ctl.sh follow-up HL-9 Rename it --threads PRRT_kwDO1 --threads PRRT_kwDO2
+sh ~/sapphire-agent/scripts/ctl.sh reply <comment-url> Done.   # as the App; only on a command's comment
+sh ~/sapphire-agent/scripts/ctl.sh done CMD-3                  # the command agent is done
 ```
 
 - Pause stops new runs only: no ready epic and no follow-up is claimed. Claimed runs still start, runs in flight are still watched, results are still posted, worktrees still cleaned up, and mentions still run commands (so `resume` can come in as one).
@@ -94,7 +94,7 @@ The old dispatcher kept its runs in `$STATE/claims.json`; the reconciler does no
 
 1. Pause the old dispatcher: `sh scripts/ctl.sh pause`.
 2. Wait until nothing is in flight: `claims.json` holds no claim in `claimed`, `running`, `awaitingInput` or `stale` (the old `ctl.sh status` prints it).
-3. Deploy: add `"allowedUsers": ["marioparaschiv"]` to `bot` in the config (`config.md`), update `~/herdr-linear` to the new code and restart the service (only when the user asks).
+3. Deploy: add `"allowedUsers": ["marioparaschiv"]` to `bot` in the config (`config.md`), update `~/sapphire-agent` to the new code and restart the service (only when the user asks).
 4. Delete `$STATE/claims.json`. The next restart starts the reconciler.
 5. `sh scripts/ctl.sh resume`.
 
@@ -102,10 +102,10 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 
 ## Logs and state
 
-- Logs: `journalctl --user -u herdr-linear -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations.
+- Logs: `journalctl --user -u sapphire-agent -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations.
 - Logs of a command carry `task=CMD-<n>`. Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`. The delivery scan logs `redelivered webhook delivery <id> (<guid>), which failed with HTTP <status>`, `cannot redeliver webhook delivery ...` and `cannot scan for failed webhook deliveries; trying again next scan`.
-- State dir: `~/.local/state/herdr/plugins/herdr-linear/` holds `journal.db`, `paused` and `wake`.
-- Run tabs: herdr workspace `agents`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>`.
+- State dir: `~/.local/state/herdr/plugins/sapphire-agent/` holds `journal.db`, `paused` and `wake`.
+- Run tabs: herdr workspace `<team name>`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>` in their repo's team workspace, or `agents` for a repo of no team.
 - Worktrees: `~/.herdr/worktrees/<repo>/<branch-slug>`. Removed with the local branch once the epic is Shipped or its PR is merged or closed, unless they hold unpushed work (then the epic gets a comment with the path).
 
 ## Troubleshooting

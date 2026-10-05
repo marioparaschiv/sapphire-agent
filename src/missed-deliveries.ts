@@ -44,7 +44,7 @@ export class MissedDeliveries extends Context.Service<
 		// the next one.
 		readonly run: Effect.Effect<void>;
 	}
->()('herdr-linear/MissedDeliveries') {
+>()('sapphire-agent/MissedDeliveries') {
 	static readonly layer = Layer.effect(
 		MissedDeliveries,
 		Effect.gen(function* () {

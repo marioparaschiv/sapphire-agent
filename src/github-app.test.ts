@@ -7,7 +7,7 @@ import { AppConfig } from './config.ts';
 import { GitHubApp } from './github-app.ts';
 import { GitHubAppFixture } from './github-app-fixture.ts';
 
-const config = AppConfig.layerTest('/tmp/herdr-linear-test');
+const config = AppConfig.layerTest('/tmp/sapphire-agent-test');
 
 const layer = GitHubAppFixture.layer.pipe(Layer.provideMerge(config));
 
@@ -18,10 +18,10 @@ describe('GitHubApp', () => {
 
 			yield* TestClock.setTime(now * 1000);
 
-			const mentionHandle = AppConfig.layerTest('/tmp/herdr-linear-test', {
+			const mentionHandle = AppConfig.layerTest('/tmp/sapphire-agent-test', {
 				bot: {
 					login: 'mention-handle',
-					app: { id: 424242, privateKeyFile: '/tmp/herdr-linear-test/app.pem', webhookSecretFile: '/tmp/herdr-linear-test/webhook-secret', webhookPort: 0 },
+					app: { id: 424242, privateKeyFile: '/tmp/sapphire-agent-test/app.pem', webhookSecretFile: '/tmp/sapphire-agent-test/webhook-secret', webhookPort: 0 },
 					allowedUsers: ['marioparaschiv'],
 				},
 			});
@@ -37,7 +37,7 @@ describe('GitHubApp', () => {
 	it.effect('fails to start, Permanent, when GitHub rejects the JWT of a key that is not the App\'s', () =>
 		Effect.gen(function* () {
 			const fixture = yield* GitHubAppFixture;
-			const otherKey = GitHubApp.layer(fixture.url).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppConfig.layerTest('/tmp/herdr-linear-test')));
+			const otherKey = GitHubApp.layer(fixture.url).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppConfig.layerTest('/tmp/sapphire-agent-test')));
 			const exit = yield* Layer.build(otherKey).pipe(Effect.exit);
 
 			assert.deepStrictEqual(exit, Exit.fail(new Permanent({ message: 'GitHub answered HTTP 401 to GET /app: A JSON web token could not be decoded' })));

@@ -1,4 +1,4 @@
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Clock, Effect, Option } from 'effect';
 import { Permanent } from './call-policy.ts';
@@ -67,7 +67,7 @@ export const commandsRule = Effect.gen(function* () {
 		HERDR_SOCKET_PATH: env.herdrSocketPath,
 		HERDR_PLUGIN_CONFIG_DIR: env.configDirectory,
 		HERDR_PLUGIN_STATE_DIR: env.stateDirectory,
-		HERDR_LINEAR_KEY_FILE: env.linearKeyFile,
+		SAPPHIRE_AGENT_LINEAR_KEY_FILE: env.linearKeyFile,
 		CLAUDE_CONFIG_PATH: env.claudeConfigPath,
 	};
 
@@ -92,6 +92,10 @@ export const commandsRule = Effect.gen(function* () {
 
 			return env.stateDirectory;
 		});
+
+	// The workspace of the team whose repo the command runs in, or workspaceLabel for a repo of no team.
+	const workspaceOf = (cwd: string) =>
+		Object.entries(config.teams).find(([, team]) => team.repo === cwd || team.labelReposDirectory === dirname(cwd))?.[0] ?? config.workspaceLabel;
 
 	// The notice goes first, keyed by the claim, so a crash before the journal records it never posts it twice.
 	const fail = (command: Command, reason: string, tail: Option.Option<string>) =>
@@ -144,7 +148,7 @@ export const commandsRule = Effect.gen(function* () {
 					// The observation is from the start of the tick; an earlier rule may have closed the tab since.
 					const live = Option.isSome(found) && Option.isSome(yield* herdr.pane(found.value.paneId)) ? found : Option.none();
 					const tab = yield* Option.match(live, {
-						onNone: () => herdr.openTab(label, cwd, tabEnv),
+						onNone: () => herdr.openTab(workspaceOf(cwd), label, cwd, tabEnv),
 						onSome: (adopted) => Effect.log(`adopting tab ${adopted.tabId}`).pipe(Effect.as(adopted)),
 					});
 

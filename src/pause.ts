@@ -5,7 +5,7 @@ import { AppConfig } from './config.ts';
 // `scripts/ctl.sh pause` creates this file and `resume` removes it.
 const pauseFileName = 'paused';
 
-export class Pause extends Context.Service<Pause, { readonly isPaused: Effect.Effect<boolean, PlatformError.PlatformError> }>()('herdr-linear/Pause') {
+export class Pause extends Context.Service<Pause, { readonly isPaused: Effect.Effect<boolean, PlatformError.PlatformError> }>()('sapphire-agent/Pause') {
 	static readonly layer = Layer.effect(
 		Pause,
 		Effect.gen(function* () {

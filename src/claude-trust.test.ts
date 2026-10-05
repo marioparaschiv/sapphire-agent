@@ -22,14 +22,14 @@ const realistic = {
 	projects: {
 		'/home/dev': { allowedTools: [], hasTrustDialogAccepted: false, lastCost: 0.17, mcpServers: {}, lastModelUsage: { 'claude-opus': { inputTokens: 1200 } } },
 		[worktree]: { lastSessionId: 'd483ae2a', exampleFiles: ['src/main.ts'], projectOnboardingSeenCount: 2 },
-		'/home/dev/herdr-linear': { hasTrustDialogAccepted: true, allowedTools: ['Bash(npm test)'] },
+		'/home/dev/sapphire-agent': { hasTrustDialogAccepted: true, allowedTools: ['Bash(npm test)'] },
 	},
 	cachedChangelog: '# Changelog\n\n## 2.1.0\n',
 	hasCompletedOnboarding: true,
 };
 
 const configFile = (contents: string) => {
-	const dir = mkdtempSync(join(tmpdir(), 'herdr-linear-trust-'));
+	const dir = mkdtempSync(join(tmpdir(), 'sapphire-agent-trust-'));
 
 	onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
 	writeFileSync(join(dir, 'claude.json'), contents, { mode: 0o600 });
@@ -59,7 +59,7 @@ describe('ClaudeTrust', () => {
 				},
 			});
 			assert.strictEqual(statSync(path).mode & 0o777, 0o600);
-			assert.deepStrictEqual(JSON.parse(readFileSync(`${path}.herdr-linear.bak`, 'utf8')), {
+			assert.deepStrictEqual(JSON.parse(readFileSync(`${path}.sapphire-agent.bak`, 'utf8')), {
 				...realistic,
 				projects: { ...realistic.projects, [worktree]: { ...realistic.projects[worktree], hasTrustDialogAccepted: true } },
 			});
@@ -72,11 +72,11 @@ describe('ClaudeTrust', () => {
 		const inode = statSync(path).ino;
 
 		return Effect.gen(function* () {
-			yield* (yield* ClaudeTrust).trustFolder('/home/dev/herdr-linear');
+			yield* (yield* ClaudeTrust).trustFolder('/home/dev/sapphire-agent');
 
 			assert.strictEqual(readFileSync(path, 'utf8'), contents);
 			assert.strictEqual(statSync(path).ino, inode);
-			assert.isFalse(existsSync(`${path}.herdr-linear.bak`));
+			assert.isFalse(existsSync(`${path}.sapphire-agent.bak`));
 		}).pipe(Effect.provide(trustLayer(dir)));
 	});
 

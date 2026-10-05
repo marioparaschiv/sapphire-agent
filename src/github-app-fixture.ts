@@ -322,7 +322,7 @@ const make = Effect.gen(function* () {
 	return { fixture, client };
 });
 
-export class GitHubAppFixture extends Context.Service<GitHubAppFixture, GitHubAppFixtureShape>()('herdr-linear/GitHubAppFixture') {
+export class GitHubAppFixture extends Context.Service<GitHubAppFixture, GitHubAppFixtureShape>()('sapphire-agent/GitHubAppFixture') {
 	// A fresh fixture server for the layer's lifetime, plus the real GitHubApp layer pointed at it over a real
 	// HttpClient. Both use the configured App id and key.
 	static readonly layer = Layer.unwrap(

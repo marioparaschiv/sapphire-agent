@@ -31,7 +31,7 @@ describe('monitoring', () => {
 			const [flagged] = yield* h.runs;
 
 			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.match(flag.body, /^\*\*herdr-linear\*\* \(`awaitingInput`\): the agent finished its turn 3 min ago before writing its result file\./);
+			assert.match(flag.body, /^\*\*sapphire-agent\*\* \(`awaitingInput`\): the agent finished its turn 3 min ago before writing its result file\./);
 			assert.include(flag.body, 'Which should win, local or remote?');
 			assert.deepStrictEqual([flagged.status, flagged.questionCommentId], ['awaitingInput', flag.id]);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);

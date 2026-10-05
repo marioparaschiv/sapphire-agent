@@ -18,12 +18,12 @@ How a run is started (worktree, trust, tab, `herdr agent start`), and how the He
 - Result file: `herdr-result.json` in the worktree's git dir (`git rev-parse --absolute-git-dir`). `readResultFile` decodes it with the `ResultFile` schema and fails `InvalidResultFile` otherwise; `removeResultFile` deletes a leftover one when a run starts in a reused worktree.
 - git calls in one repo share a semaphore, since git takes lock files in the main repo for all of its worktrees.
 
-Done in git directly rather than `herdr worktree create`, which creates and opens its own workspace; herdr-linear needs a tab in the shared `agents` workspace plus the reuse and no-track rules above.
+Done in git directly rather than `herdr worktree create`, which creates and opens its own workspace; sapphire-agent needs a tab in the shared `agents` workspace plus the reuse and no-track rules above.
 
 ## Trust pre-accept (`ClaudeTrust` service)
 
 - Sets `projects[<worktree>].hasTrustDialogAccepted = true` in `~/.claude.json` (override with `CLAUDE_CONFIG_PATH`), so Claude does not stop at the trust dialog. Every other field is kept as it is.
-- Copies the file to `~/.claude.json.herdr-linear.bak` first, then writes atomically (temp file, fsync, rename).
+- Copies the file to `~/.claude.json.sapphire-agent.bak` first, then writes atomically (temp file, fsync, rename).
 - Claude rewrites the file often, so the write only lands if the file is still what was read; otherwise it starts over from the fresh contents, up to 5 times, then fails.
 - Unparseable JSON fails instead of overwriting.
 
@@ -38,8 +38,8 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 ### Tabs
 
 - `openTab` looks for the workspace labelled `workspaceLabel` (default `agents`). Found: `herdr tab create --workspace <id> --label <label> --cwd <worktree> --env HERDR_BLANK=1 --no-focus`. Missing: `herdr workspace create --label agents` with the same flags, then `tab rename` of its first tab to the run's label.
-- `HERDR_BLANK=1` makes the pane's shell skip its automatic Claude launch, so `agent start` gets a plain prompt; `--no-focus` keeps the user where they are. A caller can set more variables, each another `--env KEY=VALUE`: a command's tab gets the service's `HERDR_*`, `HERDR_LINEAR_KEY_FILE` and `CLAUDE_CONFIG_PATH`.
-- Tab label (`Prompts.tabLabel`): `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>`. Starting with the identifier is how herdr-linear recognises the tabs it owns (`rules.md`). A command's tab is `@bot CMD-<n>` (`Prompts.commandTabLabel`), which no epic rule takes for an epic's.
+- `HERDR_BLANK=1` makes the pane's shell skip its automatic Claude launch, so `agent start` gets a plain prompt; `--no-focus` keeps the user where they are. A caller can set more variables, each another `--env KEY=VALUE`: a command's tab gets the service's `HERDR_*`, `SAPPHIRE_AGENT_LINEAR_KEY_FILE` and `CLAUDE_CONFIG_PATH`.
+- Tab label (`Prompts.tabLabel`): `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>`. Starting with the identifier is how sapphire-agent recognises the tabs it owns (`rules.md`). A command's tab is `@bot CMD-<n>` (`Prompts.commandTabLabel`), which no epic rule takes for an epic's.
 - `workspaceTabs` lists every tab in that workspace with its root pane, agent and status; `identifier` is none for a tab whose label does not start with one. herdr's `agent_status` for a tab sums up the agents in all of its panes.
 - `closeTab`: `herdr tab close <tabId>`. The rules only close a tab whose tab id and pane id both match the run.
 

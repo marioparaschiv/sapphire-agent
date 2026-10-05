@@ -17,7 +17,7 @@ const encoder = new TextEncoder();
 
 const bytes = (text: string) => Stream.make(encoder.encode(text));
 
-const config = AppConfig.layerTest('/tmp/herdr-linear-test');
+const config = AppConfig.layerTest('/tmp/sapphire-agent-test');
 
 // The live layer over a fake `gh` that records each call and answers it with `respond`, with the GitHub App fixture.
 const liveWithGh = (respond: (call: GhCall) => GhReply) => {

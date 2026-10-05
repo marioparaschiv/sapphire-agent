@@ -22,7 +22,7 @@ const fails = (name: string): Reply => ({ stderr: fixture(name), exitCode: 1 });
 
 const noWorkspaces: Reply = { stdout: '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[]}}\n' };
 
-const configDirectory = '/tmp/herdr-linear-test';
+const configDirectory = '/tmp/sapphire-agent-test';
 
 // Stands in for the herdr executable: answers each command line from `replies` and records the calls. A command
 // without a reply fails the way an unexpected herdr failure does.
@@ -117,8 +117,8 @@ describe('Herdr', () => {
 				'tab create --workspace w1 --label @orchestratorbot CMD-1 --cwd /work/repo --env HERDR_BLANK=1 --env HERDR_PLUGIN_STATE_DIR=/state --no-focus': ok('tab-create.json'),
 			});
 
-			assert.deepStrictEqual(yield* herdr.openTab('HL-1 Some epic', '/work/hl-1'), { tabId: 'w1:t2', paneId: 'w1:p2' });
-			assert.deepStrictEqual(yield* herdr.openTab('@orchestratorbot CMD-1', '/work/repo', { HERDR_PLUGIN_STATE_DIR: '/state' }), { tabId: 'w1:t2', paneId: 'w1:p2' });
+			assert.deepStrictEqual(yield* herdr.openTab('agents', 'HL-1 Some epic', '/work/hl-1'), { tabId: 'w1:t2', paneId: 'w1:p2' });
+			assert.deepStrictEqual(yield* herdr.openTab('agents', '@orchestratorbot CMD-1', '/work/repo', { HERDR_PLUGIN_STATE_DIR: '/state' }), { tabId: 'w1:t2', paneId: 'w1:p2' });
 			assert.lengthOf(calls, 4);
 		}),
 	);
@@ -131,7 +131,7 @@ describe('Herdr', () => {
 				'tab rename w1:t1 HL-1 Some epic': ok('tab-get.json'),
 			});
 
-			assert.deepStrictEqual(yield* herdr.openTab('HL-1 Some epic', '/work/hl-1'), { tabId: 'w1:t1', paneId: 'w1:p1' });
+			assert.deepStrictEqual(yield* herdr.openTab('agents', 'HL-1 Some epic', '/work/hl-1'), { tabId: 'w1:t1', paneId: 'w1:p1' });
 			assert.deepStrictEqual(
 				calls.map(({ args }) => args),
 				['workspace list', 'workspace create --label agents --cwd /work/hl-1 --env HERDR_BLANK=1 --no-focus', 'tab rename w1:t1 HL-1 Some epic'],
@@ -154,7 +154,7 @@ describe('Herdr', () => {
 
 	it.effect('sees no tabs while its workspace does not exist', () =>
 		Effect.gen(function* () {
-			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'herdr-linear' });
+			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'sapphire-agent' });
 
 			assert.deepStrictEqual(yield* herdr.workspaceTabs, []);
 			assert.deepStrictEqual(
@@ -325,7 +325,7 @@ describe('Herdr events', () => {
 			);
 			const received = yield* Queue.unbounded<HerdrEvent>();
 			const subscription = {
-				id: 'herdr-linear',
+				id: 'sapphire-agent',
 				method: 'events.subscribe',
 				params: {
 					subscriptions: [
@@ -386,11 +386,11 @@ describe('Herdr events', () => {
 const fakeHerdr = Effect.all([Herdr, FakeHerdr]).pipe(Effect.provide(FakeHerdr.layer.pipe(Layer.provide(AppConfig.layerTest(configDirectory)))));
 
 describe('FakeHerdr', () => {
-	it.effect('lists only the tabs of the configured workspace', () =>
+	it.effect("lists the tabs of every team's workspace and the command workspace, and no others", () =>
 		Effect.gen(function* () {
 			const [herdr, fake] = yield* fakeHerdr;
-			const owned = fake.addTab({ label: 'HL-3 Fix login', agentStatus: 'idle', tail: 'Done.' });
-			const notes = fake.addTab({ label: 'notes' });
+			const owned = fake.addTab({ label: 'HL-3 Fix login', workspace: 'Test', agentStatus: 'idle', tail: 'Done.' });
+			const command = fake.addTab({ label: '@bot CMD-1' });
 
 			fake.addTab({ label: 'HL-4 Elsewhere', workspace: 'personal' });
 
@@ -398,7 +398,7 @@ describe('FakeHerdr', () => {
 				(yield* herdr.workspaceTabs).map(({ identifier, tabId, paneId, agentStatus }) => [identifier, tabId, paneId, agentStatus]),
 				[
 					[Option.some('HL-3'), owned.tabId, owned.paneId, 'idle'],
-						[Option.none(), notes.tabId, notes.paneId, 'working'],
+					[Option.none(), command.tabId, command.paneId, 'working'],
 				],
 			);
 		}),
@@ -407,14 +407,14 @@ describe('FakeHerdr', () => {
 	it.effect('starts Claude as configured and records starts, keys and prompts', () =>
 		Effect.gen(function* () {
 			const [herdr, fake] = yield* fakeHerdr;
-			const { tabId, paneId } = yield* herdr.openTab('HL-5 Sync', '/work/hl-5');
+			const { tabId, paneId } = yield* herdr.openTab('Test', 'HL-5 Sync', '/work/hl-5');
 
 			assert.strictEqual(yield* herdr.startClaude(paneId, 'hl-5', 'Work on HL-5.\nGo.'), 'starting');
 			assert.deepStrictEqual(Option.map(yield* herdr.agent(paneId), ({ agentStatus }) => agentStatus), Option.some('working'));
 
 			fake.setStartBehaviour('no-agent');
 
-			const other = yield* herdr.openTab('HL-6 Other', '/work/hl-6');
+			const other = yield* herdr.openTab('Test', 'HL-6 Other', '/work/hl-6');
 
 			assert.strictEqual(yield* herdr.startClaude(other.paneId, 'hl-6', 'Work on HL-6.'), 'starting');
 			assert.deepStrictEqual(yield* herdr.agent(other.paneId), Option.none());
@@ -441,7 +441,7 @@ describe('FakeHerdr', () => {
 
 			// The workspace is created (write 1); renaming its tab (write 2) fails.
 			fake.failWrite(2, transient);
-			assert.deepStrictEqual(yield* herdr.openTab('HL-7 Crash', '/work/hl-7').pipe(Effect.flip), transient);
+			assert.deepStrictEqual(yield* herdr.openTab('Test', 'HL-7 Crash', '/work/hl-7').pipe(Effect.flip), transient);
 			assert.deepStrictEqual(
 				fake.tabs().map(({ label }) => label),
 				['1'],

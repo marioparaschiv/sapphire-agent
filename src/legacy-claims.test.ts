@@ -9,7 +9,7 @@ import { AppConfig } from './config.ts';
 import { refuseUndrainedClaims } from './legacy-claims.ts';
 
 const stateDirectory = () => {
-	const dir = mkdtempSync(join(tmpdir(), 'herdr-linear-claims-'));
+	const dir = mkdtempSync(join(tmpdir(), 'sapphire-agent-claims-'));
 
 	onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
 

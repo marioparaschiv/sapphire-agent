@@ -70,7 +70,7 @@ export class GitHub extends Context.Service<
 		// A conversation comment on the issue or PR.
 		readonly postComment: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 	}
->()('herdr-linear/GitHub') {
+>()('sapphire-agent/GitHub') {
 	static readonly layer = Layer.effect(
 		GitHub,
 		Effect.gen(function* () {

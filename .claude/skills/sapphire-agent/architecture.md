@@ -23,7 +23,7 @@ The observation (`Observation`) holds:
 | `teams` | Configured teams found in Linear with every configured workflow state, by team id. A team that is missing, or lacks a state, is left out and its epics are not touched. |
 | `epics` | Every epic the journal tracks (wherever it is now), every ready epic, and the epics named by owned tabs and worktree branches. |
 | `ready` | Top-level epics in a team's ready state, at most 50. |
-| `tabs` | Every tab in the herdr-linear workspace, renamed ones included. |
+| `tabs` | Every tab in the sapphire-agent workspace, renamed ones included. |
 | `worktrees` | Every worktree under the worktrees directory of a configured or tracked repo, herdr's own included. |
 
 Rules run in this order (`rules.ts`):

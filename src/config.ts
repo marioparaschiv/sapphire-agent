@@ -95,7 +95,7 @@ const env = {
 	herdrSocketPath: Config.NonEmptyString('HERDR_SOCKET_PATH'),
 	configDirectory: Config.NonEmptyString('HERDR_PLUGIN_CONFIG_DIR'),
 	stateDirectory: Config.NonEmptyString('HERDR_PLUGIN_STATE_DIR'),
-	linearKeyFile: Config.NonEmptyString('HERDR_LINEAR_KEY_FILE').pipe(Config.withDefault(join(homedir(), '.config/herdr-linear/linear-key'))),
+	linearKeyFile: Config.NonEmptyString('SAPPHIRE_AGENT_LINEAR_KEY_FILE').pipe(Config.withDefault(join(homedir(), '.config/sapphire-agent/linear-key'))),
 	claudeConfigPath: Config.NonEmptyString('CLAUDE_CONFIG_PATH').pipe(Config.withDefault(join(homedir(), '.claude.json'))),
 };
 
@@ -207,7 +207,7 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 	};
 });
 
-export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('herdr-linear/AppConfig') {
+export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sapphire-agent/AppConfig') {
 	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
 	// Defaults plus one team and the bot, with every path under `directory`, a freshly generated App key and the webhook

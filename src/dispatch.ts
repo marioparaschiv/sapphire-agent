@@ -9,7 +9,7 @@ import { GitHub, type PullRequest } from './github.ts';
 import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
 import { Journal, type Job, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { activeRoles, hasRole, isInFlight, makeWarnOnce, type Observation, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, isInFlight, type Observation, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { makeFlag } from './run-actions.ts';
@@ -97,11 +97,10 @@ const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identi
 const isOver = (run: Run) => run.status === 'ended' || run.status === 'kept' || (run.status === 'error' && run.startedAt === null);
 
 // Claims ready epics up to maxInFlight, in Linear's order: a top-level epic in the ready state of a resolved team,
-// with sub-issues, without the stuck label, and with no run or only one that is over.
+// without the stuck label, and with no run or only one that is over.
 export const dispatchRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
-	const warnOnce = makeWarnOnce();
 
 	const claim = (epic: Epic) =>
 		Effect.gen(function* () {
@@ -125,11 +124,6 @@ export const dispatchRule = Effect.gen(function* () {
 			const work: Array<EpicWork> = [];
 
 			for (const epic of candidates) {
-				if (epic.children.nodes.length === 0) {
-					yield* warnOnce(`${epic.identifier} is in ${config.states.ready} but has no sub-issues; ignoring it`);
-					continue;
-				}
-
 				if (inFlight >= config.maxInFlight) {
 					break;
 				}
@@ -188,7 +182,7 @@ export const startRule = Effect.gen(function* () {
 		const { job } = run;
 
 		return job._tag === 'orchestrate'
-			? Effect.succeed(prompts.orchestrate(epic))
+			? Effect.succeed(epic.children.nodes.length === 0 ? prompts.inline(epic) : prompts.orchestrate(epic))
 			: Effect.map(pullRequestOf(run), (pullRequest) => prompts.followUp(epic, { pullRequestUrl: pullRequest.url, threadIds: job.threadIds, instruction: job.instruction }));
 	};
 
@@ -241,7 +235,7 @@ export const startRule = Effect.gen(function* () {
 				// The observation is from the start of the tick; an earlier rule may have closed the tab since.
 				const live = Option.isSome(found) && Option.isSome(yield* herdr.pane(found.value.paneId)) ? found : Option.none();
 				const tab = yield* Option.match(live, {
-					onNone: () => herdr.openTab(prompts.tabLabel(epic), path),
+					onNone: () => herdr.openTab(epic.team.name, prompts.tabLabel(epic), path),
 					onSome: (adopted) => Effect.log(`adopting tab ${adopted.tabId}`).pipe(Effect.as(adopted)),
 				});
 

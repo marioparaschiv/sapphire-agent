@@ -68,7 +68,7 @@ export class GitHubApp extends Context.Service<
 		// Asks GitHub to send the delivery again, as a new attempt with the same `guid`.
 		readonly redeliver: (id: string) => Effect.Effect<void, CallError>;
 	}
->()('herdr-linear/GitHubApp') {
+>()('sapphire-agent/GitHubApp') {
 	// Reads the App's slug from GitHub, so it fails to build when the App id, key or GitHub is wrong.
 	static readonly layer = (apiUrl = 'https://api.github.com') =>
 		Layer.effect(

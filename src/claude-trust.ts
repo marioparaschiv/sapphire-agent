@@ -18,7 +18,7 @@ export class ClaudeTrust extends Context.Service<
 		// Pre-accepts Claude Code's folder trust dialog for `folder` in ~/.claude.json.
 		readonly trustFolder: (folder: string) => Effect.Effect<void, Permanent | Transient>;
 	}
->()('herdr-linear/ClaudeTrust') {
+>()('sapphire-agent/ClaudeTrust') {
 	static readonly layer = Layer.effect(
 		ClaudeTrust,
 		Effect.gen(function* () {
@@ -56,7 +56,7 @@ export class ClaudeTrust extends Context.Service<
 
 					const next = { ...config, projects: { ...config.projects, [folder]: { ...project, hasTrustDialogAccepted: true } } };
 
-					yield* fs.copyFile(path, `${path}.herdr-linear.bak`);
+					yield* fs.copyFile(path, `${path}.sapphire-agent.bak`);
 
 					if ((yield* fs.readFileString(path)) !== before) {
 						return false;

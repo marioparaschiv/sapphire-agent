@@ -19,7 +19,7 @@ export type Observation = {
 	readonly epics: ReadonlyMap<string, Epic>;
 	// Top-level epics in a team's ready state, at most 50.
 	readonly ready: ReadonlyArray<Epic>;
-	// Every tab in the herdr-linear workspace, renamed ones included.
+	// Every tab in the sapphire-agent workspace, renamed ones included.
 	readonly tabs: ReadonlyArray<WorkspaceTab>;
 	// Every worktree under the worktrees directory of a configured or tracked repo, herdr's own included.
 	readonly worktrees: ReadonlyArray<Worktree>;
@@ -134,7 +134,7 @@ const resolveTeams = (config: AppConfigShape, teams: ReadonlyArray<Team>, warn: 
 		return resolved;
 	});
 
-export class Observer extends Context.Service<Observer, { readonly observe: Effect.Effect<Observation, CallError | JournalError> }>()('herdr-linear/Observer') {
+export class Observer extends Context.Service<Observer, { readonly observe: Effect.Effect<Observation, CallError | JournalError> }>()('sapphire-agent/Observer') {
 	static readonly layer = Layer.effect(
 		Observer,
 		Effect.gen(function* () {

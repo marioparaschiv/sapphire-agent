@@ -12,7 +12,7 @@ class Bug extends Data.TaggedError('Bug')<{ readonly message: string }> {}
 const tickWith = (rules: ReadonlyArray<Rule>) =>
 	Planner.use((planner) => planner.tick({ paused: false })).pipe(Effect.provide(Planner.layer(Effect.succeed(rules))));
 
-const withPlanner = (settings: Parameters<typeof plannerDependencies>[1] = {}) => Effect.provide(plannerDependencies('/tmp/herdr-linear-planner-test', settings));
+const withPlanner = (settings: Parameters<typeof plannerDependencies>[1] = {}) => Effect.provide(plannerDependencies('/tmp/sapphire-agent-planner-test', settings));
 
 // One rule whose work for the epic fails with whatever `outcome` holds at the time.
 const failingRule = (epicId: string, identifier: string, outcome: Ref.Ref<Effect.Effect<void, Transient | Permanent>>): Rule => ({

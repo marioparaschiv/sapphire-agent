@@ -27,7 +27,6 @@ describe('dispatch', () => {
 			const h = yield* makeHarness();
 			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
-			h.linear.addEpic({ identifier: 'TEST-11', title: 'No slices yet', subIssues: 0 });
 			yield* h.tick;
 
 			const worktree = join(h.dir, 'worktrees', 'repo', 'mario-test-10-plugin-settings-sync');
@@ -43,16 +42,31 @@ describe('dispatch', () => {
 				{
 					paneId: tab.paneId,
 					name: 'test-10',
-					prompt: '/orchestrate the sub-issues of Linear epic TEST-10 (https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync) autonomously, in the worktree you are in.',
+					prompt: '/orchestrate Linear epic TEST-10 autonomously',
 					args: [],
 				},
 			]);
+			assert.strictEqual(tab.workspace, 'Test');
 			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
-			assert.strictEqual(h.linear.stateName('issue-test-11'), 'Ready For Agent');
 			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[worktree].hasTrustDialogAccepted);
 
 			yield* h.tick;
 			assert.deepStrictEqual(h.herdr.starts().length, 1);
+		}),
+	);
+
+	it.effect('starts an epic without sub-issues on /orchestrate inline', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const epic = h.linear.addEpic({ identifier: 'TEST-11', title: 'Fix the file leak', subIssues: 0 });
+
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				h.herdr.starts().map((start) => start.prompt),
+				['/orchestrate Linear epic TEST-11 inline autonomously'],
+			);
+			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
 		}),
 	);
 

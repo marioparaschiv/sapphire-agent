@@ -394,6 +394,6 @@ const make = (endpoint: string) =>
 		});
 	});
 
-export class Linear extends Context.Service<Linear, LinearShape>()('herdr-linear/Linear') {
+export class Linear extends Context.Service<Linear, LinearShape>()('sapphire-agent/Linear') {
 	static readonly layer = (endpoint = 'https://api.linear.app/graphql') => Layer.effect(Linear, make(endpoint));
 }
