@@ -19,6 +19,7 @@ const describeRun = (run: Run, epicState: string) =>
 		`claimed ${new Date(run.claimedAt).toISOString()}`,
 		run.tabId === null ? 'no tab' : `tab ${run.tabId}`,
 		run.session === null ? 'no session' : `session ${run.session.name}`,
+		...(run.replyTo === null ? [] : [`reply-to ${run.replyTo}`]),
 		run.worktreePath ?? 'no worktree',
 	].join(', ');
 
@@ -26,6 +27,8 @@ const describeCommand = (command: CommandRow) => `${commandIdentifier(command)} 
 
 const describeRequest = (request: Request) => {
 	switch (request._tag) {
+		case 'start':
+			return `start ${request.identifier}${request.replyTo === null ? '' : ` reply-to ${request.replyTo}`}`;
 		case 'stop':
 			return `stop ${request.identifier}`;
 		case 'send':
@@ -88,37 +91,50 @@ const status = Command.make('status', {}, () =>
 	}),
 ).pipe(Command.withDescription('The runs with their epics, the commands in flight and the requests not acted on yet'));
 
-const start = Command.make('start', { epic: epicArgument }, ({ epic: identifier }) =>
-	Effect.gen(function* () {
-		const config = yield* AppConfig;
-		const linear = yield* Linear;
-		const [epic] = yield* linear.epicsByIdentifier([identifier]);
+const start = Command.make(
+	'start',
+	{
+		epic: epicArgument,
+		replyTo: Flag.String('reply-to').pipe(
+			Flag.withDescription('The Claude session the run asks its questions'),
+			Flag.filter((session) => session.trim() !== '', () => 'a session name'),
+			Flag.optional,
+		),
+	},
+	({ epic: identifier, replyTo }) =>
+		Effect.gen(function* () {
+			const config = yield* AppConfig;
+			const linear = yield* Linear;
+			const [epic] = yield* linear.epicsByIdentifier([identifier]);
 
-		if (!epic) {
-			return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
-		}
+			if (!epic) {
+				return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
+			}
 
-		if (!config.teams[epic.team.name]) {
-			return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
-		}
+			if (!config.teams[epic.team.name]) {
+				return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
+			}
 
-		const ready = Option.fromUndefinedOr((yield* linear.teams([epic.team.name]))[0]?.states.nodes.find((state) => state.name === config.states.ready));
+			const ready = Option.fromUndefinedOr((yield* linear.teams([epic.team.name]))[0]?.states.nodes.find((state) => state.name === config.states.ready));
 
-		if (Option.isNone(ready)) {
-			return yield* new Refused({ message: `team ${epic.team.name} has no workflow state ${config.states.ready}` });
-		}
+			if (Option.isNone(ready)) {
+				return yield* new Refused({ message: `team ${epic.team.name} has no workflow state ${config.states.ready}` });
+			}
 
-		if (epic.state.id !== ready.value.id) {
-			yield* linear.moveIssue(epic.id, ready.value.id);
-		}
+			// Recorded before the move, so the claim that follows it finds the request.
+			yield* Journal.use((journal) => journal.addRequest({ _tag: 'start', identifier, replyTo: Option.getOrNull(replyTo) }));
 
-		const stuck = epic.labels.nodes.some((label) => label.name === config.labels.stuck);
+			if (epic.state.id !== ready.value.id) {
+				yield* linear.moveIssue(epic.id, ready.value.id);
+			}
 
-		yield* wake;
-		yield* Console.log(
-			`${identifier} is in ${config.states.ready}${stuck ? `, but it has the ${config.labels.stuck} label, so it is not dispatched until that is removed` : '; it is dispatched once a slot is free'}`,
-		);
-	}),
+			const stuck = epic.labels.nodes.some((label) => label.name === config.labels.stuck);
+
+			yield* wake;
+			yield* Console.log(
+				`${identifier} is in ${config.states.ready}${stuck ? `, but it has the ${config.labels.stuck} label, so it is not dispatched until that is removed` : '; it is dispatched once a slot is free'}`,
+			);
+		}),
 ).pipe(Command.withDescription("Moves the epic to its team's ready state, so it is dispatched"));
 
 const stop = Command.make('stop', { epic: epicArgument }, ({ epic: identifier }) =>

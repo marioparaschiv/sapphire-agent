@@ -74,6 +74,48 @@ describe('dispatch', () => {
 		}),
 	);
 
+	it.effect('claims an epic started with --reply-to replying to that session, as the newest start asked, and drops its start requests', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 3 });
+
+			h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync', state: 'To Do' });
+			h.linear.addEpic({ identifier: 'TEST-11', title: 'Fix the file leak', state: 'To Do', subIssues: 0 });
+			h.linear.addEpic({ identifier: 'TEST-12', title: 'Rename the config', state: 'To Do' });
+			yield* h.ctl('start', 'TEST-10', '--reply-to', 'planning');
+			yield* h.ctl('start', 'TEST-11', '--reply-to', 'planning');
+			yield* h.ctl('start', 'TEST-11', '--reply-to', 'triage');
+			yield* h.ctl('start', 'TEST-12', '--reply-to', 'planning');
+			yield* h.ctl('start', 'TEST-12');
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.identifier, run.replyTo]),
+				[
+					['TEST-10', 'planning'],
+					['TEST-11', 'triage'],
+					['TEST-12', null],
+				],
+			);
+			assert.deepStrictEqual(
+				h.herdr.starts().map((start) => start.prompt),
+				[
+					'/orchestrate Linear epic TEST-10 autonomously, reply-to planning',
+					'/orchestrate Linear epic TEST-11 inline autonomously, reply-to triage',
+					'/orchestrate Linear epic TEST-12 autonomously',
+				],
+			);
+
+			const status = yield* h.ctl('status');
+
+			assert.include(status[0], 'session test-10, reply-to planning, ');
+			assert.notInclude(status[2], 'reply-to');
+			assert.deepStrictEqual(
+				status.filter((line) => line.startsWith('request')),
+				[],
+			);
+		}),
+	);
+
 	it.effect('resumes after a crash before any journal write without a second worktree, tab or start, in the session it was claimed with', () =>
 		Effect.gen(function* () {
 			const crashPoints: Array<number> = [];

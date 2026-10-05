@@ -202,7 +202,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					putCommand: (command) => crashPoint.pipe(Effect.andThen(journal.putCommand(command))),
 					addRequest: (request) => crashPoint.pipe(Effect.andThen(journal.addRequest(request))),
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
-					claimFollowUp: (run, requestId) => crashPoint.pipe(Effect.andThen(journal.claimFollowUp(run, requestId))),
+					claimRun: (run, requestIds) => crashPoint.pipe(Effect.andThen(journal.claimRun(run, requestIds))),
 					setDeliveryMark: (deliveredAt) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveredAt))),
 				});
 			}),
@@ -268,6 +268,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					tabId: tab.tabId,
 					paneId: tab.paneId,
 					session: yield* newSession(epic.identifier),
+					replyTo: null,
 					claimedAt: now,
 					startedAt: now,
 					agentStatus: null,

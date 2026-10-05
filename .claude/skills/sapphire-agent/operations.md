@@ -65,6 +65,7 @@ sh ~/sapphire-agent/scripts/ctl.sh pause                       # touch $STATE/pa
 sh ~/sapphire-agent/scripts/ctl.sh resume                      # rm $STATE/paused
 sh ~/sapphire-agent/scripts/ctl.sh status                      # paused?, service state, runs, commands, requests
 sh ~/sapphire-agent/scripts/ctl.sh start HL-14                 # move the epic to its ready state
+sh ~/sapphire-agent/scripts/ctl.sh start HL-14 --reply-to main  # the same; its run asks Claude session main its questions
 sh ~/sapphire-agent/scripts/ctl.sh stop HL-12                  # end its run, close its tab
 sh ~/sapphire-agent/scripts/ctl.sh send HL-9 Use the existing helper.
 sh ~/sapphire-agent/scripts/ctl.sh follow-up HL-9 Rename it --threads PRRT_kwDO1 --threads PRRT_kwDO2
@@ -75,8 +76,8 @@ sh ~/sapphire-agent/scripts/ctl.sh done CMD-3                  # the command age
 
 - Pause stops new runs only: no ready epic and no follow-up is claimed. Claimed runs still start, runs in flight are still watched, results are still posted, worktrees still cleaned up, and mentions still run commands (so `resume` can come in as one).
 - `pause`, `resume` and every recorded request write `$STATE/wake`, which makes the service tick at once; the log prints `dispatching paused` / `dispatching resumed`.
-- `status`, `start` to `done` run `node src/ctl.ts`, which reads `$HERDR_PLUGIN_CONFIG_DIR/config.json`, the Linear key, the App's private key and webhook secret, and the journal (env defaults as in the unit). `stop`, `send`, `follow-up`, `reply` and `done` only record a request the service acts on (`rules.md`); `start` moves the epic in Linear itself. `session` prints the run's session name, which `SendMessage` from any Claude session on the machine reaches. A refusal (no such run, not a command's comment) goes to stderr with exit code 1.
-- `status` prints one line per run (identifier, status, job, the epic's Linear state, claim time, tab, session, worktree, or `no runs`), then the commands queued or in flight (or `no commands`), then the requests waiting.
+- `status`, `start` to `done` run `node src/ctl.ts`, which reads `$HERDR_PLUGIN_CONFIG_DIR/config.json`, the Linear key, the App's private key and webhook secret, and the journal (env defaults as in the unit). `stop`, `send`, `follow-up`, `reply` and `done` only record a request the service acts on (`rules.md`); `start` records a `start` request (with `--reply-to` the session its run asks, otherwise none), then moves the epic in Linear itself. `session` prints the run's session name, which `SendMessage` from any Claude session on the machine reaches. A refusal (no such run, not a command's comment) goes to stderr with exit code 1.
+- `status` prints one line per run (identifier, status, job, the epic's Linear state, claim time, tab, session, the session it replies to if any, worktree, or `no runs`), then the commands queued or in flight (or `no commands`), then the requests waiting.
 - `pause`, `resume` and `status` are also herdr plugin actions.
 
 ## Drain

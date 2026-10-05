@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, FileSystem, Stream } from 'effect';
+import { CliError } from 'effect/cli';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { Refused } from './ctl.ts';
 import { Journal, type Run } from './journal.ts';
@@ -21,6 +22,7 @@ const run: Run = {
 	tabId: 'w1:t3',
 	paneId: 'w1:p3',
 	session: { id: '3f9a6c12-8e4b-4d71-b0a5-6c2e9f8d1b47', name: 'unb-12' },
+	replyTo: null,
 	claimedAt: Date.UTC(2026, 9, 4, 9, 30),
 	startedAt: Date.UTC(2026, 9, 4, 9, 31),
 	agentStatus: 'working',
@@ -62,10 +64,18 @@ describe('ctl', () => {
 			const held = h.linear.addEpic({ identifier: 'TEST-21', title: 'Held', state: 'To Do', labelIds: [stuck.id] });
 			const ready = h.linear.addEpic({ identifier: 'TEST-22', title: 'Ready' });
 
-			assert.deepStrictEqual(yield* h.ctl('start', 'test-20'), ['TEST-20 is in Ready For Agent; it is dispatched once a slot is free']);
+			assert.deepStrictEqual(yield* h.ctl('start', 'test-20', '--reply-to', 'planning'), ['TEST-20 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-21'), ['TEST-21 is in Ready For Agent, but it has the agent-stuck label, so it is not dispatched until that is removed']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-22'), ['TEST-22 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-99').pipe(Effect.flip), new Refused({ message: 'there is no epic TEST-99 in Linear' }));
+			assert.deepStrictEqual(
+				yield* h.ctl('start', 'TEST-22', '--reply-to', ' ').pipe(Effect.flip),
+				new CliError.ShowHelp({ commandPath: ['ctl', 'start'], errors: [new CliError.InvalidValue({ option: 'reply-to', value: ' ', expected: 'a session name', kind: 'flag' })] }),
+			);
+			assert.deepStrictEqual(
+				(yield* h.ctl('status')).filter((line) => line.startsWith('request')),
+				['request 1: start TEST-20 reply-to planning', 'request 2: start TEST-21', 'request 3: start TEST-22'],
+			);
 
 			assert.deepStrictEqual([reviewed, held, ready].map((epic) => h.linear.stateName(epic.id)), ['Ready For Agent', 'Ready For Agent', 'Ready For Agent']);
 			assert.deepStrictEqual(

@@ -18,7 +18,7 @@ export const followUpRule = Effect.gen(function* () {
 
 	const claim = (run: Run, epic: Epic, requestId: number, { threadIds, instruction }: FollowUpRequest) =>
 		Effect.gen(function* () {
-			yield* journal.claimFollowUp(claimedRun(epic, run.repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier), { _tag: 'follow-up', threadIds, instruction }), requestId);
+			yield* journal.claimRun(claimedRun(epic, run.repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier), { _tag: 'follow-up', threadIds, instruction }), [requestId]);
 			yield* Effect.log(`claimed a follow-up for ${threadIds.length} review threads${instruction === null ? '' : ' and an instruction'}`);
 		});
 

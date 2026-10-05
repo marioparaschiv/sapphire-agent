@@ -72,6 +72,7 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session:
 	tabId: null,
 	paneId: null,
 	session,
+	replyTo: null,
 	claimedAt,
 	startedAt: null,
 	agentStatus: null,
@@ -103,17 +104,23 @@ export const dispatchRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
 
-	const claim = (epic: Epic) =>
+	// The newest start request names the session the run replies to; the claim drops them all.
+	const claim = (epic: Epic, starts: ReadonlyArray<{ readonly id: number; readonly replyTo: string | null }>) =>
 		Effect.gen(function* () {
 			const repo = yield* repoOf(config, epic);
+			const replyTo = starts.at(-1)?.replyTo ?? null;
 
-			yield* journal.putRun(claimedRun(epic, repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier)));
+			yield* journal.claimRun(
+				{ ...claimedRun(epic, repo, yield* Clock.currentTimeMillis, yield* newSession(epic.identifier)), replyTo },
+				starts.map(({ id }) => id),
+			);
 			yield* Effect.log(`claimed for ${repo} on ${epic.branchName}`);
 		});
 
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
+			const requests = yield* journal.listRequests;
 			const candidates = observation.ready
 				.filter((epic) => {
 					const run = runs.find((candidate) => candidate.epicId === epic.id);
@@ -130,7 +137,10 @@ export const dispatchRule = Effect.gen(function* () {
 				}
 
 				inFlight += 1;
-				work.push({ epicId: epic.id, identifier: epic.identifier, teamId: epic.team.id, apply: claim(epic) });
+
+				const starts = requests.flatMap(({ id, request }) => (request._tag === 'start' && request.identifier === epic.identifier ? [{ id, replyTo: request.replyTo }] : []));
+
+				work.push({ epicId: epic.id, identifier: epic.identifier, teamId: epic.team.id, apply: claim(epic, starts) });
 			}
 
 			return work;
@@ -186,7 +196,7 @@ export const startRule = Effect.gen(function* () {
 		const { job } = run;
 
 		return job._tag === 'orchestrate'
-			? Effect.succeed(epic.children.nodes.length === 0 ? prompts.inline(epic) : prompts.orchestrate(epic))
+			? Effect.succeed(epic.children.nodes.length === 0 ? prompts.inline(epic, run.replyTo) : prompts.orchestrate(epic, run.replyTo))
 			: Effect.map(pullRequestOf(run), (pullRequest) => prompts.followUp(epic, { pullRequestUrl: pullRequest.url, threadIds: job.threadIds, instruction: job.instruction }));
 	};
 

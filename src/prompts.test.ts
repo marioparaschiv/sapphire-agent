@@ -11,7 +11,15 @@ const epic = {
 
 describe('Prompts', () => {
 	it.effect('asks the orchestrate skill to run the epic', () =>
-		withPrompts((prompts) => assert.strictEqual(prompts.orchestrate(epic), '/orchestrate Linear epic HL-8 autonomously')),
+		withPrompts((prompts) => assert.strictEqual(prompts.orchestrate(epic, null), '/orchestrate Linear epic HL-8 autonomously')),
+	);
+
+	it.effect('names the session that asked for the run, inline or not', () =>
+		withPrompts((prompts) => {
+			assert.strictEqual(prompts.orchestrate(epic, 'planning'), '/orchestrate Linear epic HL-8 autonomously, reply-to planning');
+			assert.strictEqual(prompts.inline(epic, 'planning'), '/orchestrate Linear epic HL-8 inline autonomously, reply-to planning');
+			assert.strictEqual(prompts.inline(epic, null), '/orchestrate Linear epic HL-8 inline autonomously');
+		}),
 	);
 
 	it.effect('asks the follow-up skill to answer the threads it was given', () =>
@@ -54,6 +62,7 @@ describe('Prompts', () => {
 			assert.include(prompt, 'You are CMD-3, the sapphire-agent command agent. @marioparaschiv mentioned the bot in https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 (marioparaschiv/unbound#120) and wrote: "@orchestratorbot stop UNB-12\\nthen start UNB-14".');
 			assert.include(prompt, '`sh /home/dev/sapphire-agent/scripts/ctl.sh <subcommand>`');
 			assert.include(prompt, "session <EPIC-ID> (prints the Claude session name of the epic's run)");
+			assert.include(prompt, 'start <EPIC-ID> [--reply-to <session>] (moves the epic to its ready state so it is dispatched; its run asks that Claude session its questions);');
 			assert.include(prompt, 'reply https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 <text>; done CMD-3.');
 			assert.isTrue(prompt.endsWith('then run done CMD-3.'));
 			assert.strictEqual(prompts.commandTabLabel({ identifier: 'CMD-3' }), '@bot CMD-3');

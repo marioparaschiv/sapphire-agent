@@ -25,6 +25,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 | `worktree_path` | Set once the worktree exists. |
 | `tab_id`, `pane_id` | Set once the tab exists. Both must match herdr for the tab to count as the run's. |
 | `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded. |
+| `reply_to` | The Claude session that asked for the run (`ctl.sh start --reply-to`), taken from the newest `start` request at the claim. The prompt names it and the agent asks it its questions. Null: the agent asks on Linear. |
 | `claimed_at` | Claim time. Keys most markers, starts the wall-clock cap and the start timeout. |
 | `started_at` | When Claude was confirmed started. Decides the run's states and whether it ever started. |
 | `agent_status`, `agent_status_since` | Last observed agent status and when it or (while working) the output last changed: the awaitingInput and stale timers. |
@@ -55,7 +56,7 @@ One row per comment that mentioned the bot, written by the webhook server before
 
 ### `requests`
 
-What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
+What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
 ### `delivery_mark`
 
@@ -63,7 +64,7 @@ At most one row: `delivered_at` (ms), when the newest App webhook delivery the l
 
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimFollowUp` (records the claim and drops its request in one transaction); `deliveryMark`, `setDeliveryMark`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimRun` (records the claim and drops its requests in one transaction); `deliveryMark`, `setDeliveryMark`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
 The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, session, worktree), the commands in flight and the requests waiting.
 
@@ -111,7 +112,7 @@ Writes without a marker are idempotent by their effect: a move is skipped when t
 Every multi-step action is ordered so that a crash at any step leaves something the next tick finishes, without posting twice or skipping a step:
 
 - Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, and Claude found in the pane is not started again. Commands start the same way.
-- A follow-up claim and the drop of its request are one transaction.
+- A claim and the drop of its requests (a follow-up's, or an epic's `start` requests) are one transaction.
 - A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, and the next delivery scan redelivers it; a command is keyed by its comment, so a redelivery records nothing twice.
 - The delivery scan requests every redelivery before it moves the delivery mark, so a crash mid-scan leaves the mark where it was and the next scan looks at the same deliveries again; a redelivery that already went through shows as a later success and is not repeated.
 - A reply or a failure notice of a command is posted before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
