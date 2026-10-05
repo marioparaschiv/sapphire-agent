@@ -138,6 +138,8 @@ A failed scan (GitHub unreachable or refusing, a journal error) is logged as `ca
 
 Not paused. Runs the command agents, one at a time, oldest first. Command statuses: `ignored`, `queued` (waiting for its turn), `claimed` (its turn came; being started), `running`, `ended` (the agent said it was done; tab closed), `error` (failed; the comment got a reply saying so; tab closed). Commands hold no `maxInFlight` slot: a stop or a pause must work while every slot is taken, so at most `maxInFlight` runs plus one command agent are alive.
 
+A `queued`, `claimed` or `running` command whose comment has no thumbs-up yet gets one from the GitHub App first, so its author sees the bot has it while it waits for its turn; the time is kept as `acknowledged_at`. A Transient failure is tried again next tick without holding up the command; a Permanent one is logged and not tried again. Ignored mentions get none.
+
 Start, each step looking at what is already there, as the start rule does:
 
 1. Claim: `claimed`, with the claim time and a new session named `cmd-<n>`.

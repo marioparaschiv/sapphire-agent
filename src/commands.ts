@@ -9,7 +9,7 @@ import { describeAgent, runsClaude, sessionClaudeArgs } from './dispatch.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { Herdr } from './herdr.ts';
-import { type Command, commandIdentifier, Journal, newSession } from './journal.ts';
+import { type Command, commandIdentifier, type CommandStatus, Journal, newSession } from './journal.ts';
 import { isSameWatch, quietStatuses, tailHash, trackAgent } from './monitoring.ts';
 import { type Observation, observedAgentStatus } from './observation.ts';
 import type { Rule, TaskWork } from './planner.ts';
@@ -20,6 +20,10 @@ export const ctlPath = fileURLToPath(new URL('../scripts/ctl.sh', import.meta.ur
 
 // Read-only gh and git subcommands a command's agent may run, besides the CLI. `--output` would make git write a file.
 const readOnlyCommands = ['gh pr view', 'gh pr diff', 'gh pr checks', 'gh issue view', 'git log', 'git show', 'git diff', 'git status'];
+
+// The commands whose comment still gets a thumbs-up when it has none: an ignored one never does, and one that ended
+// or failed has had its answer.
+const acknowledgedStatuses: ReadonlyArray<CommandStatus> = ['queued', 'claimed', 'running'];
 
 // The tools besides Bash, each allowed in full.
 const allowedTools = ['Read', 'Grep', 'Glob', 'SendMessage'];
@@ -261,6 +265,18 @@ export const commandsRule = Effect.gen(function* () {
 			Effect.andThen(journal.deleteRequest(requestId)),
 		);
 
+	// A thumbs-up on the comment tells its author the bot has it, before any reply. One that fails for now is tried again
+	// next tick without holding up the command; one that cannot be given is not tried again.
+	const acknowledge = (command: Command) =>
+		github.addThumbsUp(command.repo, command.commentId).pipe(
+			Effect.andThen(Effect.log(`gave ${command.url} a thumbs-up`)),
+			Effect.catchTag('Permanent', (error) => Effect.logError(`cannot give ${command.url} a thumbs-up`, error)),
+			Effect.andThen(Clock.currentTimeMillis),
+			Effect.map((now): Command => ({ ...command, acknowledgedAt: now })),
+			Effect.tap(journal.putCommand),
+			Effect.catchTag('Transient', (error) => Effect.logWarning(`cannot give ${command.url} a thumbs-up yet; trying again next tick`, error).pipe(Effect.as(command))),
+		);
+
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
 			const commands = yield* journal.listCommands;
@@ -269,25 +285,35 @@ export const commandsRule = Effect.gen(function* () {
 			const next = commands.find((command) => command.status === 'claimed') ?? (running ? undefined : commands.find((command) => command.status === 'queued'));
 			const work: Array<TaskWork> = [];
 
-			for (const command of commands) {
-				const own = requests.filter(({ request }) => request.commandId === command.id);
-				const replies = own.flatMap(({ id, request }) => (request._tag === 'reply' ? [postReply(command, id, request.body)] : []));
+			for (const listed of commands) {
+				const own = requests.filter(({ request }) => request.commandId === listed.id);
+				const replies = own.flatMap(({ id, request }) => (request._tag === 'reply' ? [postReply(listed, id, request.body)] : []));
 				const done = own.flatMap(({ id, request }) => (request._tag === 'done' ? [id] : []));
+				const unacknowledged = listed.acknowledgedAt === null && acknowledgedStatuses.includes(listed.status);
+				// Given the command as acknowledged, so its own write keeps acknowledgedAt.
 				const lifecycle =
-					command.status === 'running'
-						? Option.some(watch(observation, command, done))
-						: command === next
-							? Option.some(start(observation, commands, command))
+					listed.status === 'running'
+						? Option.some((command: Command) => watch(observation, command, done))
+						: listed === next
+							? Option.some((command: Command) => start(observation, commands, command))
 							: // A done request outlives its command only when a crash came between ending it and dropping the request.
-								Option.some(Effect.forEach(done, journal.deleteRequest, { discard: true })).pipe(Option.filter(() => done.length > 0));
+								Option.some(() => Effect.forEach(done, journal.deleteRequest, { discard: true })).pipe(Option.filter(() => done.length > 0));
 
-				if (replies.length === 0 && Option.isNone(lifecycle)) {
+				if (!unacknowledged && replies.length === 0 && Option.isNone(lifecycle)) {
 					continue;
 				}
 
 				work.push({
-					task: commandIdentifier(command),
-					apply: Effect.all([...replies, ...Option.toArray(lifecycle)], { discard: true }).pipe(
+					task: commandIdentifier(listed),
+					apply: Effect.gen(function* () {
+						const command = unacknowledged ? yield* acknowledge(listed) : listed;
+
+						yield* Effect.all(replies, { discard: true });
+
+						if (Option.isSome(lifecycle)) {
+							yield* lifecycle.value(command);
+						}
+					}).pipe(
 						// Only what cannot be helped fails a command; the rest is tried again next tick.
 						Effect.catchTag('Transient', (error) => Effect.logWarning('failed; retrying next tick', error)),
 					),

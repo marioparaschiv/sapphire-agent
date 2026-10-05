@@ -53,6 +53,7 @@ One row per comment that mentioned the bot, written by the webhook server before
 | `session` | As for runs, named `cmd-<id>`; made when its turn comes. |
 | `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
 | `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
+| `acknowledged_at` | When the comment got the App's thumbs-up; null until then, and for ignored commands. Adding a reaction twice changes nothing on GitHub, so a crash before this is written only repeats the call. |
 
 ### `requests`
 

@@ -102,6 +102,8 @@ export const NewCommand = Schema.Struct({
 	agentStatusSince: Schema.NullOr(Millis),
 	nudgedAt: Schema.NullOr(Millis),
 	tailHash: Schema.NullOr(Schema.String),
+	// When the comment got the App's thumbs-up, which tells its author the bot has it before any reply.
+	acknowledgedAt: Schema.NullOr(Millis),
 });
 
 export type NewCommand = typeof NewCommand.Type;
@@ -235,6 +237,11 @@ const migrations = SqliteMigrator.layer({
 			const sql = yield* SqlClient.SqlClient;
 
 			yield* sql`ALTER TABLE runs ADD COLUMN reply_to TEXT`;
+		}),
+		'0006_add_command_acknowledged_at': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE commands ADD COLUMN acknowledged_at INTEGER`;
 		}),
 	}),
 });
