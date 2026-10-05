@@ -17,10 +17,10 @@ const askedByMessage = (h: Harness, seed: Partial<StartedRunSeed> = {}) =>
 		const started = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: `⏺ SendMessage(${replyTo})\n  ⎿  Sent`, replyTo, ...seed });
 		const session = { id: started.run.session.id, cwd: started.run.worktreePath };
 		const asked = [
-			entries.prompt(session, `/orchestrate Linear epic TEST-10 autonomously, reply-to ${replyTo}`),
-			entries.text(session, 'The sync needs a conflict rule before I can write the merge step.'),
-			entries.sentMessage(session, replyTo, 'TEST-10: Which should win on a conflict,\nlocal or remote?'),
-			entries.text(session, `Asked ${replyTo}; waiting for the reply.`),
+			...entries.prompt(session, `/orchestrate Linear epic TEST-10 autonomously, reply-to ${replyTo}`),
+			...entries.text(session, 'The sync needs a conflict rule before I can write the merge step.'),
+			...entries.sentMessage(session, replyTo, 'TEST-10: Which should win on a conflict,\nlocal or remote?'),
+			...entries.text(session, `Asked ${replyTo}; waiting for the reply.`),
 		];
 
 		h.writeTranscript(session, asked);
@@ -278,7 +278,7 @@ describe('monitoring', () => {
 
 			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 
-			h.writeTranscript(session, [...asked, entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.')]);
+			h.writeTranscript(session, [...asked, ...entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.')]);
 			yield* h.tick;
 
 			const [flagged] = h.linear.comments(epic.id);
@@ -309,7 +309,7 @@ describe('monitoring', () => {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
 			const { epic, session, asked } = yield* askedByMessage(h, { tail: question });
 
-			h.writeTranscript(session, [...asked, entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.'), entries.text(session, 'The sync needs a second conflict rule.')]);
+			h.writeTranscript(session, [...asked, ...entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.'), ...entries.text(session, 'The sync needs a second conflict rule.')]);
 			yield* h.tick;
 			yield* TestClock.adjust('3 minutes');
 			yield* h.tick;

@@ -139,7 +139,7 @@ export type Harness = {
 	// Writes the run's result file where the agent writes it.
 	readonly writeResultFile: (run: Run, contents: string) => void;
 	// Writes the Claude session's transcript where Claude Code writes it.
-	readonly writeTranscript: (session: TranscriptSession, entries: ReadonlyArray<ReadonlyArray<Record<string, unknown>>>) => void;
+	readonly writeTranscript: (session: TranscriptSession, entries: ReadonlyArray<Record<string, unknown>>) => void;
 	// Paths of the worktrees git knows under the worktrees directory.
 	readonly worktrees: () => ReadonlyArray<string>;
 	readonly hasBranch: (branch: string) => boolean;
@@ -334,7 +334,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 				writeFileSync(join(git(run.worktreePath, 'rev-parse', '--absolute-git-dir'), 'herdr-result.json'), contents);
 			},
-			writeTranscript: (session, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries.flat()),
+			writeTranscript: (session, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries),
 			worktrees: () =>
 				git(repo, 'worktree', 'list', '--porcelain')
 					.split('\n')
