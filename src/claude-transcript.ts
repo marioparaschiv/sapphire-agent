@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Context, Effect, FileSystem, Layer, Option, type PlatformError, Schema } from 'effect';
+import { Context, Effect, FileSystem, Layer, Option, Schema } from 'effect';
 import { Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 
@@ -95,7 +95,7 @@ export class ClaudeTranscript extends Context.Service<
 
 						return pendingIn(text.split('\n'), to);
 					}).pipe(
-						Effect.catchTag('PlatformError', (error: PlatformError.PlatformError) =>
+						Effect.catchTag('PlatformError', (error) =>
 							error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(new Permanent({ message: error.message, cause: error })),
 						),
 					),
