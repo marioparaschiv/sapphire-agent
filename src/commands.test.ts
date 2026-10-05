@@ -47,7 +47,10 @@ describe('commands', () => {
 			const [start] = h.herdr.starts();
 
 			assert.deepStrictEqual(yield* statuses(h), ['running', 'queued']);
-			assert.deepStrictEqual([tab.cwd, tab.env.HERDR_PLUGIN_STATE_DIR, tab.env.HERDR_PLUGIN_CONFIG_DIR, tab.env.CLAUDE_CONFIG_PATH], [h.repo, h.dir, h.dir, join(h.dir, 'claude.json')]);
+			assert.deepStrictEqual(
+				[tab.workspace, tab.cwd, tab.env.HERDR_PLUGIN_STATE_DIR, tab.env.HERDR_PLUGIN_CONFIG_DIR, tab.env.CLAUDE_CONFIG_PATH],
+				['Test', h.repo, h.dir, h.dir, join(h.dir, 'claude.json')],
+			);
 			assert.deepStrictEqual([start.paneId, start.name, start.args], [tab.paneId, 'cmd-1', commandClaudeArgs(ctlPath)]);
 			assert.include(start.prompt, `You are CMD-1, the sapphire-agent command agent. @marioparaschiv mentioned the bot in ${comment.url} (test/repo#1) and wrote: "@orchestratorbot stop TEST-12 and start TEST-14".`);
 			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[h.repo].hasTrustDialogAccepted);
@@ -190,6 +193,16 @@ describe('commands', () => {
 				assert.deepStrictEqual(markerKeys([failed]), [`commandFailed:${(yield* h.commands)[0].claimedAt}`], name);
 				assert.isTrue(Option.isNone(h.herdr.tab(tab.tabId)), name);
 			}
+		}),
+	);
+
+	it.effect('opens the tab of a command for a repo of no team in the command workspace', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+
+			yield* mention(h, '@orchestratorbot what is running?', 'acme/elsewhere');
+
+			assert.strictEqual(commandTab(h, 'CMD-1').workspace, 'agents');
 		}),
 	);
 

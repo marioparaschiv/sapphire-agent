@@ -4,7 +4,7 @@ What sapphire-agent does end to end, the Linear column flow, and who moves an is
 
 ## In one paragraph
 
-A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeconds`, and right away when herdr reports an agent change or `scripts/ctl.sh` records a request, it observes Linear, herdr, git and GitHub and acts on the difference. Top-level issues ("epics") in "Ready For Agent" are claimed in the local journal; then a git worktree is created on the epic's Linear branch, a herdr tab is opened in the `agents` workspace and Claude Code is started there with a one-line `/orchestrate` prompt. The reconciler then watches the agent and the GitHub PR, and updates Linear. On GitHub, the user talks to the reconciler by mentioning the bot in plain language; the GitHub App's webhook delivers the comment to the service, and a command agent works out what they want and does it through `scripts/ctl.sh`.
+A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeconds`, and right away when herdr reports an agent change or `scripts/ctl.sh` records a request, it observes Linear, herdr, git and GitHub and acts on the difference. Top-level issues ("epics") in "Ready For Agent" are claimed in the local journal; then a git worktree is created on the epic's Linear branch, a herdr tab is opened in the workspace named after the epic's team and Claude Code is started there with a one-line `/orchestrate` prompt. The reconciler then watches the agent and the GitHub PR, and updates Linear. On GitHub, the user talks to the reconciler by mentioning the bot in plain language; the GitHub App's webhook delivers the comment to the service, and a command agent works out what they want and does it through `scripts/ctl.sh`.
 
 ## End-to-end steps
 

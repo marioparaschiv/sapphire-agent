@@ -197,7 +197,7 @@ The tab stays open while the run is `awaitingInput` or `stale`, and while the ag
 
 ## Ownership and orphans
 
-sapphire-agent owns the tabs in its own workspace (`workspaceLabel`, default `agents`) whose label starts with an issue identifier (`^[A-Z]+-\d+ `), for an epic of a resolved team. It never touches any other tab or workspace, except command tabs (`@bot CMD-<n>`), which only the commands rule opens, adopts and closes.
+sapphire-agent owns the tabs in its own workspaces (one per team, labelled with the team's name, plus `workspaceLabel`, default `agents`) whose label starts with an issue identifier (`^[A-Z]+-\d+ `), for an epic of a resolved team. It never touches any other tab or workspace, except command tabs (`@bot CMD-<n>`), which only the commands rule opens, adopts and closes.
 
 Owned tabs that no run tracks (cleanup rule):
 

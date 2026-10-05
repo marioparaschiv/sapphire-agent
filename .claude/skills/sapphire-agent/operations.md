@@ -105,7 +105,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 - Logs: `journalctl --user -u sapphire-agent -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations.
 - Logs of a command carry `task=CMD-<n>`. Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`. The delivery scan logs `redelivered webhook delivery <id> (<guid>), which failed with HTTP <status>`, `cannot redeliver webhook delivery ...` and `cannot scan for failed webhook deliveries; trying again next scan`.
 - State dir: `~/.local/state/herdr/plugins/sapphire-agent/` holds `journal.db`, `paused` and `wake`.
-- Run tabs: herdr workspace `agents`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>`.
+- Run tabs: herdr workspace `<team name>`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>` in their repo's team workspace, or `agents` for a repo of no team.
 - Worktrees: `~/.herdr/worktrees/<repo>/<branch-slug>`. Removed with the local branch once the epic is Shipped or its PR is merged or closed, unless they hold unpushed work (then the epic gets a comment with the path).
 
 ## Troubleshooting

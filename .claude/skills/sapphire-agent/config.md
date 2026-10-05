@@ -32,7 +32,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` comment is posted once (see `failure-policy.md`). |
 | `deliveryScanSeconds` | `300` | int, min 60. How often the App's failed webhook deliveries are looked for and redelivered, besides once at startup (`rules.md`, Missed deliveries). |
 | `worktreesDirectory` | `~/.herdr/worktrees` | `~` expanded. |
-| `workspaceLabel` | `agents` | herdr workspace that holds the run tabs. |
+| `workspaceLabel` | `agents` | herdr workspace for command tabs whose repo belongs to no team. Run tabs go in a workspace named after their team. |
 | `states.*` | see below | Exact Linear workflow state names. |
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; the label group name is this without the trailing `:`. |

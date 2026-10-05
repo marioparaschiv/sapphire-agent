@@ -235,7 +235,7 @@ export const startRule = Effect.gen(function* () {
 				// The observation is from the start of the tick; an earlier rule may have closed the tab since.
 				const live = Option.isSome(found) && Option.isSome(yield* herdr.pane(found.value.paneId)) ? found : Option.none();
 				const tab = yield* Option.match(live, {
-					onNone: () => herdr.openTab(prompts.tabLabel(epic), path),
+					onNone: () => herdr.openTab(epic.team.name, prompts.tabLabel(epic), path),
 					onSome: (adopted) => Effect.log(`adopting tab ${adopted.tabId}`).pipe(Effect.as(adopted)),
 				});
 

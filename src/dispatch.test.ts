@@ -46,6 +46,7 @@ describe('dispatch', () => {
 					args: [],
 				},
 			]);
+			assert.strictEqual(tab.workspace, 'Test');
 			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
 			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[worktree].hasTrustDialogAccepted);
 

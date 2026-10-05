@@ -2,6 +2,7 @@ import { Context, Effect, Layer, Option, PubSub, Stream, SubscriptionRef } from 
 import { type CallError, Permanent, Transient } from './call-policy.ts';
 import { AppConfig, type AppConfigShape } from './config.ts';
 import {
+	agentWorkspaceLabels,
 	defaultTailLines,
 	Herdr,
 	type HerdrAgentStatus,
@@ -23,6 +24,8 @@ import {
 export type FakeTab = {
 	readonly tabId: string;
 	readonly workspaceId: string;
+	// The label of the tab's workspace.
+	readonly workspace: string;
 	readonly label: string;
 	readonly paneId: string;
 	// The agent running in the pane; none once it exited and left the shell behind.
@@ -87,7 +90,7 @@ const notFound = (what: string, id: string) => new Permanent({ message: `herdr: 
 
 // In-memory herdr: workspaces holding one-pane tabs. Writes are createWorkspace, createTab, renameTab, closeTab,
 // sendKeys, prompt and startClaude.
-const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connections: SubscriptionRef.SubscriptionRef<number>) => {
+const makeFake = (config: Pick<AppConfigShape, 'teams' | 'workspaceLabel'>, signals: PubSub.PubSub<Signal>, connections: SubscriptionRef.SubscriptionRef<number>) => {
 	const workspaces: Array<Workspace> = [];
 	const tabs: Array<FakeTab> = [];
 	const sentKeys: Array<{ readonly paneId: string; readonly keys: ReadonlyArray<string> }> = [];
@@ -111,7 +114,8 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 
 	const addTabTo = (workspaceId: string, label: string, agent: Option.Option<string>, agentStatus: HerdrAgentStatus, tail: string, cwd = '', env: TabEnv = {}) => {
 		const id = nextId();
-		const tab = { tabId: `${workspaceId}:t${id}`, workspaceId, label, paneId: `${workspaceId}:p${id}`, agent, agentStatus, tail, cwd, env };
+		const workspace = workspaces.find((candidate) => candidate.workspaceId === workspaceId)?.label ?? '';
+		const tab = { tabId: `${workspaceId}:t${id}`, workspaceId, workspace, label, paneId: `${workspaceId}:p${id}`, agent, agentStatus, tail, cwd, env };
 
 		tabs.push(tab);
 
@@ -251,8 +255,8 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 
 				return Effect.succeed<StartOutcome>('starting');
 			}),
-		openTab: openTabWith(commands, workspaceLabel),
-		workspaceTabs: workspaceTabsOf(commands, workspaceLabel),
+		openTab: openTabWith(commands),
+		workspaceTabs: workspaceTabsOf(commands, agentWorkspaceLabels(config)),
 		events: reconnecting(
 			Stream.unwrap(
 				Effect.gen(function* () {
@@ -269,7 +273,7 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 	});
 
 	const controls: FakeHerdrControls = {
-		addTab: ({ label, workspace = workspaceLabel, agent = 'claude', agentStatus = 'working', tail = '' }) => {
+		addTab: ({ label, workspace = config.workspaceLabel, agent = 'claude', agentStatus = 'working', tail = '' }) => {
 			const { workspaceId } = workspaces.find((candidate) => candidate.label === workspace) ?? addWorkspace(workspace);
 			const { tabId, paneId } = addTabTo(workspaceId, label, Option.fromNullishOr(agent), agentStatus, tail);
 
@@ -315,10 +319,10 @@ const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connec
 export class FakeHerdr extends Context.Service<FakeHerdr, FakeHerdrControls>()('sapphire-agent/FakeHerdr') {
 	static readonly layer = Layer.effectContext(
 		Effect.gen(function* () {
-			const { workspaceLabel } = yield* AppConfig;
+			const config = yield* AppConfig;
 			const signals = yield* PubSub.unbounded<Signal>();
 			const connections = yield* SubscriptionRef.make(0);
-			const { herdr, controls } = makeFake(workspaceLabel, signals, connections);
+			const { herdr, controls } = makeFake(config, signals, connections);
 
 			return Context.make(Herdr, herdr).pipe(Context.add(FakeHerdr, controls));
 		}),

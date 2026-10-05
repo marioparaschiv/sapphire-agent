@@ -243,7 +243,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 		const linear = Context.get(fixtures, LinearFixture);
 		const herdr = Context.get(fixtures, FakeHerdr);
-		const { workspaceLabel, webhookSecret } = Context.get(fixtures, AppConfig);
+		const { webhookSecret } = Context.get(fixtures, AppConfig);
 		const journal = Effect.map(services, Context.get(Journal));
 
 		const startedRun = ({ agentStatus, tail, ...seed }: EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string }) =>
@@ -254,7 +254,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 				const context = yield* services;
 				const path = yield* Context.get(context, Git).prepareWorktree(repo, epic.branchName).pipe(Effect.orDie);
 				const prompts = Context.get(context, Prompts);
-				const tab = herdr.addTab({ label: prompts.tabLabel(epic), workspace: workspaceLabel, agentStatus, tail });
+				const tab = herdr.addTab({ label: prompts.tabLabel(epic), workspace: epic.team.name, agentStatus, tail });
 				const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
 				const run: StartedRun = {
 					epicId: epic.id,
