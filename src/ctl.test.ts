@@ -56,18 +56,20 @@ const ctlSh = (directory: string, ...args: ReadonlyArray<string>) =>
 	});
 
 describe('ctl', () => {
-	it.effect("start moves the epic to its team's ready state, says when the stuck label holds it back, and wakes the service", () =>
+	it.effect("start moves the epic to its team's ready state, says when the stuck label holds it back, refuses an epic whose run is not over, and wakes the service", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const stuck = h.linear.addLabel({ name: 'agent-stuck' });
 			const reviewed = h.linear.addEpic({ identifier: 'TEST-20', title: 'Reviewed', state: 'To Review' });
 			const held = h.linear.addEpic({ identifier: 'TEST-21', title: 'Held', state: 'To Do', labelIds: [stuck.id] });
 			const ready = h.linear.addEpic({ identifier: 'TEST-22', title: 'Ready' });
+			const { epic: running } = yield* h.startedRun({ identifier: 'TEST-23', title: 'Running' });
 
 			assert.deepStrictEqual(yield* h.ctl('start', 'test-20', '--reply-to', 'planning'), ['TEST-20 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-21'), ['TEST-21 is in Ready For Agent, but it has the agent-stuck label, so it is not dispatched until that is removed']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-22'), ['TEST-22 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-99').pipe(Effect.flip), new Refused({ message: 'there is no epic TEST-99 in Linear' }));
+			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-23', '--reply-to', 'planning').pipe(Effect.flip), new Refused({ message: 'TEST-23 has a run that is not over' }));
 			assert.deepStrictEqual(
 				yield* h.ctl('start', 'TEST-22', '--reply-to', ' ').pipe(Effect.flip),
 				new CliError.ShowHelp({ commandPath: ['ctl', 'start'], errors: [new CliError.InvalidValue({ option: 'reply-to', value: ' ', expected: 'a session name', kind: 'flag' })] }),

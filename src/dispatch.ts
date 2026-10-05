@@ -9,7 +9,7 @@ import { GitHub, type PullRequest } from './github.ts';
 import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
 import { Journal, type Job, newSession, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { activeRoles, hasRole, isInFlight, type Observation, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, isInFlight, isOver, type Observation, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { makeFlag } from './run-actions.ts';
@@ -94,9 +94,6 @@ const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identi
 			(tab) => Option.contains(tab.identifier, identifier) && !runs.some((run) => run.tabId === tab.tabId || run.paneId === tab.paneId),
 		),
 	);
-
-// A finished run's row is replaced by a new claim, and so is a run that never started once its label is removed.
-const isOver = (run: Run) => run.status === 'ended' || run.status === 'kept' || (run.status === 'error' && run.startedAt === null);
 
 // Claims ready epics up to maxInFlight, in Linear's order: a top-level epic in the ready state of a resolved team,
 // without the stuck label, and with no run or only one that is over.

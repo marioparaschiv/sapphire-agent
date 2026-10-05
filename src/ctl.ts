@@ -6,7 +6,7 @@ import { FetchHttpClient } from 'effect/http';
 import { AppConfig } from './config.ts';
 import { type Command as CommandRow, commandIdentifier, Journal, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { isInFlight, isStarted } from './observation.ts';
+import { isInFlight, isOver, isStarted } from './observation.ts';
 import { wakeFileName } from './reconciler.ts';
 
 // What the CLI refuses, said to whoever ran it: a person, or a command's agent.
@@ -103,6 +103,11 @@ const start = Command.make(
 	},
 	({ epic: identifier, replyTo }) =>
 		Effect.gen(function* () {
+			// Dispatch would not claim the epic, so its request would wait for a later claim, which would then ask an old session.
+			if (Option.exists(yield* runOf(identifier), (run) => !isOver(run))) {
+				return yield* new Refused({ message: `${identifier} has a run that is not over` });
+			}
+
 			const config = yield* AppConfig;
 			const linear = yield* Linear;
 			const [epic] = yield* linear.epicsByIdentifier([identifier]);
