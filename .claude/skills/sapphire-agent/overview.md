@@ -4,7 +4,7 @@ What sapphire-agent does end to end, the Linear column flow, and who moves an is
 
 ## In one paragraph
 
-A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeconds`, and right away when herdr reports an agent change or `scripts/ctl.sh` records a request, it observes Linear, herdr, git and GitHub and acts on the difference. Top-level issues ("epics") in "Ready For Agent" that have sub-issues are claimed in the local journal; then a git worktree is created on the epic's Linear branch, a herdr tab is opened in the `agents` workspace and Claude Code is started there with a one-line `/orchestrate` prompt. The reconciler then watches the agent and the GitHub PR, and updates Linear. On GitHub, the user talks to the reconciler by mentioning the bot in plain language; the GitHub App's webhook delivers the comment to the service, and a command agent works out what they want and does it through `scripts/ctl.sh`.
+A systemd user service (`node src/main.ts`) runs one reconciler. Every `pollSeconds`, and right away when herdr reports an agent change or `scripts/ctl.sh` records a request, it observes Linear, herdr, git and GitHub and acts on the difference. Top-level issues ("epics") in "Ready For Agent" are claimed in the local journal; then a git worktree is created on the epic's Linear branch, a herdr tab is opened in the `agents` workspace and Claude Code is started there with a one-line `/orchestrate` prompt. The reconciler then watches the agent and the GitHub PR, and updates Linear. On GitHub, the user talks to the reconciler by mentioning the bot in plain language; the GitHub App's webhook delivers the comment to the service, and a command agent works out what they want and does it through `scripts/ctl.sh`.
 
 ## End-to-end steps
 
@@ -56,9 +56,9 @@ Sub-issue columns (moved by the agent, per `~/.claude/skills/orchestrate/SKILL.m
 
 Built by the `Prompts` service, each on one line (herdr refuses newlines):
 
-`/orchestrate the sub-issues of Linear epic <ID> (<url>) autonomously, in the worktree you are in.`
+`/orchestrate Linear epic <ID> autonomously`, with `inline` before `autonomously` when the epic has no sub-issues.
 
-`/follow-up Linear epic <ID> (<url>), PR <pr url>, threads <id1> <id2> ... (or: no threads), instruction "<text>" (when one was given), autonomously, in the worktree you are in.`
+`/follow-up Linear epic <ID>, PR <pr url>, threads <id1> <id2> ... (or: no threads), instruction "<text>" (when one was given)`
 
 A command agent gets one line naming it (`CMD-<n>`), the author, the comment's URL and its text quoted as JSON, the `ctl.sh` subcommands, what it may read, and that it replies, then runs `done CMD-<n>` (`Prompts.command`).
 

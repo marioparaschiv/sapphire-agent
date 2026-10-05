@@ -116,7 +116,7 @@ describe('follow-ups', () => {
 				[
 					[
 						tab.paneId,
-						`/follow-up Linear epic TEST-10 (https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync), PR ${pullRequest.url}, threads ${rename} ${backoff}, instruction "Keep the public API.", autonomously, in the worktree you are in.`,
+						`/follow-up Linear epic TEST-10, PR ${pullRequest.url}, threads ${rename} ${backoff}, instruction "Keep the public API."`,
 					],
 				],
 			);
@@ -175,7 +175,7 @@ describe('follow-ups', () => {
 				[['running', { _tag: 'follow-up', threadIds: [], instruction: 'Also update the changelog.' }, secondAt]],
 			);
 			assert.deepStrictEqual(markerKeys(h.github.comments(h.githubRepo, pullRequest.number)), [`summary:${firstRunAt}`, `summary:${followUpAt}`]);
-			assert.match(h.herdr.starts()[1].prompt, /, no threads, instruction "Also update the changelog\.", autonomously/);
+			assert.match(h.herdr.starts()[1].prompt, /, no threads, instruction "Also update the changelog\."$/);
 		}),
 	);
 

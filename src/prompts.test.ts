@@ -7,27 +7,21 @@ const withPrompts = <A>(use: (prompts: Prompts['Service']) => A) => Prompts.useS
 const epic = {
 	identifier: 'HL-8',
 	title: 'Rewrite the orchestrator on Effect 4 as a level-triggered reconciler',
-	url: 'https://linear.app/marioparaschiv/issue/HL-8/rewrite-the-orchestrator-on-effect-4-as-a-level-triggered',
 };
 
 describe('Prompts', () => {
-	it.effect('asks the orchestrate skill to run the epic in the worktree', () =>
-		withPrompts((prompts) =>
-			assert.strictEqual(
-				prompts.orchestrate(epic),
-				'/orchestrate the sub-issues of Linear epic HL-8 (https://linear.app/marioparaschiv/issue/HL-8/rewrite-the-orchestrator-on-effect-4-as-a-level-triggered) autonomously, in the worktree you are in.',
-			),
-		),
+	it.effect('asks the orchestrate skill to run the epic', () =>
+		withPrompts((prompts) => assert.strictEqual(prompts.orchestrate(epic), '/orchestrate Linear epic HL-8 autonomously')),
 	);
 
 	it.effect('asks the follow-up skill to answer the threads it was given', () =>
 		withPrompts((prompts) =>
 			assert.strictEqual(
 				prompts.followUp(
-					{ identifier: 'UNB-130', title: 'Ready to ship', url: 'https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship' },
+					{ identifier: 'UNB-130', title: 'Ready to ship' },
 					{ pullRequestUrl: 'https://github.com/marioparaschiv/unbound/pull/120', threadIds: ['PRRT_inline', 'PRRT_accepted_flag'], instruction: null },
 				),
-				'/follow-up Linear epic UNB-130 (https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship), PR https://github.com/marioparaschiv/unbound/pull/120, threads PRRT_inline PRRT_accepted_flag, autonomously, in the worktree you are in.',
+				'/follow-up Linear epic UNB-130, PR https://github.com/marioparaschiv/unbound/pull/120, threads PRRT_inline PRRT_accepted_flag',
 			),
 		),
 	);
@@ -36,10 +30,10 @@ describe('Prompts', () => {
 		withPrompts((prompts) =>
 			assert.strictEqual(
 				prompts.followUp(
-					{ identifier: 'UNB-130', title: 'Ready to ship', url: 'https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship' },
+					{ identifier: 'UNB-130', title: 'Ready to ship' },
 					{ pullRequestUrl: 'https://github.com/marioparaschiv/unbound/pull/120', threadIds: [], instruction: 'Use the "retry" helper.\nKeep the API.' },
 				),
-				'/follow-up Linear epic UNB-130 (https://linear.app/marioparaschiv/issue/UNB-130/ready-to-ship), PR https://github.com/marioparaschiv/unbound/pull/120, no threads, instruction "Use the \\"retry\\" helper.\\nKeep the API.", autonomously, in the worktree you are in.',
+				'/follow-up Linear epic UNB-130, PR https://github.com/marioparaschiv/unbound/pull/120, no threads, instruction "Use the \\"retry\\" helper.\\nKeep the API."',
 			),
 		),
 	);

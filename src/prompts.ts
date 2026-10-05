@@ -3,7 +3,6 @@ import { Context, Layer } from 'effect';
 export type PromptEpic = {
 	readonly identifier: string;
 	readonly title: string;
-	readonly url: string;
 };
 
 export type FollowUpTarget = {
@@ -28,15 +27,15 @@ const tabLabel = ({ identifier, title }: Pick<PromptEpic, 'identifier' | 'title'
 	`${identifier} ${title.length > 40 ? `${title.slice(0, 39).trimEnd()}…` : title}`;
 
 // The orchestrate and follow-up skills own the workflow (Linear moves, commits, /pr). herdr refuses newlines in a prompt.
-const orchestrate = ({ identifier, url }: PromptEpic) =>
-	`/orchestrate the sub-issues of Linear epic ${identifier} (${url}) autonomously, in the worktree you are in.`;
+const orchestrate = ({ identifier }: PromptEpic) => `/orchestrate Linear epic ${identifier} autonomously`;
 
-const followUp = ({ identifier, url }: PromptEpic, { pullRequestUrl, threadIds, instruction }: FollowUpTarget) =>
+const inline = ({ identifier }: PromptEpic) => `/orchestrate Linear epic ${identifier} inline autonomously`;
+
+const followUp = ({ identifier }: PromptEpic, { pullRequestUrl, threadIds, instruction }: FollowUpTarget) =>
 	[
-		`/follow-up Linear epic ${identifier} (${url}), PR ${pullRequestUrl}`,
+		`/follow-up Linear epic ${identifier}, PR ${pullRequestUrl}`,
 		threadIds.length > 0 ? `threads ${threadIds.join(' ')}` : 'no threads',
 		...(instruction === null ? [] : [`instruction ${JSON.stringify(instruction)}`]),
-		'autonomously, in the worktree you are in.',
 	].join(', ');
 
 // Not an issue identifier, so no rule takes the tab for an epic's.
@@ -57,10 +56,11 @@ export class Prompts extends Context.Service<
 		// Starts with the identifier, which is how sapphire-agent recognises the tabs it owns.
 		readonly tabLabel: typeof tabLabel;
 		readonly orchestrate: typeof orchestrate;
+		readonly inline: typeof inline;
 		readonly followUp: typeof followUp;
 		readonly commandTabLabel: typeof commandTabLabel;
 		readonly command: typeof command;
 	}
 >()('sapphire-agent/Prompts') {
-	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, followUp, commandTabLabel, command });
+	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command });
 }
