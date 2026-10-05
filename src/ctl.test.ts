@@ -56,33 +56,37 @@ const ctlSh = (directory: string, ...args: ReadonlyArray<string>) =>
 	});
 
 describe('ctl', () => {
-	it.effect("start moves the epic to its team's ready state, says when the stuck label holds it back, refuses an epic whose run is not over, and wakes the service", () =>
+	it.effect("start moves the epic to its team's ready state, says when the stuck label holds it back, refuses an epic whose run is not over but starts one whose run ended, and wakes the service", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const stuck = h.linear.addLabel({ name: 'agent-stuck' });
 			const reviewed = h.linear.addEpic({ identifier: 'TEST-20', title: 'Reviewed', state: 'To Review' });
 			const held = h.linear.addEpic({ identifier: 'TEST-21', title: 'Held', state: 'To Do', labelIds: [stuck.id] });
 			const ready = h.linear.addEpic({ identifier: 'TEST-22', title: 'Ready' });
-			const { epic: running } = yield* h.startedRun({ identifier: 'TEST-23', title: 'Running' });
+			yield* h.startedRun({ identifier: 'TEST-23', title: 'Running' });
+			const { epic: finished, run: finishedRun } = yield* h.startedRun({ identifier: 'TEST-24', title: 'Finished' });
+
+			yield* Journal.use((journal) => journal.putRun({ ...finishedRun, status: 'ended' })).pipe(Effect.provide(Journal.layer(join(h.dir, 'journal.db'))));
 
 			assert.deepStrictEqual(yield* h.ctl('start', 'test-20', '--reply-to', 'planning'), ['TEST-20 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-21'), ['TEST-21 is in Ready For Agent, but it has the agent-stuck label, so it is not dispatched until that is removed']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-22'), ['TEST-22 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-99').pipe(Effect.flip), new Refused({ message: 'there is no epic TEST-99 in Linear' }));
 			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-23', '--reply-to', 'planning').pipe(Effect.flip), new Refused({ message: 'TEST-23 has a run that is not over' }));
+			assert.deepStrictEqual(yield* h.ctl('start', 'TEST-24'), ['TEST-24 is in Ready For Agent; it is dispatched once a slot is free']);
 			assert.deepStrictEqual(
 				yield* h.ctl('start', 'TEST-22', '--reply-to', ' ').pipe(Effect.flip),
 				new CliError.ShowHelp({ commandPath: ['ctl', 'start'], errors: [new CliError.InvalidValue({ option: 'reply-to', value: ' ', expected: 'a session name', kind: 'flag' })] }),
 			);
 			assert.deepStrictEqual(
 				(yield* h.ctl('status')).filter((line) => line.startsWith('request')),
-				['request 1: start TEST-20 reply-to planning', 'request 2: start TEST-21', 'request 3: start TEST-22'],
+				['request 1: start TEST-20 reply-to planning', 'request 2: start TEST-21', 'request 3: start TEST-22', 'request 4: start TEST-24'],
 			);
 
 			assert.deepStrictEqual([reviewed, held, ready].map((epic) => h.linear.stateName(epic.id)), ['Ready For Agent', 'Ready For Agent', 'Ready For Agent']);
 			assert.deepStrictEqual(
 				h.linear.mutations.filter((mutation) => mutation.startsWith('move')).map((mutation) => mutation.split(' ')[1]),
-				[reviewed.id, held.id],
+				[reviewed.id, held.id, finished.id],
 			);
 			assert.isTrue(existsSync(join(h.dir, 'wake')));
 		}),
