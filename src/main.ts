@@ -6,6 +6,7 @@ import { ClaudeTranscript } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
+import { answerChatMessages } from './conversations.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { GitHubApp } from './github-app.ts';
@@ -20,13 +21,15 @@ import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { telegramChat } from './telegram.ts';
+import { TelegramBot } from './telegram-bot.ts';
 import { WebhookServer } from './webhook-server.ts';
 
 const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
 
 const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, Prompts.layer).pipe(Layer.provideMerge(GitHubApp.layer()));
 
-const MainLive = Layer.mergeAll(WebhookServer.layer, MissedDeliveries.layer).pipe(
+const MainLive = Layer.mergeAll(WebhookServer.layer, MissedDeliveries.layer, telegramChat.pipe(Layer.provide(TelegramBot.layer))).pipe(
 	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
 	Layer.provideMerge(ServicesLive),
 	Layer.provideMerge(JournalLive),
@@ -44,6 +47,7 @@ const program = Effect.gen(function* () {
 
 	yield* Effect.forkChild(Stream.runForEach(herdr.events, () => reconciler.wake));
 	yield* Effect.forkChild(missedDeliveries.run);
+	yield* Effect.forkChild(answerChatMessages);
 	yield* Effect.forkChild(
 		fs.watch(config.env.stateDirectory).pipe(
 			Stream.filter((event) => basename(event.path) === wakeFileName),

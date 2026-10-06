@@ -6,6 +6,8 @@ What sapphire-agent stores locally and why, and how markers on its comments make
 
 Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, what `ctl.sh` asked for, and how far back the App's webhook deliveries were checked.
 
+The Telegram bot's MTProto session and update state are not in the journal: mtcute keeps them in its own SQLite file, `$HERDR_PLUGIN_STATE_DIR/telegram.session` (`architecture.md`, The chat). Chat message text is never stored.
+
 Idempotency comes from markers on external writes, not from the journal: before a write, look for its marker (or its effect) and skip it when present.
 
 ## The journal

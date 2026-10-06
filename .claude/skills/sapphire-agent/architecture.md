@@ -1,6 +1,6 @@
 # Architecture
 
-How the reconciler is put together: one tick, the rules and their order, the webhook server, the services, startup, and which module owns what.
+How the reconciler is put together: one tick, the rules and their order, the webhook server, the chat, the services, startup, and which module owns what.
 
 ## The reconciler
 
@@ -51,6 +51,16 @@ Mentions are not a rule: they arrive as GitHub App webhook deliveries. `WebhookS
 
 GitHub does not redeliver a failed delivery by itself. `MissedDeliveries` (`missed-deliveries.ts`), forked by `main.ts` beside the reconciler, scans the App's delivery log at startup and every `deliveryScanSeconds` and asks GitHub to redeliver each event whose newest attempt failed, back to 10 minutes before the journal's delivery mark and at most 3 days. The redeliveries arrive at the webhook server like any other. A failed scan is logged and tried again on the next. See `rules.md` (Missed deliveries).
 
+## The chat
+
+The user also talks to the service in a Telegram private chat with the bot. Core sees the chat only through the `Chat` port (`chat.ts`): a `Stream` of normalized `InboundMessage`s (`ref`, `conversation`, `text`, `replyTo`; the only conversation so far is `main`, the chat's General thread) and `send` for `Intent`s (so far `reply`); the adapter decides how they look.
+
+`TelegramBot` (`telegram-bot.ts`) is the edge: an mtcute (`@mtcute/node`) MTProto client, logged in with the bot token, `api_id` and `api_hash` for the layer's lifetime, its new messages as a `Stream` and `sendText`. Updates arrive over its persistent connection. mtcute keeps its session and update state (pts, qts, date, seq) in `$HERDR_PLUGIN_STATE_DIR/telegram.session`, on `node:sqlite` through a small storage driver (mtcute's own needs the native better-sqlite3), and with `catchUp` fetches what was sent while the service was down. mtcute saves that state once it dispatched an update, not once it was handled, so a message received but not yet answered when the process dies is not handed over again; a crash before the state is saved can hand one over twice.
+
+`telegramChat` (`telegram.ts`) is the only `Chat` adapter: it lets through each text message an allowed user (`telegram.allowedUserIds`) writes in the main chat of their private chat with the bot, drops and logs everything else (other users, group chats, topics, messages without text), and renders a `reply` as a message in the same chat replying to it.
+
+`answerChatMessages` (`conversations.ts`) is core's side, forked by `main.ts` beside the reconciler: it answers each message, in order, with a fixed acknowledgement. A Transient failure to answer is retried every 30 s, holding later messages back; a Permanent one drops the message (logged).
+
 ## Services
 
 Each is an Effect `Context.Service` with a live layer; the externals have a test layer.
@@ -73,16 +83,18 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Planner` | `planner.ts` | Runs the rules under the failure policy. | Real. |
 | `Reconciler` | `reconciler.ts` | The tick loop and `wake`. | Real. |
 | `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
+| `Chat` | `chat.ts` | The chat platform port: `inbound`, the messages of allowed users as a `Stream`; `send(intent)`. Live: `telegramChat` (`telegram.ts`) over `TelegramBot`. | Real, over `FakeTelegram.bot`. |
+| `TelegramBot` | `telegram-bot.ts` | The bot's mtcute client: login at startup, new messages as a `Stream`, `sendText`; session and update state in `telegram.session`. | `FakeTelegram.bot` |
 | `MissedDeliveries` | `missed-deliveries.ts` | `scan` redelivers failed webhook deliveries back to 10 minutes before the delivery mark; `run` scans at once and every `deliveryScanSeconds`. | Real, against `GitHubAppFixture` (`makeHarness` builds it; `h.scanDeliveries` runs one scan). |
 
 Rules are not services: each rule module exports an Effect that builds its `Rule` (`name`, `pausable`, `plan`) from the services it needs, and `Planner.layer` takes them all. Shared run actions (flag an epic, close a run's tab, end a run, nudge an agent) live in `run-actions.ts`.
 
 ## Startup (`main.ts`)
 
-1. `AppConfig.layer` reads env, the config file, the API key and the GitHub App's private key and webhook secret and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
+1. `AppConfig.layer` reads env, the config file, the API key, the GitHub App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$HERDR_PLUGIN_STATE_DIR/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
-3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), and the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url>`). A failure there, e.g. the port taken, stops startup.
-4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event, one that calls it whenever the state directory's `wake` file is written and one that runs the delivery scan, and runs the reconciler.
+3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url>`), and `TelegramBot` logs in (logging `logged in to Telegram as @<username>`). A failure there, e.g. the port taken, stops startup.
+4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event, one that calls it whenever the state directory's `wake` file is written, one that runs the delivery scan and one that answers chat messages (`answerChatMessages`), and runs the reconciler.
 
 `NodeRuntime.runMain` runs it; SIGTERM interrupts the tick cleanly. Logs go to stdout with `epic` and `rule` annotations.
 
@@ -105,6 +117,9 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/requests.ts` | Requests rule (stop, send). |
 | `src/mentions.ts` | Records a comment that mentions the bot as a command (`makeRecordMention`). |
 | `src/webhook-server.ts` | Webhook server: signature check, payload schemas, recording mentions, waking the reconciler. |
+| `src/chat.ts` | The chat platform port: `Chat`, `InboundMessage`, `Intent`. |
+| `src/conversations.ts` | Core's answers to chat messages. |
+| `src/telegram.ts` | The Telegram adapter of `Chat`: the allowlist, normalizing messages, rendering intents. |
 | `src/commands.ts` | Commands rule, the command agent's lockdown. |
 | `src/cleanup.ts` | Cleanup rule and orphans. |
 | `src/run-actions.ts` | Flag, close a run's tab, end a run, nudge. |
@@ -114,9 +129,9 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/prompts.ts` | Tab label and prompts. |
 | `src/result-file.ts` | Result file schema. |
 | `src/call-policy.ts` | `Transient`, `Permanent`, timeouts and retries for every external call. |
-| `src/config.ts` | Config schema, env, API key, App private key and webhook secret, `StartupError`. |
+| `src/config.ts` | Config schema, env, API key, App private key and webhook secret, Telegram bot token, `StartupError`. |
 | `src/legacy-claims.ts` | Startup guard against an undrained `claims.json`. |
-| `src/linear.ts`, `src/github.ts`, `src/github-app.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/claude-transcript.ts`, `src/pause.ts` | The external services. |
-| `src/linear-fixture.ts`, `src/github-app-fixture.ts`, `src/claude-transcript-fixture.ts`, `src/fixture-server.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
+| `src/linear.ts`, `src/github.ts`, `src/github-app.ts`, `src/telegram-bot.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/claude-transcript.ts`, `src/pause.ts` | The external services. |
+| `src/linear-fixture.ts`, `src/github-app-fixture.ts`, `src/telegram-fake.ts`, `src/claude-transcript-fixture.ts`, `src/fixture-server.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
 | `src/fixtures/herdr/` | Real herdr JSON output and events, recorded from a named session, for the herdr tests. |
 | `src/*.test.ts` | Tests beside the code. |

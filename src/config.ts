@@ -66,6 +66,14 @@ const Settings = Schema.Struct({
 		}),
 		allowedUsers: Schema.Array(Schema.NonEmptyString).check(Schema.makeFilter((users) => users.length > 0 || 'no allowed users configured')),
 	}),
+	// The Telegram bot the user talks to in a private chat, logged in over MTProto with an app's api_id and api_hash
+	// (my.telegram.org). Messages from anyone but `allowedUserIds` are dropped.
+	telegram: Schema.Struct({
+		botTokenFile: Path,
+		apiIdFile: Path,
+		apiHashFile: Path,
+		allowedUserIds: Schema.Array(Schema.Int.check(Schema.isGreaterThan(0))).check(Schema.makeFilter((ids) => ids.length > 0 || 'no allowed users configured')),
+	}),
 });
 
 export type Settings = typeof Settings.Type;
@@ -107,6 +115,9 @@ export type AppConfigShape = Settings & {
 	readonly linearApiKey: Redacted.Redacted<string>;
 	readonly appPrivateKey: KeyObject;
 	readonly webhookSecret: Redacted.Redacted<string>;
+	readonly telegramBotToken: Redacted.Redacted<string>;
+	readonly telegramApiId: number;
+	readonly telegramApiHash: Redacted.Redacted<string>;
 };
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
@@ -165,6 +176,15 @@ const readApiKey = (path: string) => readSecretFile(path, 'Linear API key').pipe
 
 const readWebhookSecret = (path: string) => readSecretFile(path, 'GitHub App webhook secret').pipe(Effect.map(Redacted.make));
 
+const readTelegramBotToken = (path: string) => readSecretFile(path, 'Telegram bot token').pipe(Effect.map(Redacted.make));
+
+const readTelegramApiId = (path: string) =>
+	readSecretFile(path, 'Telegram api_id').pipe(
+		Effect.flatMap((text) => Schema.decodeEffect(Schema.NumberFromString.pipe(Schema.decodeTo(Schema.Int)))(text).pipe(Effect.mapError(() => [`${path} is not a number`]))),
+	);
+
+const readTelegramApiHash = (path: string) => readSecretFile(path, 'Telegram api_hash').pipe(Effect.map(Redacted.make));
+
 const readPrivateKey = (path: string) =>
 	readSecretFile(path, 'GitHub App private key').pipe(
 		Effect.flatMap((pem) => Effect.try({ try: () => createPrivateKey(pem), catch: () => [`${path} is not a PEM private key`] })),
@@ -178,22 +198,28 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
-// Reads env, the config file, the Linear API key and the GitHub App's private key and webhook secret, and reports every
-// problem in one StartupError.
+// Reads env, the config file, the Linear API key, the GitHub App's private key and webhook secret and the Telegram bot
+// token, api_id and api_hash, and reports every problem in one StartupError.
 export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
 	const linearApiKey = yield* readWhen(envResults.linearKeyFile, readApiKey);
 	const appPrivateKey = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.privateKeyFile), readPrivateKey);
 	const webhookSecret = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.webhookSecretFile), readWebhookSecret);
+	const telegramBotToken = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.botTokenFile), readTelegramBotToken);
+	const telegramApiId = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiIdFile), readTelegramApiId);
+	const telegramApiHash = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiHashFile), readTelegramApiHash);
 	const problems = [
 		...Object.values(envResults).flatMap((result) => (Result.isFailure(result) ? configProblems(result.failure) : [])),
 		...problemsOf(settings),
 		...problemsOf(linearApiKey),
 		...problemsOf(appPrivateKey),
 		...problemsOf(webhookSecret),
+		...problemsOf(telegramBotToken),
+		...problemsOf(telegramApiId),
+		...problemsOf(telegramApiHash),
 	];
-	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret });
+	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret, telegramBotToken, telegramApiId, telegramApiHash });
 
 	if (problems.length > 0 || Result.isFailure(loaded)) {
 		return yield* new StartupError({ problems });
@@ -205,14 +231,17 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		linearApiKey: loaded.success.linearApiKey,
 		appPrivateKey: loaded.success.appPrivateKey,
 		webhookSecret: loaded.success.webhookSecret,
+		telegramBotToken: loaded.success.telegramBotToken,
+		telegramApiId: loaded.success.telegramApiId,
+		telegramApiHash: loaded.success.telegramApiHash,
 	};
 });
 
 export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sapphire-agent/AppConfig') {
 	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
-	// Defaults plus one team and the bot, with every path under `directory`, a freshly generated App key and the webhook
-	// server on a free port.
+	// Defaults plus one team, the bot and the Telegram bot, with every path under `directory`, a freshly generated App key
+	// and the webhook server on a free port.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
 		Layer.sync(AppConfig, () => ({
 			...Schema.decodeUnknownSync(Settings)({
@@ -222,6 +251,12 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 					login: 'orchestratorbot',
 					app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
 					allowedUsers: ['marioparaschiv'],
+				},
+				telegram: {
+					botTokenFile: join(directory, 'telegram-bot-token'),
+					apiIdFile: join(directory, 'telegram-api-id'),
+					apiHashFile: join(directory, 'telegram-api-hash'),
+					allowedUserIds: [7_100_200_300],
 				},
 				...settings,
 			}),
@@ -237,5 +272,8 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 			linearApiKey: Redacted.make('lin_api_test'),
 			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
 			webhookSecret: Redacted.make('test-webhook-secret'),
+			telegramBotToken: Redacted.make('123456:test-bot-token'),
+			telegramApiId: 1_234_567,
+			telegramApiHash: Redacted.make('test-api-hash'),
 		}));
 }
