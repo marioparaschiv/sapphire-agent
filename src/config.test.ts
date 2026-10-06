@@ -9,7 +9,7 @@ import { loadAppConfig } from './config.ts';
 type SecretFile = { text: string; mode: number };
 
 // `config` gets the temp directory the files are written to.
-const load = (env: Record<string, string>, files: { config?: (directory: string) => unknown; key?: SecretFile; appKey?: SecretFile; webhookSecret?: SecretFile }) =>
+const load = (env: Record<string, string>, files: { config?: (directory: string) => unknown; key?: SecretFile; appKey?: SecretFile; webhookSecret?: SecretFile; linearWebhookSecret?: SecretFile }) =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem;
 		const directory = yield* fs.makeTempDirectoryScoped().pipe(Effect.orDie);
@@ -32,6 +32,10 @@ const load = (env: Record<string, string>, files: { config?: (directory: string)
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), files.webhookSecret.text, { mode: files.webhookSecret.mode }).pipe(Effect.orDie);
 		}
 
+		if (files.linearWebhookSecret) {
+			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), files.linearWebhookSecret.text, { mode: files.linearWebhookSecret.mode }).pipe(Effect.orDie);
+		}
+
 		const provider = ConfigProvider.fromEnvRecord({
 			HERDR_PLUGIN_CONFIG_DIR: directory,
 			SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
@@ -46,19 +50,21 @@ const key = { text: 'lin_api_secret\n', mode: 0o600 };
 const appPem = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey;
 const appKey = { text: appPem, mode: 0o600 };
 const webhookSecret = { text: 'whsec_test\n', mode: 0o600 };
+const linearWebhookSecret = { text: 'lin_wh_test\n', mode: 0o600 };
+const linearWebhookSecretFile = (directory: string) => join(directory, 'linear-webhook-secret');
 const bot = (directory: string) => ({
 	login: 'orchestratorbot',
 	app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') },
 	allowedUsers: ['marioparaschiv'],
 });
-const unbound = (directory: string) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: bot(directory) });
+const unbound = (directory: string) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory) });
 
 describe('loadAppConfig', () => {
 	it.effect('fills defaults, expands ~ and reads the old stuckAfterSeconds key', () =>
 		Effect.gen(function* () {
-			const config = yield* load(fullEnv, { config: (directory) => ({ stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, bot: bot(directory) }), key, appKey, webhookSecret });
+			const config = yield* load(fullEnv, { config: (directory) => ({ stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory) }), key, appKey, webhookSecret, linearWebhookSecret });
 
-			assert.strictEqual(config.pollSeconds, 30);
+			assert.strictEqual(config.pollSeconds, 600);
 			assert.strictEqual(config.maxInFlight, 1);
 			assert.strictEqual(config.awaitingInputAfterSeconds, 240);
 			assert.strictEqual(config.flagTransientAfterSeconds, 600);
@@ -78,13 +84,14 @@ describe('loadAppConfig', () => {
 			assert.strictEqual(Redacted.value(config.linearApiKey), 'lin_api_secret');
 			assert.strictEqual(config.appPrivateKey.export({ type: 'pkcs8', format: 'pem' }), appPem);
 			assert.strictEqual(Redacted.value(config.webhookSecret), 'whsec_test');
+			assert.strictEqual(Redacted.value(config.linearWebhookSecret), 'lin_wh_test');
 		}),
 	);
 
 	it.effect('reports an env error and two config file errors together in one message', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const error = yield* load(env, { config: (directory) => ({ pollSeconds: 2, maxInflight: 3, ...unbound(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
+			const error = yield* load(env, { config: (directory) => ({ pollSeconds: 2, maxInflight: 3, ...unbound(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.lengthOf(error.problems, 3);
 			assert.match(error.message, /HERDR_BIN_PATH/);
@@ -105,24 +112,25 @@ describe('loadAppConfig', () => {
 
 	it.effect('rejects an empty team map, an unknown team key, a missing or incomplete bot, no allowed users and invalid JSON', () =>
 		Effect.gen(function* () {
-			const noTeams = yield* load(fullEnv, { config: (directory) => ({ teams: {}, bot: bot(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const unknownKey = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, bot: bot(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const noBot = yield* load(fullEnv, { config: () => ({ teams: { Unbound: { repo: '~/unbound' } } }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const noBotLogin = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: { ...bot(directory), login: '' } }), key, appKey, webhookSecret }).pipe(Effect.flip);
+			const noTeams = yield* load(fullEnv, { config: (directory) => ({ teams: {}, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const unknownKey = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const noBot = yield* load(fullEnv, { config: () => ({ teams: { Unbound: { repo: '~/unbound' } } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const noBotLogin = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), login: '' } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 			const noAllowedUsers = yield* load(fullEnv, {
 				config: (directory) => {
 					const { allowedUsers: _, ...withoutAllowedUsers } = bot(directory);
 
-					return { teams: { Unbound: { repo: '~/unbound' } }, bot: withoutAllowedUsers };
+					return { teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: withoutAllowedUsers };
 				},
 				key,
 				appKey,
 				webhookSecret,
+				linearWebhookSecret,
 			}).pipe(Effect.flip);
-			const emptyAllowedUsers = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: { ...bot(directory), allowedUsers: [] } }), key, appKey, webhookSecret }).pipe(
+			const emptyAllowedUsers = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), allowedUsers: [] } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
 				Effect.flip,
 			);
-			const badJson = yield* load(fullEnv, { config: () => '{ "teams": ', key, appKey, webhookSecret }).pipe(Effect.flip);
+			const badJson = yield* load(fullEnv, { config: () => '{ "teams": ', key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.match(noTeams.message, /no teams configured/);
 			assert.match(unknownKey.message, /repos/);
@@ -136,7 +144,7 @@ describe('loadAppConfig', () => {
 
 	it.effect('reports a missing API key file', () =>
 		Effect.gen(function* () {
-			const error = yield* load(fullEnv, { config: unbound, appKey, webhookSecret }).pipe(Effect.flip);
+			const error = yield* load(fullEnv, { config: unbound, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.lengthOf(error.problems, 1);
 			assert.match(error.problems[0], /no Linear API key: create .*linear-key with mode 600/);
@@ -146,12 +154,12 @@ describe('loadAppConfig', () => {
 	it.effect('reports a missing bot.app field and a missing, loose or unparsable App key file together with the other problems', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const noAppId = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), bot: { ...bot(directory), app: { privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') } } }), key, appKey, webhookSecret }).pipe(
+			const noAppId = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), app: { privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') } } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
 				Effect.flip,
 			);
-			const noKeyFile = yield* load(env, { config: unbound, key, webhookSecret }).pipe(Effect.flip);
-			const looseKeyFile = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o640 }, appKey: { text: appPem, mode: 0o640 }, webhookSecret }).pipe(Effect.flip);
-			const notAKey = yield* load(fullEnv, { config: unbound, key, appKey: { text: 'not a key', mode: 0o600 }, webhookSecret }).pipe(Effect.flip);
+			const noKeyFile = yield* load(env, { config: unbound, key, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const looseKeyFile = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o640 }, appKey: { text: appPem, mode: 0o640 }, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const notAKey = yield* load(fullEnv, { config: unbound, key, appKey: { text: 'not a key', mode: 0o600 }, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.deepStrictEqual(noAppId.problems.map((problem) => problem.replace(/^\S+config\.json /, '')), ['bot.app.id: Missing key']);
 			assert.lengthOf(noKeyFile.problems, 2);
@@ -166,9 +174,9 @@ describe('loadAppConfig', () => {
 
 	it.effect('reports a missing or loose webhook secret file together with the other problems', () =>
 		Effect.gen(function* () {
-			const missing = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o644 }, appKey }).pipe(Effect.flip);
-			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: 'whsec_test', mode: 0o604 } }).pipe(Effect.flip);
-			const empty = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: '\n', mode: 0o600 } }).pipe(Effect.flip);
+			const missing = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o644 }, appKey, linearWebhookSecret }).pipe(Effect.flip);
+			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: 'whsec_test', mode: 0o604 }, linearWebhookSecret }).pipe(Effect.flip);
+			const empty = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: '\n', mode: 0o600 }, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.lengthOf(missing.problems, 2);
 			assert.match(missing.problems[0], /linear-key is readable by other users/);
@@ -176,6 +184,19 @@ describe('loadAppConfig', () => {
 			assert.lengthOf(loose.problems, 1);
 			assert.match(loose.problems[0], /webhook-secret is readable by other users; run chmod 600 \S+\/webhook-secret$/);
 			assert.deepStrictEqual(empty.problems.map((problem) => problem.replace(/^\S+\//, '')), ['webhook-secret is empty']);
+		}),
+	);
+
+	it.effect('reports a missing linearWebhookSecretFile, and a missing or loose Linear webhook secret file', () =>
+		Effect.gen(function* () {
+			const noField = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: bot(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
+			const missing = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret }).pipe(Effect.flip);
+			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret: { text: 'lin_wh_test', mode: 0o640 } }).pipe(Effect.flip);
+
+			assert.deepStrictEqual(noField.problems.map((problem) => problem.replace(/^\S+config\.json /, '')), ['linearWebhookSecretFile: Missing key']);
+			assert.deepStrictEqual(missing.problems.map((problem) => problem.replace(/ \S+\//, ' ')), ['no Linear webhook secret: create linear-webhook-secret with mode 600']);
+			assert.lengthOf(loose.problems, 1);
+			assert.match(loose.problems[0], /linear-webhook-secret is readable by other users; run chmod 600 \S+\/linear-webhook-secret$/);
 		}),
 	);
 });

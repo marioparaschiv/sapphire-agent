@@ -53,24 +53,32 @@ const handledEvents: Record<string, ReturnType<typeof handledEvent>> = {
 	),
 };
 
-// GitHub signs the raw body with the webhook secret: `X-Hub-Signature-256: sha256=<hex HMAC-SHA256>`.
-const isSigned = (secret: Redacted.Redacted<string>, body: Uint8Array, header: string | undefined) => {
-	if (header === undefined || !header.startsWith('sha256=')) {
-		return false;
-	}
-
+// Whether `signature` is the hex HMAC-SHA256 of the raw body with the secret.
+const isSignedWith = (secret: Redacted.Redacted<string>, body: Uint8Array, signature: string) => {
 	const expected = createHmac('sha256', Redacted.value(secret)).update(body).digest();
-	const given = Buffer.from(header.slice('sha256='.length), 'hex');
+	const given = Buffer.from(signature, 'hex');
 
 	return given.length === expected.length && timingSafeEqual(given, expected);
 };
 
+// GitHub signs the raw body with the webhook secret: `X-Hub-Signature-256: sha256=<hex HMAC-SHA256>`.
+const isSigned = (secret: Redacted.Redacted<string>, body: Uint8Array, header: string | undefined) =>
+	header !== undefined && header.startsWith('sha256=') && isSignedWith(secret, body, header.slice('sha256='.length));
+
+// Linear signs the raw body with its webhook secret: `Linear-Signature: <hex HMAC-SHA256>`.
+const isSignedByLinear = (secret: Redacted.Redacted<string>, body: Uint8Array, header: string | undefined) => header !== undefined && isSignedWith(secret, body, header);
+
+// The path Tailscale Funnel exposes for Linear's deliveries; GitHub's reach every other path through nginx.
+export const linearWebhookPath = '/linear';
+
 const respond = (status: number) => HttpServerResponse.empty({ status });
 
-// GitHub App webhook deliveries, on 127.0.0.1:bot.app.webhookPort while the service runs. A delivery that brings a
-// new comment mentioning the bot is recorded as a command (see makeRecordMention) and wakes the reconciler, which starts
-// it. The delivery is answered 2xx only once the command is in the journal, so a failed one shows as failed in the App's
-// delivery log and can be redelivered; recording is idempotent on the comment, so a redelivery never starts a second run.
+// GitHub App and Linear webhook deliveries, on 127.0.0.1:bot.app.webhookPort while the service runs. A Linear delivery
+// only wakes the reconciler, which observes Linear itself, so a duplicate or out-of-order one does no harm. A GitHub
+// delivery that brings a new comment mentioning the bot is recorded as a command (see makeRecordMention) and wakes the
+// reconciler, which starts it. It is answered 2xx only once the command is in the journal, so a failed one shows as
+// failed in the App's delivery log and can be redelivered; recording is idempotent on the comment, so a redelivery never
+// starts a second run.
 export class WebhookServer extends Context.Service<
 	WebhookServer,
 	{
@@ -81,9 +89,29 @@ export class WebhookServer extends Context.Service<
 	static readonly layer = Layer.effect(
 		WebhookServer,
 		Effect.gen(function* () {
-			const { bot, webhookSecret } = yield* AppConfig;
+			const { bot, webhookSecret, linearWebhookSecret } = yield* AppConfig;
 			const reconciler = yield* Reconciler;
 			const recordMention = yield* makeRecordMention;
+
+			const handleLinear = (request: HttpServerRequest.HttpServerRequest) =>
+				Effect.gen(function* () {
+					const body = new Uint8Array(yield* request.arrayBuffer);
+
+					if (!isSignedByLinear(linearWebhookSecret, body, request.headers['linear-signature'])) {
+						yield* Effect.logWarning('refused a Linear delivery without a valid signature');
+
+						return respond(401);
+					}
+
+					yield* reconciler.wake;
+
+					return respond(200);
+				}).pipe(
+					Effect.catchCause((cause) =>
+						Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.logError('cannot handle the Linear delivery', cause).pipe(Effect.as(respond(500))),
+					),
+					Effect.annotateLogs({ delivery: request.headers['linear-delivery'] ?? 'unknown' }),
+				);
 
 			const handle = (request: HttpServerRequest.HttpServerRequest) =>
 				Effect.gen(function* () {
@@ -118,8 +146,8 @@ export class WebhookServer extends Context.Service<
 			const server = yield* NodeHttpServer.make(createServer, { host: '127.0.0.1', port: bot.app.webhookPort });
 			const url = HttpServer.formatAddress(server.address);
 
-			yield* server.serve(HttpServerRequest.HttpServerRequest.use(handle));
-			yield* Effect.log(`listening for GitHub webhook deliveries on ${url}`);
+			yield* server.serve(HttpServerRequest.HttpServerRequest.use((request) => (request.url === linearWebhookPath ? handleLinear(request) : handle(request))));
+			yield* Effect.log(`listening for GitHub webhook deliveries on ${url} and Linear ones on ${new URL(linearWebhookPath, url).href}`);
 
 			return WebhookServer.of({ url });
 		}),

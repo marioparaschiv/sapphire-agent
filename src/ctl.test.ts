@@ -131,11 +131,12 @@ describe('ctl', () => {
 
 			yield* fs.writeFileString(
 				join(directory, 'config.json'),
-				JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }),
+				JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }),
 			);
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'app.pem'), generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey, { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), 'lin_wh_test', { mode: 0o600 });
 			yield* Journal.use((journal) => journal.putRun(run)).pipe(Effect.provide(Journal.layer(join(directory, 'journal.db'))));
 
 			assert.deepStrictEqual(yield* ctlSh(directory, 'stop', 'UNB-13'), { stdout: '', stderr: 'UNB-13 has no run in flight\n', exitCode: ChildProcessSpawner.ExitCode(1) });

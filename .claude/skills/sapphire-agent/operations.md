@@ -13,7 +13,7 @@ How the live service is installed, started, paused, drained, deployed, inspected
 - `ExecStart` pins `~/.nvm/versions/node/v24.21.0/bin/node`. Update both units after a Node upgrade.
 - Apply config or code changes with `systemctl --user restart sapphire-agent` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
 - Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user, for reads. Every comment is posted by the GitHub App (below), with no `gh` login.
-- The service listens for the App's webhook deliveries on `127.0.0.1:<bot.app.webhookPort>` (default 3790) while it runs (Webhook below).
+- The service listens for the App's and Linear's webhook deliveries on `127.0.0.1:<bot.app.webhookPort>` (default 3790) while it runs (Webhook and Linear webhook below).
 - A command agent runs `node` through `scripts/ctl.sh` in its tab's shell, so `node` (24) must be on the user's shell `PATH`.
 
 ## Install
@@ -50,6 +50,24 @@ The service answers each delivery:
 | 500 | The command could not be recorded (journal error). |
 
 GitHub does not redeliver a failed delivery (500, or the service down so nginx answered 502) on its own, so the service does: at startup and every `deliveryScanSeconds` (default 300) it asks GitHub to redeliver each event whose newest attempt failed, back to the last scan and at most 3 days back (`rules.md`, Missed deliveries). A mention made while the service was down is handled once it is back, if that is within 3 days; older deliveries are gone from GitHub. A delivery can also be redelivered by hand from the App's settings (Advanced, Recent Deliveries); redelivering one that succeeded already starts nothing.
+
+## Linear webhook
+
+Linear has no push API other than webhooks, which need a public HTTPS URL. Tailscale Funnel exposes only `/linear` of the webhook server. A signed delivery wakes the reconciler, so a change in Linear is acted on at once instead of at the next poll. Set it up once by hand:
+
+1. Expose the path: `sudo tailscale funnel --bg --set-path /linear http://127.0.0.1:3790/linear`. If Funnel or HTTPS certificates are off for the tailnet, the command prints a link to turn them on. `tailscale funnel status` shows the public URL, `https://<machine>.<tailnet>.ts.net/linear`.
+2. In Linear, Settings, API, Webhooks, create a webhook: label `sapphire-agent`, URL the public URL from step 1, data change events Issues and Comments, for all public teams.
+3. Save the webhook's signing secret, shown on its page, as `$HERDR_PLUGIN_CONFIG_DIR/linear-webhook-secret` with `chmod 600`, and set `linearWebhookSecretFile` to that path (`config.md`).
+4. `systemctl --user restart sapphire-agent`.
+
+The service answers each Linear delivery:
+
+| Status | When |
+| --- | --- |
+| 200 | The `Linear-Signature` header matches the Linear webhook secret; the reconciler was woken. |
+| 401 | The `Linear-Signature` header is missing or does not match. Nothing else happens. |
+
+A delivery carries no state for the service: it only asks for a tick, which reads Linear again. A delivery sent while the service is down is not replayed; the tick at startup and the `pollSeconds` backstop poll catch up instead. Logs of a Linear delivery carry `delivery=<Linear-Delivery>`.
 
 ## Plugin manifest (`herdr-plugin.toml`)
 
@@ -114,7 +132,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Service crash-loops with `StartupError: cannot start, fix these and restart:` | Fix every listed problem (Linear key, App key or webhook secret file missing, empty or not mode 600, invalid config field, missing env var); see `config.md`. |
+| Service crash-loops with `StartupError: cannot start, fix these and restart:` | Fix every listed problem (Linear key, Linear webhook secret, App key or webhook secret file missing, empty or not mode 600, invalid config field, missing env var); see `config.md`. |
 | Service crash-loops with `GitHub answered HTTP 401 to GET /app` | `bot.app.id` and the private key do not belong to the same App, or the key was revoked. Generate a new key (GitHub App above). |
 | Service crash-loops with `... still holds N claims of the old dispatcher` | Finish the cutover (above). |
 | Service crash-loops with a `ServeError` | Another process holds `bot.app.webhookPort` (`ss -ltnp 'sport = :3790'`). |

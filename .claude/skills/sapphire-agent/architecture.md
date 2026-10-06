@@ -12,7 +12,7 @@ One level-triggered loop. There is no dispatcher and worker split, no message pr
 
 Because every decision is made from what is observed now plus the journal, a missed herdr event, a crash or a restart never leaves state wrong: the next tick sees the same world and carries on. Every external write is idempotent (a marker check, a state check, or a write that is a no-op when already done), so doing a step again is safe.
 
-The `Reconciler` service ticks at once on start, then every `pollSeconds`, and once more whenever `wake` is called. Wakes and polls that arrive during a tick collapse into one more tick. `main.ts` calls `wake` on every herdr event, so an agent status change is acted on within moments, while the poll always overrides what the socket said. It also calls `wake` whenever the file `wake` in the state directory is written, which `scripts/ctl.sh` does after recording a request, so a command's request is acted on at once. The webhook server calls `wake` once it queued a command, so a mention starts its command at once.
+The `Reconciler` service ticks at once on start, then every `pollSeconds`, and once more whenever `wake` is called. Wakes and polls that arrive during a tick collapse into one more tick. `main.ts` calls `wake` on every herdr event, so an agent status change is acted on within moments, while the poll always overrides what the socket said. It also calls `wake` whenever the file `wake` in the state directory is written, which `scripts/ctl.sh` does after recording a request, so a command's request is acted on at once. The webhook server calls `wake` once it queued a command, so a mention starts its command at once, and on every signed Linear delivery, so a change in Linear is acted on at once. Because of these wakes the poll is only a backstop, every 10 minutes by default; a Linear delivery missed while the service was down is covered by the tick at startup and the poll.
 
 ## One tick
 
@@ -47,7 +47,7 @@ Each rule details: `rules.md`.
 
 ## The webhook server
 
-Mentions are not a rule: they arrive as GitHub App webhook deliveries. `WebhookServer` (`webhook-server.ts`) is an Effect-managed `node:http` server (`NodeHttpServer`) on `127.0.0.1:<bot.app.webhookPort>`, built as a layer beside the reconciler, so it listens while the service runs and closes on shutdown. nginx terminates TLS at `https://webhook.marioparaschiv.com/github` and forwards to it (`operations.md`). Each delivery's signature is checked against the webhook secret, its payload is decoded with `Schema`, and a comment that mentions the bot is recorded as a command by `makeRecordMention` (`mentions.ts`, which holds the mention and allowed-user decisions), before the delivery is answered. See `rules.md` (Mentions).
+Mentions are not a rule: they arrive as GitHub App webhook deliveries. `WebhookServer` (`webhook-server.ts`) is an Effect-managed `node:http` server (`NodeHttpServer`) on `127.0.0.1:<bot.app.webhookPort>`, built as a layer beside the reconciler, so it listens while the service runs and closes on shutdown. nginx terminates TLS at `https://webhook.marioparaschiv.com/github` and forwards to it (`operations.md`). Linear's deliveries come to the same server on `/linear`, exposed by Tailscale Funnel (`operations.md`); each one's `Linear-Signature` is checked against the Linear webhook secret, and a signed one only wakes the reconciler, which reads Linear itself, so a duplicate or out-of-order delivery is harmless. On every other path, each GitHub delivery's signature is checked against the webhook secret, its payload is decoded with `Schema`, and a comment that mentions the bot is recorded as a command by `makeRecordMention` (`mentions.ts`, which holds the mention and allowed-user decisions), before the delivery is answered. See `rules.md` (Mentions).
 
 GitHub does not redeliver a failed delivery by itself. `MissedDeliveries` (`missed-deliveries.ts`), forked by `main.ts` beside the reconciler, scans the App's delivery log at startup and every `deliveryScanSeconds` and asks GitHub to redeliver each event whose newest attempt failed, back to 10 minutes before the journal's delivery mark and at most 3 days. The redeliveries arrive at the webhook server like any other. A failed scan is logged and tried again on the next. See `rules.md` (Missed deliveries).
 
@@ -57,7 +57,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 
 | Service | Module | Does | Test layer |
 | --- | --- | --- | --- |
-| `AppConfig` | `config.ts` | Env, config file, API key and the GitHub App's private key and webhook secret, read once at startup. | `AppConfig.layerTest(dir, settings)` |
+| `AppConfig` | `config.ts` | Env, config file, API key, Linear webhook secret and the GitHub App's private key and webhook secret, read once at startup. | `AppConfig.layerTest(dir, settings)` |
 | `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, replies, comments, moves, labels, reactions. | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
 | `GitHub` | `github.ts` | `gh` CLI: PR lookup, summary, flags review, thread replies and resolves as the user; comments as the GitHub App. | `FakeGitHub.layer` |
 | `GitHubApp` | `github-app.ts` | GitHub App auth over `HttpClient`: its `<slug>[bot]` login, read at startup, installation tokens, cached per installation, and the App's webhook delivery log: a page of it and a redelivery. | `GitHubAppFixture.layer`: a real HTTP server with the real `GitHubApp` layer pointed at it. |
@@ -72,14 +72,14 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Observer` | `observation.ts` | One observation per tick. | Real, over the test layers. |
 | `Planner` | `planner.ts` | Runs the rules under the failure policy. | Real. |
 | `Reconciler` | `reconciler.ts` | The tick loop and `wake`. | Real. |
-| `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
+| `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; Linear deliveries in, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
 | `MissedDeliveries` | `missed-deliveries.ts` | `scan` redelivers failed webhook deliveries back to 10 minutes before the delivery mark; `run` scans at once and every `deliveryScanSeconds`. | Real, against `GitHubAppFixture` (`makeHarness` builds it; `h.scanDeliveries` runs one scan). |
 
 Rules are not services: each rule module exports an Effect that builds its `Rule` (`name`, `pausable`, `plan`) from the services it needs, and `Planner.layer` takes them all. Shared run actions (flag an epic, close a run's tab, end a run, nudge an agent) live in `run-actions.ts`.
 
 ## Startup (`main.ts`)
 
-1. `AppConfig.layer` reads env, the config file, the API key and the GitHub App's private key and webhook secret and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
+1. `AppConfig.layer` reads env, the config file, the API key, the Linear webhook secret and the GitHub App's private key and webhook secret and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$HERDR_PLUGIN_STATE_DIR/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
 3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), and the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url>`). A failure there, e.g. the port taken, stops startup.
 4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event, one that calls it whenever the state directory's `wake` file is written and one that runs the delivery scan, and runs the reconciler.
@@ -104,7 +104,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/follow-up.ts` | Follow-up rule. |
 | `src/requests.ts` | Requests rule (stop, send). |
 | `src/mentions.ts` | Records a comment that mentions the bot as a command (`makeRecordMention`). |
-| `src/webhook-server.ts` | Webhook server: signature check, payload schemas, recording mentions, waking the reconciler. |
+| `src/webhook-server.ts` | Webhook server: signature checks, payload schemas, recording mentions, waking the reconciler for mentions and Linear deliveries. |
 | `src/commands.ts` | Commands rule, the command agent's lockdown. |
 | `src/cleanup.ts` | Cleanup rule and orphans. |
 | `src/run-actions.ts` | Flag, close a run's tab, end a run, nudge. |
@@ -114,7 +114,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/prompts.ts` | Tab label and prompts. |
 | `src/result-file.ts` | Result file schema. |
 | `src/call-policy.ts` | `Transient`, `Permanent`, timeouts and retries for every external call. |
-| `src/config.ts` | Config schema, env, API key, App private key and webhook secret, `StartupError`. |
+| `src/config.ts` | Config schema, env, API key, Linear webhook secret, App private key and webhook secret, `StartupError`. |
 | `src/legacy-claims.ts` | Startup guard against an undrained `claims.json`. |
 | `src/linear.ts`, `src/github.ts`, `src/github-app.ts`, `src/herdr.ts`, `src/git.ts`, `src/claude-trust.ts`, `src/claude-transcript.ts`, `src/pause.ts` | The external services. |
 | `src/linear-fixture.ts`, `src/github-app-fixture.ts`, `src/claude-transcript-fixture.ts`, `src/fixture-server.ts`, `src/github-fake.ts`, `src/herdr-fake.ts`, `src/test-harness.ts` | Test layers and the harness (see `development.md`). |
