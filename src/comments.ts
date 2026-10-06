@@ -244,6 +244,28 @@ const make = (config: AppConfigShape) => {
 					next: `Mention @${config.bot.login} again to retry.`,
 				},
 			),
+
+		// The orchestrator was asked for a handoff doc and ended its turn without writing it.
+		handoffMissing: (handoff: { readonly identifier: string; readonly sessionId: string; readonly path: string }) =>
+			notice(
+				{ identifier: handoff.identifier, purpose: 'handoffMissing', key: handoff.sessionId },
+				{
+					title: `📝 **${handoff.identifier} wrote no handoff doc** ${config.startTimeoutSeconds / 60} min after its context passed ${config.handoffAtTokens} tokens, so its session was not cleared.`,
+					items: [`Expected: \`${handoff.path}\``],
+					next: 'Look at the agent in its tab.',
+				},
+			),
+
+		// A subagent told to hand off kept working.
+		subagentOverContext: (subagent: { readonly identifier: string; readonly agentId: string; readonly tokens: number }) =>
+			notice(
+				{ identifier: subagent.identifier, purpose: 'subagentOverContext', key: subagent.agentId },
+				{
+					title: `🧠 **A subagent of ${subagent.identifier} did not hand off**: its context is at ${subagent.tokens} tokens. It keeps running.`,
+					items: [`Agent: \`${subagent.agentId}\``],
+					next: 'Look at the agent in its tab.',
+				},
+			),
 	} satisfies Record<string, (...args: never) => MarkedComment | Notice>;
 };
 

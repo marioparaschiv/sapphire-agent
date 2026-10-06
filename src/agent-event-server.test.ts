@@ -23,7 +23,7 @@ describe('agent events', () => {
 			const h = yield* makeHarness();
 			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle' });
 
-			assert.deepStrictEqual(yield* h.hook('claude', claudeHook('SessionStart', resumedSession, { source: 'resume' }), run.paneId), { code: 0, stderr: '' });
+			assert.deepStrictEqual(yield* h.hook('claude', claudeHook('SessionStart', resumedSession, { source: 'resume' }), run.paneId), { code: 0, stdout: '', stderr: '' });
 			assert.deepStrictEqual(yield* waiting(h), [`request 1: session TEST-10: ${resumedSession}`]);
 
 			yield* h.tick;
@@ -52,7 +52,7 @@ describe('agent events', () => {
 				[claudeHook('SessionStart', resumedSession, { source: 'resume' }), 'w9:p9'],
 				[claudeHook('SessionStart', resumedSession, { source: 'resume' }), null],
 			] as const) {
-				assert.deepStrictEqual(yield* h.hook('claude', payload, paneId), { code: 0, stderr: '' });
+				assert.deepStrictEqual(yield* h.hook('claude', payload, paneId), { code: 0, stdout: '', stderr: '' });
 			}
 
 			assert.deepStrictEqual(yield* waiting(h), []);
@@ -69,9 +69,10 @@ describe('agent events', () => {
 
 			assert.deepStrictEqual(unknownSource, {
 				code: 1,
+				stdout: '',
 				stderr: 'sapphire-agent refused the claude event: Expected "startup" | "resume" | "clear" | "compact" | "fork"   at ["source"]\n',
 			});
-			assert.deepStrictEqual(unknownAgent, { code: 1, stderr: 'sapphire-agent refused the codex event: Expected "claude"   at ["agent"]\n' });
+			assert.deepStrictEqual(unknownAgent, { code: 1, stdout: '', stderr: 'sapphire-agent refused the codex event: Expected "claude"   at ["agent"]\n' });
 			assert.deepStrictEqual(yield* waiting(h), []);
 		}),
 	);
@@ -83,7 +84,7 @@ describe('agent events', () => {
 
 			yield* h.stop;
 
-			assert.deepStrictEqual(yield* h.hook('claude', claudeHook('SessionStart', resumedSession, { source: 'resume' }), run.paneId), { code: 0, stderr: '' });
+			assert.deepStrictEqual(yield* h.hook('claude', claudeHook('SessionStart', resumedSession, { source: 'resume' }), run.paneId), { code: 0, stdout: '', stderr: '' });
 		}),
 	);
 });

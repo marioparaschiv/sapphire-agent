@@ -169,6 +169,8 @@ export type Harness = {
 	readonly writeResultFile: (run: Run, contents: string) => void;
 	// Writes the Claude session's transcript where Claude Code writes it.
 	readonly writeTranscript: (session: TranscriptSession, entries: ReadonlyArray<Record<string, unknown>>) => void;
+	// Writes the transcript of the session's subagent `agentId` where Claude Code writes it.
+	readonly writeSubagentTranscript: (session: TranscriptSession, agentId: string, entries: ReadonlyArray<Record<string, unknown>>) => void;
 	// Paths of the worktrees git knows under the worktrees directory.
 	readonly worktrees: () => ReadonlyArray<string>;
 	readonly hasBranch: (branch: string) => boolean;
@@ -176,13 +178,13 @@ export type Harness = {
 	// it printed.
 	readonly ctl: (...args: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<string>, unknown>;
 	// Runs `scripts/ctl.sh hook <agent>` as an agent's hook does in a herdr pane, with the payload on stdin; returns its
-	// exit code and stderr once the service answered.
+	// exit code, stdout and stderr once the service answered.
 	readonly hook: (agent: string, payload: string, paneId: string | null) => Effect.Effect<HookOutcome>;
 };
 
 export type JournalNotice = { readonly marker: string; readonly text: string; readonly sent: boolean };
 
-export type HookOutcome = { readonly code: number | null; readonly stderr: string };
+export type HookOutcome = { readonly code: number | null; readonly stdout: string; readonly stderr: string };
 
 const ctlScript = join(import.meta.dirname, '..', 'scripts', 'ctl.sh');
 
@@ -192,12 +194,16 @@ const runHook = (stateDirectory: string, agent: string, payload: string, paneId:
 		const child = spawn('sh', [ctlScript, 'hook', agent], {
 			env: { ...env, HERDR_PLUGIN_STATE_DIR: stateDirectory, ...(paneId === null ? {} : { HERDR_PANE_ID: paneId }) },
 		});
+		let stdout = '';
 		let stderr = '';
 
+		child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+			stdout += chunk;
+		});
 		child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
 			stderr += chunk;
 		});
-		child.on('close', (code) => resume(Effect.succeed({ code, stderr })));
+		child.on('close', (code) => resume(Effect.succeed({ code, stdout, stderr })));
 		child.stdin.end(payload);
 	});
 
@@ -275,6 +281,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
 					addChatSession: (messageRefs, post) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, post))),
 					addNotice: (notice) => crashPoint.pipe(Effect.andThen(journal.addNotice(notice))),
+					addSubagentHandoff: (handoff) => crashPoint.pipe(Effect.andThen(journal.addSubagentHandoff(handoff))),
 					markNoticeSent: (id) => crashPoint.pipe(Effect.andThen(journal.markNoticeSent(id))),
 				});
 			}),
@@ -358,6 +365,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					nudgedAt: null,
 					tailHash: null,
 					result: null,
+					handoff: null,
 				};
 
 				yield* (yield* journal).putRun(run).pipe(Effect.orDie);
@@ -423,7 +431,12 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 				writeFileSync(join(git(run.worktreePath, 'rev-parse', '--absolute-git-dir'), 'herdr-result.json'), contents);
 			},
-			writeTranscript: (session, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries),
+			writeTranscript: (session, entries) => {
+				writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries);
+			},
+			writeSubagentTranscript: (session, agentId, entries) => {
+				writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries, agentId);
+			},
 			worktrees: () =>
 				git(repo, 'worktree', 'list', '--porcelain')
 					.split('\n')

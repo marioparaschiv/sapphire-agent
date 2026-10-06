@@ -71,6 +71,17 @@ const projectChat = ({ team, repo, labelReposDirectory }: ProjectSettings) =>
 		...(labelReposDirectory === null ? [] : [`Its epics labelled repo:<name> run in ${labelReposDirectory}/<name>.`]),
 	].join(' ');
 
+// Typed into a run's pane once its context is full; the handoff skill takes its arguments as what the next session is for.
+const handoff = (path: string) => `/handoff Write the document to ${path}. The next session continues this run where you stopped.`;
+
+// Typed into the run's pane once the cleared session started.
+const resumeHandoff = (path: string) => `Read ${path} and continue; run its suggested skills`;
+
+// Added to a subagent's context after its tool call, once its context is full. Its orchestrator restarts the slice from
+// the doc when the subagent ends with `HANDOFF <path>`. A skill that only the user may invoke is followed by reading it.
+const subagentHandoff = ({ path, skill }: { readonly path: string; readonly skill: string }) =>
+	`Your context is full. Stop your current work now. Write a handoff document to ${path} by following ${skill}, then end your turn with exactly this line: HANDOFF ${path}`;
+
 export class Prompts extends Context.Service<
 	Prompts,
 	{
@@ -83,7 +94,10 @@ export class Prompts extends Context.Service<
 		readonly command: typeof command;
 		readonly chat: string;
 		readonly projectChat: typeof projectChat;
+		readonly handoff: typeof handoff;
+		readonly resumeHandoff: typeof resumeHandoff;
+		readonly subagentHandoff: typeof subagentHandoff;
 	}
 >()('sapphire-agent/Prompts') {
-	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat, projectChat });
+	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat, projectChat, handoff, resumeHandoff, subagentHandoff });
 }

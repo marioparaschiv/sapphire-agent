@@ -14,31 +14,39 @@ const ClaudeHook = Schema.Union([
 	hook('Stop', {}),
 	hook('Notification', { message: Schema.String }),
 	hook('SessionEnd', { reason: Schema.String }),
-	// Only with the `Skill` matcher.
 	hook('PostToolUse', { toolName: Schema.Literal('Skill'), toolInput: Schema.Struct({ skill: Schema.String }) }),
+	hook('PostToolUse', { toolName: Schema.String }),
 ]);
 
 type ClaudeHook = typeof ClaudeHook.Type;
 
-const toEvent = (payload: ClaudeHook): AgentEvent => {
+const toEvent = (payload: ClaudeHook): Option.Option<AgentEvent> => {
+	if (payload.agentId !== undefined) {
+		return payload.hookEventName === 'PostToolUse' ? Option.some({ _tag: 'ToolUsed', sessionId: payload.sessionId, agentId: payload.agentId }) : Option.none();
+	}
+
 	switch (payload.hookEventName) {
 		case 'SessionStart':
-			return { _tag: 'SessionStarted', sessionId: payload.sessionId, source: payload.source };
+			return Option.some({ _tag: 'SessionStarted', sessionId: payload.sessionId, source: payload.source });
 		case 'UserPromptSubmit':
-			return { _tag: 'TurnStarted', sessionId: payload.sessionId };
+			return Option.some({ _tag: 'TurnStarted', sessionId: payload.sessionId });
 		case 'Stop':
-			return { _tag: 'TurnEnded', sessionId: payload.sessionId };
+			return Option.some({ _tag: 'TurnEnded', sessionId: payload.sessionId });
 		case 'Notification':
-			return { _tag: 'Notified', sessionId: payload.sessionId, message: payload.message };
+			return Option.some({ _tag: 'Notified', sessionId: payload.sessionId, message: payload.message });
 		case 'SessionEnd':
-			return { _tag: 'SessionEnded', sessionId: payload.sessionId, reason: payload.reason };
+			return Option.some({ _tag: 'SessionEnded', sessionId: payload.sessionId, reason: payload.reason });
 		case 'PostToolUse':
-			// A plugin's skill is reported as `<plugin>:<skill>`.
-			return { _tag: 'SkillInvoked', sessionId: payload.sessionId, skill: payload.toolInput.skill.slice(payload.toolInput.skill.lastIndexOf(':') + 1) };
+			return Option.some(
+				'toolInput' in payload
+					? // A plugin's skill is reported as `<plugin>:<skill>`.
+						{ _tag: 'SkillInvoked', sessionId: payload.sessionId, skill: payload.toolInput.skill.slice(payload.toolInput.skill.lastIndexOf(':') + 1) }
+					: { _tag: 'ToolUsed', sessionId: payload.sessionId, agentId: null },
+			);
 	}
 };
 
-export const decodeClaudeHook: AgentAdapter = (payload) =>
-	Schema.decodeUnknownEffect(Schema.fromJsonString(ClaudeHook))(payload).pipe(
-		Effect.map((decoded) => (decoded.agentId === undefined ? Option.some(toEvent(decoded)) : Option.none())),
-	);
+export const claudeAdapter: AgentAdapter = {
+	decode: (payload) => Schema.decodeUnknownEffect(Schema.fromJsonString(ClaudeHook))(payload).pipe(Effect.map(toEvent)),
+	toolContext: (text) => JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: text } }),
+};

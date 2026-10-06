@@ -6,7 +6,8 @@ import { text } from 'node:stream/consumers';
 export const eventSocketName = 'events.sock';
 
 // What `sapphire hook <agent>` sends: the agent's own hook payload, untouched, and the herdr pane it runs in. The service
-// decodes the payload with that agent's adapter and answers one line, `ok` or the reason it refused the event.
+// decodes the payload with that agent's adapter and answers `ok` or the reason it refused the event on the first line;
+// after `ok`, the rest is what the hook prints for the agent.
 export type EventEnvelope = { readonly agent: string; readonly paneId: string | null; readonly payload: string };
 
 const send = (path: string, envelope: EventEnvelope) =>
@@ -39,13 +40,21 @@ const main = async (agent: string | undefined) => {
 
 	try {
 		const answer = await send(join(stateDirectory, eventSocketName), envelope);
+		const [status, ...output] = answer.split('\n');
 
-		if (answer !== 'ok') {
+		if (status !== 'ok') {
 			console.error(`sapphire-agent refused the ${agent} event: ${answer}`);
 			process.exitCode = 1;
+
+			return;
+		}
+
+		if (output.length > 0) {
+			process.stdout.write(`${output.join('\n')}\n`);
 		}
 	} catch (error) {
-		// The service is not running. Events only make it act sooner; its next poll sees the same state.
+		// The service is not running. Events only make it act sooner; its next poll sees the same state, and the next tool
+		// call checks the context again.
 		if (isServiceDown(error)) {
 			return;
 		}

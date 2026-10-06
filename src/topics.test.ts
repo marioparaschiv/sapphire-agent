@@ -220,10 +220,10 @@ describe('topics', () => {
 				skillHook(run.session.id, 'review-verify'),
 				skillHook(run.session.id, 'sapphire-tools:pr'),
 			]) {
-				assert.deepStrictEqual(yield* h.hook('claude', payload, run.paneId), { code: 0, stderr: '' });
+				assert.deepStrictEqual(yield* h.hook('claude', payload, run.paneId), { code: 0, stdout: '', stderr: '' });
 			}
 
-			assert.deepStrictEqual(yield* h.hook('claude', skillHook(other.run.session.id, 'tdd'), other.run.paneId), { code: 0, stderr: '' });
+			assert.deepStrictEqual(yield* h.hook('claude', skillHook(other.run.session.id, 'tdd'), other.run.paneId), { code: 0, stdout: '', stderr: '' });
 			yield* h.tick;
 			yield* h.restart;
 			yield* h.tick;

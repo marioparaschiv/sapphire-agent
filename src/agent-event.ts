@@ -14,9 +14,15 @@ export const AgentEvent = Schema.TaggedUnion({
 	SessionEnded: { sessionId: Schema.String, reason: Schema.String },
 	// The agent ran a skill, by its own name (`sreview`), without any plugin's prefix.
 	SkillInvoked: { sessionId: Schema.String, skill: Schema.String },
+	// The agent, or its subagent `agentId`, finished a tool call. The agent's own skills are SkillInvoked instead.
+	ToolUsed: { sessionId: Schema.String, agentId: Schema.NullOr(Schema.String) },
 });
 
 export type AgentEvent = typeof AgentEvent.Type;
 
-// None for an event that is not about the agent's own session, e.g. one of its subagents.
-export type AgentAdapter = (payload: string) => Effect.Effect<Option.Option<AgentEvent>, Schema.SchemaError>;
+export type AgentAdapter = {
+	// None for an event that is not about the agent's own session, e.g. one of its subagents', but for a subagent's tool call.
+	readonly decode: (payload: string) => Effect.Effect<Option.Option<AgentEvent>, Schema.SchemaError>;
+	// What the hook prints after a tool call so the agent reads `text` before it goes on.
+	readonly toolContext: (text: string) => string;
+};

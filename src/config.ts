@@ -40,6 +40,8 @@ const Settings = Schema.Struct({
 	nudgeGraceSeconds: IntAtLeast(60, 600),
 	// How long a run may go, in any state, before the epic is flagged once.
 	maxRunSeconds: IntAtLeast(600, 5400),
+	// How much context a run's agent or one of its subagents may use before it hands its work to a fresh session.
+	handoffAtTokens: IntAtLeast(10_000, 250_000),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
 	// How often the App's failed webhook deliveries are looked for and redelivered.

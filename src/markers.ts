@@ -20,6 +20,8 @@ import { Option, Schema } from 'effect';
 // - workingOrphan: `<tabId>`, once per untracked tab whose agent is working.
 // - commandReply: `<requestId>`, once per reply a command's agent asked for.
 // - commandFailed: `<claimedAt>` of the command, once per command that failed.
+// - handoffMissing: `<sessionId>`, once per orchestrator session that wrote no handoff doc.
+// - subagentOverContext: `<agentId>`, once per subagent that went on past its handoff.
 export const MarkerPurpose = Schema.Literals([
 	'awaitingInput',
 	'stale',
@@ -40,6 +42,8 @@ export const MarkerPurpose = Schema.Literals([
 	'pullRequestOpened',
 	'commandReply',
 	'commandFailed',
+	'handoffMissing',
+	'subagentOverContext',
 ]);
 
 export type MarkerPurpose = typeof MarkerPurpose.Type;

@@ -27,6 +27,7 @@ const orchestrate: Run = {
 	nudgedAt: null,
 	tailHash: null,
 	result: null,
+	handoff: null,
 };
 
 const followUp: Run = {
@@ -53,6 +54,7 @@ const followUp: Run = {
 		replies: [{ threadId: 'PRRT_1', body: 'Fixed.' }],
 		flags: [{ path: 'src/linear.ts', line: 12, body: 'Check the page size.' }],
 	},
+	handoff: { sessionId: '5b8e2f47-1c3d-4a9e-8f60-2d7c9b1a4e35', step: 'cleared' },
 };
 
 // The runs table as migrations 0001 to 0010 left it.
@@ -296,7 +298,7 @@ describe('Journal', () => {
 			assert.deepStrictEqual(reopened, [followUp]);
 			assert.deepStrictEqual(
 				tables.map(({ name }) => name),
-				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'notices', 'projects', 'requests', 'runs', 'topics', 'transient_failures'],
+				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'notices', 'projects', 'requests', 'runs', 'subagent_handoffs', 'topics', 'transient_failures'],
 			);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);

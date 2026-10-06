@@ -47,6 +47,8 @@ const describeRequest = (request: Request) => {
 			return `session ${request.identifier}: ${request.sessionId}`;
 		case 'phase':
 			return `phase ${request.identifier}: /${request.phase}`;
+		case 'handoff':
+			return `handoff ${request.identifier}: ${request.sessionId}`;
 		case 'project-add':
 			return `add project ${request.project.team}`;
 		case 'project-edit':

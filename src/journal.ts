@@ -39,6 +39,16 @@ export const sessionName = (identifier: string) => identifier.toLowerCase();
 // Made when a run or command is claimed and kept from then on, so a start after a crash resumes into the same session.
 export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: sessionName(identifier) }));
 
+// The run's agent handing its work to a fresh session once its context filled up: asked to write the handoff doc, its
+// session cleared once the doc exists and the turn ended, then the new session told to read the doc. Each step is
+// recorded before it is typed, so none is typed twice.
+export const HandoffStep = Schema.Literals(['requested', 'cleared', 'resumed']);
+
+// `sessionId` is the session that hands off.
+export const Handoff = Schema.Struct({ sessionId: Schema.String, step: HandoffStep });
+
+export type Handoff = typeof Handoff.Type;
+
 // Only what cannot be observed from Linear, herdr, git or GitHub. Times are epoch milliseconds.
 export const Run = Schema.Struct({
 	epicId: Schema.String,
@@ -66,6 +76,8 @@ export const Run = Schema.Struct({
 	nudgedAt: Schema.NullOr(Millis),
 	tailHash: Schema.NullOr(Schema.String),
 	result: Schema.NullOr(Schema.fromJsonString(ResultFile)),
+	// The latest handoff; none before the first.
+	handoff: Schema.NullOr(Schema.fromJsonString(Handoff)),
 });
 
 export type Run = typeof Run.Type;
@@ -147,6 +159,8 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
 	// Recorded by the agent event server when a run's agent starts a phase.
 	Schema.TaggedStruct('phase', { identifier: Schema.String, phase: Phase }),
+	// Recorded by the agent event server when a run's agent's context reached handoffAtTokens in that session.
+	Schema.TaggedStruct('handoff', { identifier: Schema.String, sessionId: Schema.String }),
 	// `sapphire project add`, `edit` and `remove`, checked by the CLI before they are recorded.
 	Schema.TaggedStruct('project-add', { project: ProjectSettings }),
 	Schema.TaggedStruct('project-edit', { project: ProjectSettings }),
@@ -195,6 +209,10 @@ export type ChatMessage = typeof ChatMessage.Type;
 export const UnsentNotice = Schema.Struct({ id: Schema.Int, ...Marker.fields, text: Schema.String });
 
 export type UnsentNotice = typeof UnsentNotice.Type;
+
+export const SubagentHandoff = Schema.Struct({ agentId: Schema.String, identifier: Schema.String });
+
+export type SubagentHandoff = typeof SubagentHandoff.Type;
 
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
@@ -392,6 +410,19 @@ const migrations = SqliteMigrator.layer({
 			yield* sql`ALTER TABLE runs DROP COLUMN question_comment_id`;
 			yield* sql`ALTER TABLE runs DROP COLUMN delivered_reply_ids`;
 		}),
+		'0012_add_handoffs': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN handoff TEXT`;
+			// The subagents told to hand off, so each is told once.
+			yield* sql`
+				CREATE TABLE subagent_handoffs (
+					agent_id TEXT PRIMARY KEY,
+					identifier TEXT NOT NULL,
+					requested_at INTEGER NOT NULL
+				)
+			`;
+		}),
 	}),
 });
 
@@ -449,6 +480,8 @@ export class Journal extends Context.Service<
 		// Oldest first.
 		readonly unsentNotices: Effect.Effect<ReadonlyArray<UnsentNotice>, JournalError>;
 		readonly markNoticeSent: (id: number) => Effect.Effect<void, JournalError>;
+		// Records that the run's subagent was told to hand off; false when it was already.
+		readonly addSubagentHandoff: (handoff: SubagentHandoff) => Effect.Effect<boolean, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -659,6 +692,18 @@ export class Journal extends Context.Service<
 
 				const markNoticeSent = (id: number) => Clock.currentTimeMillis.pipe(Effect.flatMap((sentAt) => markSent({ id, sentAt })));
 
+				const insertSubagentHandoff = SqlSchema.findOneOption({
+					Request: Schema.Struct({ ...SubagentHandoff.fields, requestedAt: Millis }),
+					Result: Schema.Struct({ agentId: Schema.String }),
+					execute: (row) => sql`INSERT INTO subagent_handoffs ${sql.insert(row)} ON CONFLICT (agent_id) DO NOTHING RETURNING agent_id`,
+				});
+
+				const addSubagentHandoff = (handoff: SubagentHandoff) =>
+					Clock.currentTimeMillis.pipe(
+						Effect.flatMap((requestedAt) => insertSubagentHandoff({ ...handoff, requestedAt })),
+						Effect.map(Option.isSome),
+					);
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -691,6 +736,7 @@ export class Journal extends Context.Service<
 					hasNotice,
 					unsentNotices,
 					markNoticeSent,
+					addSubagentHandoff,
 				});
 			}),
 		).pipe(
