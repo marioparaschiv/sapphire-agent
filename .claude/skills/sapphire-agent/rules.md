@@ -143,7 +143,19 @@ The coding agents report their session events through one-line hooks in their ow
 
 Another agent (e.g. pi) needs an adapter (`(payload) => Option<AgentEvent>`) added to `adapters` in `agent-event-server.ts`, and a hook in that agent that runs `sapphire hook <name>`.
 
-## 8. Commands
+## 8. Topics
+
+Not pausable. Each running epic gets a thread in the chat (a Telegram forum topic in the user's private chat with the bot, `architecture.md`, The chat), recorded in the journal (`topics`: epic, thread, the state it shows, the PR it posted). Its work is a task (`<ID> thread`), not the epic's: a chat failure is logged and tried again next tick, and never flags the epic.
+
+- Open: a run in flight whose epic is in the run's states and has no thread gets one, named by its state, then the thread is recorded. Only running epics get one.
+- State: `working` (claimed, running), `awaitingInput`, `error` (error, stale); with no run in flight, `review` while the epic is in To Review or In Review (or still seen in Implementing by a run with a stored result, which the results rule moved this tick). A change renames the thread, then the new state is recorded.
+- PR: while the epic has a run, an open or merged PR for its branch is posted once in the thread and once in the main chat, then recorded.
+- Shipped: one line (identifier, title, PR or `no PR`, sub-issue count as slices) in the archive thread, `✅ Done`, opened on first use and recorded (`archive_thread`); then the epic's thread is deleted and its row dropped.
+- Anything else (the run was stopped, the epic was moved back or away, or is gone from Linear): the thread is deleted with no summary, then its row dropped.
+
+Messages are sent with a `random_id` derived from what they are for, and Telegram refuses a `random_id` it has seen, so a crash between a post and its record never posts twice; renaming to the same name and deleting a deleted topic are no-ops.
+
+## 9. Commands
 
 Not paused. Runs the command agents, one at a time, oldest first. Command statuses: `ignored`, `queued` (waiting for its turn), `claimed` (its turn came; being started), `running`, `ended` (the agent said it was done; tab closed), `error` (failed; the comment got a reply saying so; tab closed). Commands hold no `maxInFlight` slot: a stop or a pause must work while every slot is taken, so at most `maxInFlight` runs plus one command agent are alive.
 
@@ -246,5 +258,8 @@ A new claim reuses the existing worktree if it is on the same branch and opens a
 - A run whose agent keeps reporting `working` holds its slot and its tab until it stops or is flagged `stale`.
 - A crash after a message was typed into the pane but before its `send` request was dropped types it again, as with question replies.
 - The command agent's replies go to the issue's or PR's conversation, also for a mention in a review thread.
+- A crash right after a topic was made, before it was recorded, leaves that topic behind empty and the next tick makes another: a bot cannot list topics (`messages.getForumTopics` is user-only), so it cannot find the one it made. Delete the stray topic by hand.
+- How a draft's stop reaches the bot is not documented by Telegram; the adapter takes an `updateUserTyping` with `sendMessageStopDraftAction` for the draft's id. If Telegram reports it some other way, stop does nothing and the reply finishes.
+- The private chat must not let users create threads (BotFather, Threaded mode, "Disallow users to create new threads"), or Telegram clients turn every message in General into a new topic, which belongs to no epic and is dropped.
 - A mention whose delivery failed more than 3 days ago is lost: GitHub no longer lists it, so it cannot be redelivered. Mention the bot again.
 - A delivery that the service refuses every time (401 for a webhook secret that does not match, 400 for an unexpected payload) is redelivered on every scan until it is fixed or 3 days have passed.

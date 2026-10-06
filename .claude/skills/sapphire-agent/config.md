@@ -50,7 +50,8 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
 | `telegram.botTokenFile` | required | `~` expanded. The Telegram bot's token, see below. |
 | `telegram.apiIdFile`, `telegram.apiHashFile` | required | `~` expanded. The `api_id` and `api_hash` of a Telegram app (my.telegram.org), which the bot logs in over MTProto with, see below. |
-| `telegram.allowedUserIds` | required | Non-empty array of numeric Telegram user ids. Only their messages in their private chat with the bot reach the service; anyone else's are dropped and logged (`architecture.md`, The chat). |
+| `telegram.allowedUserIds` | required | Non-empty array of numeric Telegram user ids. Only their messages in their private chat with the bot reach the service; anyone else's are dropped and logged (`architecture.md`, The chat). Epic topics and notifications go to the private chat of the first id. |
+| `telegram.transcriptionModelDirectory` | `$HERDR_PLUGIN_STATE_DIR/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | `~` expanded. The sherpa-onnx Parakeet TDT 0.6B v3 int8 model voice notes are transcribed with: `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`. Transcription also needs `ffmpeg` on `PATH`. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
@@ -141,7 +142,7 @@ Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl
 
 ## Startup errors
 
-Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero:
+Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero:
 
 ```
 StartupError: cannot start, fix these and restart:
@@ -150,6 +151,7 @@ StartupError: cannot start, fix these and restart:
 - /home/dev/.config/herdr/plugins/config/sapphire-agent/config.json maxInflight: Expected no excess property
 - no Linear API key: create /home/dev/.config/sapphire-agent/linear-key with mode 600
 - /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem is readable by other users; run chmod 600 /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem
+- no transcription model in /home/dev/.local/state/herdr/plugins/sapphire-agent/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8: encoder.int8.onnx, tokens.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 there
 ```
 
 A file whose path comes from a missing env var or an invalid config file is not read; that problem is already reported. Startup also stops while the old dispatcher's `claims.json` still holds claims (`operations.md`).

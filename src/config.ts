@@ -79,6 +79,8 @@ const Settings = Schema.Struct({
 		apiIdFile: Path,
 		apiHashFile: Path,
 		allowedUserIds: Schema.Array(Schema.Int.check(Schema.isGreaterThan(0))).check(Schema.makeFilter((ids) => ids.length > 0 || 'no allowed users configured')),
+		// Where the voice note model is; defaults to `<state directory>/models/<transcriptionModel>`.
+		transcriptionModelDirectory: Schema.optionalKey(Path),
 	}),
 });
 
@@ -116,6 +118,10 @@ const env = {
 
 export type Env = { readonly [K in keyof typeof env]: Config.Success<(typeof env)[K]> };
 
+export const transcriptionModel = 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8';
+
+export const transcriptionModelFiles = { encoder: 'encoder.int8.onnx', decoder: 'decoder.int8.onnx', joiner: 'joiner.int8.onnx', tokens: 'tokens.txt' } as const;
+
 export type AppConfigShape = Settings & {
 	readonly env: Env;
 	readonly linearApiKey: Redacted.Redacted<string>;
@@ -125,6 +131,7 @@ export type AppConfigShape = Settings & {
 	readonly telegramBotToken: Redacted.Redacted<string>;
 	readonly telegramApiId: number;
 	readonly telegramApiHash: Redacted.Redacted<string>;
+	readonly transcriptionModelDirectory: string;
 };
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
@@ -199,6 +206,23 @@ const readPrivateKey = (path: string) =>
 		Effect.flatMap((pem) => Effect.try({ try: () => createPrivateKey(pem), catch: () => [`${path} is not a PEM private key`] })),
 	);
 
+const resolveTranscriptionModelDirectory = (settings: Settings, stateDirectory: string) =>
+	settings.telegram.transcriptionModelDirectory ?? join(stateDirectory, 'models', transcriptionModel);
+
+const checkTranscriptionModel = (directory: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem;
+		const files = Object.values(transcriptionModelFiles);
+		const present = yield* Effect.forEach(files, (file) => fs.exists(join(directory, file)), { concurrency: 'unbounded' });
+		const missing = files.filter((_, index) => !present[index]);
+
+		if (missing.length > 0) {
+			return yield* Effect.fail([`no transcription model in ${directory}: ${missing.join(', ')} missing; download ${transcriptionModel} there`]);
+		}
+
+		return directory;
+	}).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail([`${directory}: ${error.message}`])));
+
 const configProblems = (error: Config.ConfigError) => (Schema.isSchemaError(error.cause) ? schemaProblems('', error.cause) : [error.message]);
 
 // A file whose path comes from a failed env var is not read; that env var is already reported.
@@ -208,7 +232,8 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
 // Reads env, the config file, the Linear API key and webhook secret, the GitHub App's private key and webhook secret
-// and the Telegram bot token, api_id and api_hash, and reports every problem in one StartupError.
+// and the Telegram bot token, api_id and api_hash, checks the transcription model is there, and reports every problem
+// in one StartupError.
 export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
@@ -219,6 +244,12 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 	const telegramBotToken = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.botTokenFile), readTelegramBotToken);
 	const telegramApiId = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiIdFile), readTelegramApiId);
 	const telegramApiHash = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiHashFile), readTelegramApiHash);
+	const transcriptionModelDirectory = yield* readWhen(
+		Result.all({ settings, stateDirectory: envResults.stateDirectory }).pipe(
+			Result.map(({ settings, stateDirectory }) => resolveTranscriptionModelDirectory(settings, stateDirectory)),
+		),
+		checkTranscriptionModel,
+	);
 	const problems = [
 		...Object.values(envResults).flatMap((result) => (Result.isFailure(result) ? configProblems(result.failure) : [])),
 		...problemsOf(settings),
@@ -229,8 +260,20 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		...problemsOf(telegramBotToken),
 		...problemsOf(telegramApiId),
 		...problemsOf(telegramApiHash),
+		...problemsOf(transcriptionModelDirectory),
 	];
-	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret, linearWebhookSecret, telegramBotToken, telegramApiId, telegramApiHash });
+	const loaded = Result.all({
+		env: Result.all(envResults),
+		settings,
+		linearApiKey,
+		appPrivateKey,
+		webhookSecret,
+		linearWebhookSecret,
+		telegramBotToken,
+		telegramApiId,
+		telegramApiHash,
+		transcriptionModelDirectory,
+	});
 
 	if (problems.length > 0 || Result.isFailure(loaded)) {
 		return yield* new StartupError({ problems });
@@ -246,6 +289,7 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		telegramBotToken: loaded.success.telegramBotToken,
 		telegramApiId: loaded.success.telegramApiId,
 		telegramApiHash: loaded.success.telegramApiHash,
+		transcriptionModelDirectory: loaded.success.transcriptionModelDirectory,
 	};
 });
 
@@ -255,8 +299,8 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 	// Defaults plus one team, the bot and the Telegram bot, with every path under `directory`, a freshly generated App key
 	// and the webhook server on a free port.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
-		Layer.sync(AppConfig, () => ({
-			...Schema.decodeUnknownSync(Settings)({
+		Layer.sync(AppConfig, () => {
+			const decoded = Schema.decodeUnknownSync(Settings)({
 				teams: { Test: { repo: join(directory, 'repo') } },
 				worktreesDirectory: join(directory, 'worktrees'),
 				linearWebhookSecretFile: join(directory, 'linear-webhook-secret'),
@@ -272,22 +316,27 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 					allowedUserIds: [7_100_200_300],
 				},
 				...settings,
-			}),
-			env: {
-				herdrBinPath: 'herdr',
-				herdrSocketPath: join(directory, 'herdr.sock'),
-				configDirectory: directory,
-				stateDirectory: directory,
-				linearKeyFile: join(directory, 'linear-key'),
-				claudeConfigPath: join(directory, 'claude.json'),
-				claudeConfigDirectory: join(directory, 'claude'),
-			},
-			linearApiKey: Redacted.make('lin_api_test'),
-			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
-			webhookSecret: Redacted.make('test-webhook-secret'),
-			linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
-			telegramBotToken: Redacted.make('123456:test-bot-token'),
-			telegramApiId: 1_234_567,
-			telegramApiHash: Redacted.make('test-api-hash'),
-		}));
+			});
+
+			return {
+				...decoded,
+				env: {
+					herdrBinPath: 'herdr',
+					herdrSocketPath: join(directory, 'herdr.sock'),
+					configDirectory: directory,
+					stateDirectory: directory,
+					linearKeyFile: join(directory, 'linear-key'),
+					claudeConfigPath: join(directory, 'claude.json'),
+					claudeConfigDirectory: join(directory, 'claude'),
+				},
+				linearApiKey: Redacted.make('lin_api_test'),
+				appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
+				webhookSecret: Redacted.make('test-webhook-secret'),
+				linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
+				telegramBotToken: Redacted.make('123456:test-bot-token'),
+				telegramApiId: 1_234_567,
+				telegramApiHash: Redacted.make('test-api-hash'),
+				transcriptionModelDirectory: resolveTranscriptionModelDirectory(decoded, directory),
+			};
+		});
 }

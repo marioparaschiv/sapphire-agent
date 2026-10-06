@@ -113,6 +113,8 @@ export type LinearShape = {
 	readonly replies: (questionIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Reply>, CallError>;
 	// Every comment on the issue, replies included, oldest first.
 	readonly comments: (issueId: string) => Effect.Effect<ReadonlyArray<Comment>, CallError>;
+	// At most MAX_PAGE_SIZE.
+	readonly subIssueCount: (issueId: string) => Effect.Effect<number, CallError>;
 	readonly moveIssue: (issueId: string, stateId: string) => Effect.Effect<void, CallError>;
 	// Returns the ID of the issue's comment carrying the marker, posting it first (as a reply when parentId is
 	// given) only if no comment carries it yet.
@@ -321,6 +323,18 @@ const make = (endpoint: string) =>
 						),
 
 			comments: (issueId) => readComments(issueId).pipe(withPolicy),
+
+			subIssueCount: (issueId) =>
+				request(
+					Schema.Struct({ issue: Schema.Struct({ children: nodes(Schema.Struct({ id: Schema.String })) }) }),
+					`query SubIssues($id: String!) {
+						issue(id: $id) { children(first: ${MAX_PAGE_SIZE}) { nodes { id } } }
+					}`,
+					{ id: issueId },
+				).pipe(
+					Effect.map((result) => result.issue.children.nodes.length),
+					withPolicy,
+				),
 
 			moveIssue: (issueId, stateId) =>
 				request(

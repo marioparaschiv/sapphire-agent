@@ -4,11 +4,13 @@ import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { ConfigProvider, Effect, FileSystem, Redacted } from 'effect';
-import { loadAppConfig } from './config.ts';
+import { loadAppConfig, transcriptionModel, transcriptionModelFiles } from './config.ts';
 
 type SecretFile = { text: string; mode: number };
 
-// `config` gets the temp directory the files are written to. Each Telegram file is written unless given as null.
+// `config` gets the temp directory the files are written to, which is also the state directory. Each Telegram file is
+// written unless given as null; the transcription model files go to `<directory>/models/<transcriptionModel>` unless
+// `modelFiles` names which.
 const load = (
 	env: Record<string, string>,
 	files: {
@@ -20,6 +22,7 @@ const load = (
 		telegramToken?: SecretFile | null;
 		telegramApiId?: SecretFile | null;
 		telegramApiHash?: SecretFile | null;
+		modelFiles?: ReadonlyArray<string>;
 	},
 ) =>
 	Effect.gen(function* () {
@@ -60,8 +63,17 @@ const load = (
 			}
 		}
 
+		const modelDirectory = join(directory, 'models', transcriptionModel);
+
+		yield* fs.makeDirectory(modelDirectory, { recursive: true }).pipe(Effect.orDie);
+
+		for (const file of files.modelFiles ?? Object.values(transcriptionModelFiles)) {
+			yield* fs.writeFileString(join(modelDirectory, file), '').pipe(Effect.orDie);
+		}
+
 		const provider = ConfigProvider.fromEnvRecord({
 			HERDR_PLUGIN_CONFIG_DIR: directory,
+			HERDR_PLUGIN_STATE_DIR: directory,
 			SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
 			...env,
 		});
@@ -69,7 +81,7 @@ const load = (
 		return yield* loadAppConfig.pipe(Effect.provide(ConfigProvider.layer(provider)));
 	}).pipe(Effect.provide(NodeFileSystem.layer));
 
-const fullEnv = { HERDR_BIN_PATH: '/bin/herdr', HERDR_SOCKET_PATH: '/run/herdr.sock', HERDR_PLUGIN_STATE_DIR: '/state' };
+const fullEnv = { HERDR_BIN_PATH: '/bin/herdr', HERDR_SOCKET_PATH: '/run/herdr.sock' };
 const key = { text: 'lin_api_secret\n', mode: 0o600 };
 const appPem = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey;
 const appKey = { text: appPem, mode: 0o600 };
@@ -110,7 +122,7 @@ describe('loadAppConfig', () => {
 			assert.isFalse('stuckAfterSeconds' in config);
 			assert.strictEqual(config.env.claudeConfigPath, join(homedir(), '.claude.json'));
 			assert.strictEqual(config.env.claudeConfigDirectory, join(homedir(), '.claude'));
-			assert.strictEqual(config.env.stateDirectory, '/state');
+			assert.strictEqual(config.transcriptionModelDirectory, join(config.env.stateDirectory, 'models', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8'));
 			assert.strictEqual(Redacted.value(config.linearApiKey), 'lin_api_secret');
 			assert.strictEqual(config.appPrivateKey.export({ type: 'pkcs8', format: 'pem' }), appPem);
 			assert.strictEqual(Redacted.value(config.webhookSecret), 'whsec_test');
@@ -259,6 +271,31 @@ describe('loadAppConfig', () => {
 			);
 			assert.deepStrictEqual(loose.problems.map((problem) => problem.replace(/\S+\//g, '')), ['telegram-bot-token is readable by other users; run chmod 600 telegram-bot-token']);
 			assert.match(noAllowlist.message, /config\.json telegram\.allowedUserIds: Missing key/);
+		}),
+	);
+
+	it.effect('reads the transcription model from the configured directory and reports its missing files together with the other problems', () =>
+		Effect.gen(function* () {
+			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
+			const configured = yield* load(fullEnv, {
+				config: (directory) => ({ ...unbound(directory), telegram: { ...telegram(directory), transcriptionModelDirectory: join(directory, 'models', transcriptionModel, '') } }),
+				key,
+				appKey,
+				webhookSecret,
+				linearWebhookSecret,
+			});
+			const missing = yield* load(env, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret, modelFiles: ['decoder.int8.onnx', 'joiner.int8.onnx'] }).pipe(Effect.flip);
+			const elsewhere = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), telegram: { ...telegram(directory), transcriptionModelDirectory: '~/no-such-model' } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
+				Effect.flip,
+			);
+
+			assert.strictEqual(configured.transcriptionModelDirectory, join(configured.env.stateDirectory, 'models', transcriptionModel));
+			assert.lengthOf(missing.problems, 2);
+			assert.match(missing.problems[0], /HERDR_BIN_PATH/);
+			assert.match(missing.problems[1], /^no transcription model in \S+\/models\/sherpa-onnx-nemo-parakeet-tdt-0\.6b-v3-int8: encoder\.int8\.onnx, tokens\.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0\.6b-v3-int8 there$/);
+			assert.deepStrictEqual(elsewhere.problems, [
+				`no transcription model in ${join(homedir(), 'no-such-model')}: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 there`,
+			]);
 		}),
 	);
 });

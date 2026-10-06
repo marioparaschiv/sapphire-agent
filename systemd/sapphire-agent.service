@@ -6,7 +6,7 @@ After=herdr-server.service
 [Service]
 Type=simple
 WorkingDirectory=%h/sapphire-agent
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HERDR_BIN_PATH=%h/.local/bin/herdr
 Environment=HERDR_SOCKET_PATH=%h/.config/herdr/herdr.sock
 Environment=HERDR_PLUGIN_CONFIG_DIR=%h/.config/herdr/plugins/config/sapphire-agent

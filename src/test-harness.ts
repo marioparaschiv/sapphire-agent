@@ -29,6 +29,9 @@ import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { telegramChat } from './telegram.ts';
+import { FakeTelegram, type FakeTelegramControls } from './telegram-fake.ts';
+import { Transcriber } from './transcription.ts';
 import { WebhookServer } from './webhook-server.ts';
 
 // `<purpose>:<key>` of each marked body, in order; unmarked bodies are left out.
@@ -118,6 +121,10 @@ export type Harness = {
 	readonly app: GitHubAppFixtureShape;
 	readonly github: FakeGitHubControls;
 	readonly herdr: FakeHerdrControls;
+	// The user's private chat with the bot.
+	readonly telegram: FakeTelegramControls;
+	// The Telegram id of the user, the first of telegram.allowedUserIds.
+	readonly telegramUser: number;
 	// Sends the delivery to the current webhook server, as postDelivery does with the configured secret; returns the HTTP
 	// status.
 	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
@@ -212,7 +219,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 		const config = AppConfig.layerTest(dir, settings);
 		const fixtures = yield* Layer.build(
-			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakeHerdr.layer).pipe(Layer.provideMerge(config)),
+			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakeHerdr.layer, FakeTelegram.layer).pipe(Layer.provideMerge(config)),
 		);
 		let journalWrites = 0;
 		let crashAt = Option.none<number>();
@@ -245,6 +252,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
 					claimRun: (run, requestIds) => crashPoint.pipe(Effect.andThen(journal.claimRun(run, requestIds))),
 					setDeliveryMark: (deliveredAt) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveredAt))),
+					putTopic: (topic) => crashPoint.pipe(Effect.andThen(journal.putTopic(topic))),
+					deleteTopic: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteTopic(epicId))),
+					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
+					addChatSession: (messageRefs, sessionId) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, sessionId))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -252,7 +263,9 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		const stack = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
 			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
 			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
-			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer)),
+			Layer.provideMerge(
+				Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer, telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest))),
+			),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
 			Layer.provide(NodeServices.layer),
@@ -335,6 +348,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			app: Context.get(fixtures, GitHubAppFixture),
 			github: Context.get(fixtures, FakeGitHub),
 			herdr,
+			telegram: Context.get(fixtures, FakeTelegram),
+			telegramUser: Context.get(fixtures, AppConfig).telegram.allowedUserIds[0],
 			deliver: (delivery: WebhookDelivery, signature?: string | null) => services.pipe(Effect.flatMap((context) => postDelivery(Context.get(context, WebhookServer).url, webhookSecret, delivery, signature))),
 			scanDeliveries: services.pipe(Effect.flatMap((context) => Context.get(context, MissedDeliveries).scan)),
 			tick: tick(false),

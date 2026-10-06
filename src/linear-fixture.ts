@@ -135,6 +135,7 @@ const variableSchemas = {
 	Replies: Schema.Struct({ questionIds: Ids }),
 	Comments: Schema.Struct({ issueId: Schema.String, after: Schema.NullOr(Schema.String) }),
 	Reactions: Schema.Struct({ id: Schema.String }),
+	SubIssues: Schema.Struct({ id: Schema.String }),
 	Labels: Schema.Struct({ name: Schema.String }),
 	Move: Schema.Struct({ id: Schema.String, stateId: Schema.String }),
 	Comment: Schema.Struct({ issueId: Schema.String, body: Schema.String, parentId: Schema.optionalKey(Schema.NullOr(Schema.String)) }),
@@ -290,6 +291,12 @@ const make = Effect.gen(function* () {
 				const replies = comments.filter((candidate) => candidate.parentId !== null && questionIds.includes(candidate.parentId));
 
 				return { comments: { nodes: replies.slice(0, MAX_PAGE_SIZE).map(toComment) } };
+			}
+
+			case 'SubIssues': {
+				const { id } = Schema.decodeUnknownSync(variableSchemas.SubIssues)(variables);
+
+				return { issue: { children: { nodes: issueList.filter((candidate) => candidate.parentId === id).map((child) => ({ id: child.id })) } } };
 			}
 
 			case 'Comments': {

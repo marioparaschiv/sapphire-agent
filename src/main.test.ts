@@ -4,6 +4,7 @@ import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, FileSystem, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
+import { transcriptionModel, transcriptionModelFiles } from './config.ts';
 
 const appPem = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey;
 
@@ -60,6 +61,8 @@ describe('main', () => {
 			yield* fs.writeFileString(join(directory, 'telegram-bot-token'), '123456:telegram-secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-api-id'), '1234567', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-api-hash'), 'telegram-api-hash', { mode: 0o600 });
+			yield* fs.makeDirectory(join(directory, 'models', transcriptionModel), { recursive: true });
+			yield* Effect.forEach(Object.values(transcriptionModelFiles), (file) => fs.writeFileString(join(directory, 'models', transcriptionModel, file), ''));
 			yield* fs.writeFileString(join(directory, 'claims.json'), JSON.stringify({ claims: [{ epicId: 'b1c2d3', identifier: 'UNB-12', status: 'running' }] }));
 
 			const handle = yield* spawner.spawn(

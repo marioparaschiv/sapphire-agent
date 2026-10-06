@@ -6,7 +6,7 @@ What sapphire-agent stores locally and why, and how markers on its comments make
 
 Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and question, which mentions were handled, what `ctl.sh` asked for, and how far back the App's webhook deliveries were checked.
 
-The Telegram bot's MTProto session and update state are not in the journal: mtcute keeps them in its own SQLite file, `$HERDR_PLUGIN_STATE_DIR/telegram.session` (`architecture.md`, The chat). Chat message text is never stored.
+The Telegram bot's MTProto session and update state are not in the journal: mtcute keeps them in its own SQLite file, `$HERDR_PLUGIN_STATE_DIR/telegram.session` (`architecture.md`, The chat). Chat message text is never stored: the journal keeps only which Claude session each bot message was written in, and each epic's thread.
 
 Idempotency comes from markers on external writes, not from the journal: before a write, look for its marker (or its effect) and skip it when present.
 
@@ -65,9 +65,17 @@ What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (w
 
 At most one row: `delivered_at` (ms), when the newest App webhook delivery the last complete scan saw was delivered. Every delivery listed before it either succeeded, has a later successful attempt of the same event, or was redelivered as a newer attempt. GitHub can list a slow attempt after a newer one was scanned; the next scan pages back to 10 minutes before the mark (and never more than 3 days, GitHub's retention). It is moved only after every redelivery request of the scan succeeded; without a row, a scan goes back the full 3 days (`rules.md`, Missed deliveries).
 
+### `chat_sessions`
+
+One row per bot message of the main chat (`message_ref`, the platform's ref, e.g. `<chat id>:<message id>`), with the Claude `session_id` it was written in and `created_at`. A reply to the message forks that session; the newest row's session is kept warm. Written once the reply is kept, so a reply cut short by a crash is not there and a reply to it gets the one-line explanation.
+
+### `topics` and `archive_thread`
+
+One row per epic with a chat thread (`epic_id`, `identifier`, `thread` the platform's ref, `state` it shows, `pull_request_url` posted, if any), written right after the thread is made and dropped right after it is deleted (`rules.md`, Topics). `archive_thread` holds at most one row: the `✅ Done` thread shipped epics are summed up in.
+
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimRun` (records the claim and drops its requests in one transaction); `deliveryMark`, `setDeliveryMark`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimRun` (records the claim and drops its requests in one transaction); `deliveryMark`, `setDeliveryMark`; `addChatSession`, `chatSession`, `latestChatSession`; `listTopics`, `putTopic`, `deleteTopic`, `archiveThread`, `setArchiveThread`. Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
 The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the runs (identifier, status, job, the epic's Linear state, claim time, tab, session, worktree), the commands in flight and the requests waiting.
 
@@ -122,5 +130,6 @@ Every multi-step action is ordered so that a crash at any step leaves something 
 - Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
 - Flags put the label on first, then the comment, then the journal update.
 - Cleanup closes the tab, removes the worktree and branch, and only then drops the row.
+- A chat thread is made, then recorded; renamed, then its state recorded; its PR posted (keyed `random_id`s), then recorded; deleted, then its row dropped. A crash between making a thread and recording it leaves a stray one (`rules.md`, Known limits).
 
-`src/lifecycle.test.ts` proves it: it runs one epic through dispatch, a relayed question, results, a mention whose command asks for a follow-up, the follow-up and cleanup, and repeats that with a crash injected at every journal, Linear, GitHub and herdr write, asserting the same end state and no double posts (`development.md`). The known exceptions are a question reply or a `send` typed into the pane right before a crash, which is typed again (`rules.md`).
+`src/lifecycle.test.ts` proves it: it runs one epic through dispatch, a relayed question, results, a mention whose command asks for a follow-up, the follow-up and cleanup, and repeats that with a crash injected at every journal, Linear, GitHub and herdr write, asserting the same end state and no double posts (`development.md`). The known exceptions are a question reply or a `send` typed into the pane right before a crash, which is typed again, and a chat thread made right before a crash, which is left behind (`rules.md`).

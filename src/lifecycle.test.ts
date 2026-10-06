@@ -8,7 +8,7 @@ import { parseMarker } from './markers.ts';
 import { deliveredEmoji } from './monitoring.ts';
 import { deliveries, git, type Harness, makeHarness } from './test-harness.ts';
 
-const writeKinds = ['journal', 'linear', 'github', 'herdr'] as const;
+const writeKinds = ['journal', 'linear', 'github', 'herdr', 'telegram'] as const;
 
 type CrashPoint = { readonly kind: (typeof writeKinds)[number]; readonly nth: number };
 
@@ -27,6 +27,8 @@ const arm = (h: Harness, { kind, nth }: CrashPoint) => {
 			return h.github.crashAfterWrite(nth, processDied);
 		case 'herdr':
 			return h.herdr.crashAfterWrite(nth, processDied);
+		case 'telegram':
+			return h.telegram.crashAfterWrite(nth, processDied);
 	}
 };
 
@@ -36,6 +38,7 @@ const writesSoFar = (h: Harness): Record<CrashPoint['kind'], number> => ({
 	linear: h.linear.mutations.length,
 	github: h.github.writes(),
 	herdr: h.herdr.writes(),
+	telegram: h.telegram.writes(),
 });
 
 // The crash points run in a shuffled but fixed order.
@@ -150,15 +153,17 @@ const currentRun = (h: Harness) =>
 	);
 
 // The whole life of one epic: dispatch, a question relayed through Linear, the result posted to the PR, a review thread
-// that mentions the bot, whose command hands it to a follow-up, and the cleanup once the PR is merged. Returns everything
-// the run left behind in Linear, GitHub, herdr, git and the journal.
+// that mentions the bot, whose command hands it to a follow-up, the cleanup once the PR is merged, and its chat topic,
+// summed up once it ships. Returns everything the run left behind in Linear, GitHub, herdr, git, Telegram and the
+// journal.
 const lifecycle = (crash: Option.Option<CrashPoint>) =>
 	Effect.gen(function* () {
 		const h = yield* makeHarness();
 		const { tickUntil, deliver, crashed, retypes } = makeDriver(h, crash);
 
-		// The workspace exists already, as in production.
+		// The workspace exists already, as in production, and the user has written to the bot, so it may write to them.
 		h.herdr.addTab({ label: 'notes', workspace: 'Test', agent: null });
+		h.telegram.write({ from: h.telegramUser, text: 'hi' });
 
 		// Dispatch: Ready For Agent becomes a tab running Claude, and the epic moves to Implementing.
 		const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
@@ -229,6 +234,10 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 		h.github.setPullRequestState(h.githubRepo, pullRequest.number, 'MERGED');
 		yield* tickUntil('the cleanup', (runs) => runs.length === 0);
 
+		// Shipped: the epic's topic is summed up in the Done topic and goes.
+		h.moveEpic(epic.id, 'Shipped');
+		yield* tickUntil('the shipped topic', () => h.telegram.sent.some((message) => message.text.endsWith(' slices')) && !h.telegram.topics().some((topic) => topic.title.startsWith('👀 TEST-10')));
+
 		const comments = h.linear.comments(epic.id);
 		const thread = h.github.thread(threadId);
 
@@ -257,6 +266,7 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 					starts: h.herdr.starts().map((start) => start.prompt.split(' ')[0]),
 					prompts: h.herdr.prompts().map((prompt) => prompt.text),
 				},
+				telegram: { topics: h.telegram.topics().map((topic) => topic.title).toSorted(), sent: h.telegram.sent.map((message) => message.text) },
 				commands: (yield* h.commands).map((command) => `${command.status} ${command.author}`),
 				git: { worktrees: h.worktrees(), branch: h.hasBranch(branch) },
 				runs: (yield* h.runs).length,
@@ -270,15 +280,16 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 
 describe('lifecycle', () => {
 	it.effect(
-		'one epic from Ready For Agent to a merged PR ends the same, with nothing posted twice, after a crash at any write',
+		'one epic from Ready For Agent to Shipped ends the same, with nothing posted twice, after a crash at any write',
 		() =>
 			Effect.gen(function* () {
 				const uncrashed = yield* lifecycle(Option.none());
 				const followUpAt = 4 * 60_000;
+				const pullRequestUrl = 'https://github.com/test/repo/pull/1';
 
 				assert.deepStrictEqual(uncrashed.outcome, {
 					linear: {
-						state: 'To Review',
+						state: 'Shipped',
 						labels: [],
 						comments: [
 							['awaitingInput:0-0', null, []],
@@ -294,27 +305,40 @@ describe('lifecycle', () => {
 					commands: ['ended marioparaschiv'],
 					git: { worktrees: [], branch: false },
 					runs: 0,
+					telegram: {
+						topics: ['✅ Done'],
+						sent: [`PR opened: ${pullRequestUrl}`, `TEST-10 Plugin settings sync: PR opened ${pullRequestUrl}`, `TEST-10 Plugin settings sync · ${pullRequestUrl} · 2 slices`],
+					},
 				});
 
 				const points = writeKinds.flatMap((kind) => Array.from({ length: uncrashed.writes[kind] }, (_, index): CrashPoint => ({ kind, nth: index + 1 })));
 				const { prompts } = uncrashed.outcome.herdr;
 				const retyped: Array<CrashPoint['kind']> = [];
+				const strayTopics: Array<string> = [];
 
 				for (const point of yield* Random.shuffle(points).pipe(Random.withSeed(seed))) {
 					const { crashed, retypes, outcome } = yield* lifecycle(Option.some(point));
+					const strays = outcome.telegram.topics.filter((title, index) => outcome.telegram.topics.indexOf(title) !== index || !uncrashed.outcome.telegram.topics.includes(title));
+					const expected = retypes ? { ...uncrashed.outcome, herdr: { ...uncrashed.outcome.herdr, prompts: [...prompts, ...prompts] } } : uncrashed.outcome;
 
 					assert.isTrue(crashed, `${describePoint(point)} never happened`);
-					assert.deepStrictEqual(outcome, retypes ? { ...uncrashed.outcome, herdr: { ...uncrashed.outcome.herdr, prompts: [...prompts, ...prompts] } } : uncrashed.outcome, describePoint(point));
+					assert.deepStrictEqual(outcome, strays.length === 0 ? expected : { ...expected, telegram: { ...expected.telegram, topics: [...expected.telegram.topics, ...strays].toSorted() } }, describePoint(point));
 
 					if (retypes) {
 						retyped.push(point.kind);
 					}
+
+					strayTopics.push(...strays.map((title) => `${point.kind} ${title}`));
 				}
 
 				// Typing the reply into the pane and recording it in the journal cannot be one step: a crash after the herdr
 				// prompt, or at the journal write that records it, types it again.
 				assert.deepStrictEqual(retyped.toSorted(), ['herdr', 'journal']);
+				// Nor can making a topic and recording it (Telegram does not let a bot list topics): a crash right after making
+				// the epic's or the Done topic, or at the journal write that records it, leaves that topic behind and makes
+				// another.
+				assert.deepStrictEqual(strayTopics.toSorted(), ['journal ✅ Done', 'journal 🟢 TEST-10 Plugin settings sync', 'telegram ✅ Done', 'telegram 🟢 TEST-10 Plugin settings sync']);
 			}),
-		{ timeout: 60_000 },
+		{ timeout: 120_000 },
 	);
 });

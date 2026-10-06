@@ -4,8 +4,16 @@ import type { CallError } from './call-policy.ts';
 // The chat platform's handle on one message, which an answer to it carries back. Only the platform reads it.
 export const MessageRef = Schema.String;
 
-// Where a message was written. The main chat is the platform's general conversation with the bot.
-export const Conversation = Schema.Union([Schema.TaggedStruct('main', {})]);
+export type MessageRef = typeof MessageRef.Type;
+
+// The platform's handle on a conversation it opened for core, e.g. an epic's forum topic. Only the platform reads it.
+export const ThreadRef = Schema.String;
+
+export type ThreadRef = typeof ThreadRef.Type;
+
+// Where a message was written. The main chat is the platform's general conversation with the bot; a thread is one the
+// platform opened for core (`openEpic`), which core knows by its ref.
+export const Conversation = Schema.Union([Schema.TaggedStruct('main', {}), Schema.TaggedStruct('thread', { thread: ThreadRef })]);
 
 export type Conversation = typeof Conversation.Type;
 
@@ -20,8 +28,26 @@ export const InboundMessage = Schema.Struct({
 
 export type InboundMessage = typeof InboundMessage.Type;
 
-// What core asks the platform to show; the platform decides how it looks.
-export const Intent = Schema.Union([Schema.TaggedStruct('reply', { to: MessageRef, text: Schema.String })]);
+// What an epic's thread shows of its run. review: no run in flight and the epic waits for review.
+export const EpicState = Schema.Literals(['working', 'awaitingInput', 'error', 'review']);
+
+export type EpicState = typeof EpicState.Type;
+
+export const EpicHeading = Schema.Struct({ identifier: Schema.String, title: Schema.String });
+
+export type EpicHeading = typeof EpicHeading.Type;
+
+// What core asks the platform to show; the platform decides how it looks. Every intent but `reply` may be sent again
+// after a crash, so the platform shows each once.
+export const Intent = Schema.Union([
+	Schema.TaggedStruct('reply', { to: MessageRef, text: Schema.String }),
+	Schema.TaggedStruct('epicState', { thread: ThreadRef, epic: EpicHeading, state: EpicState }),
+	// Shown in the epic's thread and in the main chat.
+	Schema.TaggedStruct('pullRequestOpened', { thread: ThreadRef, epic: EpicHeading, url: Schema.String }),
+	// One line in the archive thread (`openArchive`).
+	Schema.TaggedStruct('epicShipped', { archive: ThreadRef, epic: EpicHeading, pullRequestUrl: Schema.NullOr(Schema.String), slices: Schema.Int }),
+	Schema.TaggedStruct('closeThread', { thread: ThreadRef }),
+]);
 
 export type Intent = typeof Intent.Type;
 
@@ -33,5 +59,12 @@ export class Chat extends Context.Service<
 		// else are dropped and logged. One consumer only.
 		readonly inbound: Stream.Stream<InboundMessage>;
 		readonly send: (intent: Intent) => Effect.Effect<void, CallError>;
+		// Shows the text as it streams in, as an answer to the message, and keeps it once the stream ends or the user stops
+		// it, which interrupts the stream. Returns the messages it was kept as; none when nothing was written.
+		readonly streamReply: (to: MessageRef, text: Stream.Stream<string>) => Effect.Effect<ReadonlyArray<MessageRef>, CallError>;
+		// A new thread for the epic, showing the state.
+		readonly openEpic: (epic: EpicHeading, state: EpicState) => Effect.Effect<ThreadRef, CallError>;
+		// A new thread for the summaries of shipped epics.
+		readonly openArchive: Effect.Effect<ThreadRef, CallError>;
 	}
 >()('sapphire-agent/Chat') {}
