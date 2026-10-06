@@ -34,7 +34,7 @@ Run `npx tsc` and `npm test` before calling work done. There is no formatter or 
 Tests sit beside the code as `src/*.test.ts` and use `@effect/vitest` (`it.effect` with `TestClock`; `it.live` only for tests that spawn a real process). Rules:
 
 - `TestClock` for every timer. No real sleeps.
-- Run real things where possible: SQLite (`':memory:'` or a temp file), temporary git repos, the Linear and GitHub App fixture servers, real files. Fake only `gh`, herdr and the Telegram bot client, as test layers.
+- Run real things where possible: SQLite (`':memory:'` or a temp file), temporary git repos, the Linear and GitHub App fixture servers, real files. Fake only `gh`, herdr, the Telegram bot client and the main chat's `claude`, as test layers.
 - No tautological tests: drive realistic input through the code and assert the real output. Don't assert framework defaults or that a fake returned what it was told to.
 - Crash safety: inject a failure at a write, run a fresh reconciler on the same journal and fixtures, and assert no double post and no skipped step.
 
