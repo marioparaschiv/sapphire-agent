@@ -35,7 +35,7 @@ export const Epic = Schema.Struct({
 
 export type Epic = typeof Epic.Type;
 
-export const Comment = Schema.Struct({ id: Schema.String, body: Schema.String });
+export const Comment = Schema.Struct({ body: Schema.String });
 
 export type Comment = typeof Comment.Type;
 
@@ -170,7 +170,7 @@ const make = (endpoint: string) =>
 					CommentsPage,
 					`query Comments($issueId: ID!, $after: String) {
 						comments(first: ${MAX_PAGE_SIZE}, after: $after, filter: { issue: { id: { eq: $issueId } } }) {
-							nodes { id body }
+							nodes { body }
 							pageInfo { hasNextPage endCursor }
 						}
 					}`,

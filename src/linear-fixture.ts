@@ -220,7 +220,7 @@ const make = Effect.gen(function* () {
 		};
 	};
 
-	const toComment = (found: FixtureComment): Comment => ({ id: found.id, body: found.body });
+	const toComment = (found: FixtureComment): Comment => ({ body: found.body });
 
 	const resolve = (operation: Operation, variables: unknown): unknown => {
 		const issueList = [...issues.values()];
