@@ -207,12 +207,8 @@ describe('answerChatMessages', () => {
 	it.effect('stops a turn when the user presses stop, keeping what Claude wrote, while another turn goes on beside it', () =>
 		Effect.gen(function* () {
 			const chat = yield* makeChat((run) => ({ text: run.prompt === 'write an essay' ? ['Once upon', ' a time'] : ['Four.'], hang: true }));
-			const advanceUntilDrafts = (n: number) =>
-				Effect.gen(function* () {
-					for (let adjusted = 0; adjusted < 10 && chat.telegram.drafts.length < n; adjusted += 1) {
-						yield* TestClock.adjust('1500 millis');
-					}
-				});
+			// Messages are answered only after settings.json is read from disk, so the clock moves until the drafts show.
+			const advanceUntilDrafts = (n: number) => Effect.raceFirst(chat.telegram.awaitDrafts(n), Effect.forever(TestClock.adjust('1500 millis')));
 
 			yield* chat.start;
 			chat.telegram.write({ from: chat.user, text: 'write an essay' });
