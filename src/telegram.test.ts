@@ -379,7 +379,7 @@ describe('telegramChat', () => {
 		}).pipe(Effect.provide(layer)),
 	);
 
-	it.effect('shows that the bot is typing in the topic until text arrives, then the draft, showing each again before it expires, and nothing once the reply lands', () =>
+	it.effect('shows a Thinking draft in the topic until text arrives, then the text, showing each again before it expires, and nothing once the reply lands', () =>
 		Effect.gen(function* () {
 			const telegram = yield* FakeTelegram;
 			const chat = yield* Chat;
@@ -392,27 +392,30 @@ describe('telegramChat', () => {
 			const pieces = yield* Queue.unbounded<string, Cause.Done>();
 			const reply = yield* Effect.forkChild(chat.streamReply(`${allowed}:${message}:${topicId}`, Stream.fromQueue(pieces)));
 
-			yield* telegram.awaitTypings(1);
-			// Typing again at 4.5 s and 9 s.
+			yield* telegram.awaitDrafts(1);
+			// Thinking again at 4.5 s and 9 s.
 			yield* ticks(6);
-			yield* telegram.awaitTypings(3);
+			yield* telegram.awaitDrafts(3);
 			yield* Queue.offer(pieces, 'Hel');
 			yield* ticks(1);
-			yield* telegram.awaitDrafts(1);
+			yield* telegram.awaitDrafts(4);
 			// The same draft again 4.5 s later.
 			yield* ticks(3);
-			yield* telegram.awaitDrafts(2);
+			yield* telegram.awaitDrafts(5);
 			yield* Queue.offer(pieces, 'lo');
 			yield* ticks(1);
-			yield* telegram.awaitDrafts(3);
+			yield* telegram.awaitDrafts(6);
 			yield* Queue.end(pieces);
 			yield* Fiber.join(reply);
 			yield* ticks(4);
 
-			assert.deepStrictEqual(telegram.typings, Array.from({ length: 3 }, () => ({ chatId: allowed, topicId })));
+			assert.deepStrictEqual(telegram.typings, []);
 			assert.deepStrictEqual(
 				telegram.drafts.map(({ topicId, text }) => ({ topicId, text })),
 				[
+					{ topicId, text: 'Thinking' },
+					{ topicId, text: 'Thinking' },
+					{ topicId, text: 'Thinking' },
 					{ topicId, text: 'Hel' },
 					{ topicId, text: 'Hel' },
 					{ topicId, text: 'Hello' },
@@ -433,43 +436,15 @@ describe('telegramChat', () => {
 			const message = telegram.write({ from: allowed, text: 'hello' });
 			const reply = yield* Effect.forkChild(chat.streamReply(`${allowed}:${message}`, Stream.never));
 
-			yield* telegram.awaitTypings(1);
+			yield* telegram.awaitDrafts(1);
 			yield* Fiber.interrupt(reply);
 			yield* ticks(4);
 
-			assert.deepStrictEqual(telegram.typings, [{ chatId: allowed, topicId: null }]);
-			assert.deepStrictEqual(telegram.drafts, []);
-			assert.deepStrictEqual(telegram.sent, []);
-		}).pipe(Effect.provide(layer)),
-	);
-
-	it.effect('logs a typing action that fails and streams the reply all the same', () =>
-		Effect.gen(function* () {
-			const telegram = yield* FakeTelegram;
-			const chat = yield* Chat;
-			const allowed = yield* allowedUser;
-			const message = telegram.write({ from: allowed, text: 'hello' });
-			const pieces = yield* Queue.unbounded<string, Cause.Done>();
-			const { logs, layer: logged } = collectLogs();
-
-			const refused = 'Telegram refused to show that the bot is typing: 400 CHAT_WRITE_FORBIDDEN';
-
-			telegram.failTyping(new Permanent({ message: refused }));
-
-			const reply = yield* Effect.forkChild(chat.streamReply(`${allowed}:${message}`, Stream.fromQueue(pieces)).pipe(Effect.provide(logged)));
-
-			yield* telegram.awaitTypings(1);
-			yield* Queue.offer(pieces, 'Hi.');
-			yield* ticks(1);
-			yield* telegram.awaitDrafts(1);
-			yield* Queue.end(pieces);
-			yield* Fiber.join(reply);
-
-			assert.deepStrictEqual(logs, [{ level: 'WARN', message: ['cannot show that the bot is typing', { _tag: 'Permanent', message: refused }] }]);
 			assert.deepStrictEqual(
-				telegram.sent.map(({ text }) => text),
-				['Hi.'],
+				telegram.drafts.map(({ text }) => text),
+				['Thinking'],
 			);
+			assert.deepStrictEqual(telegram.sent, []);
 		}).pipe(Effect.provide(layer)),
 	);
 

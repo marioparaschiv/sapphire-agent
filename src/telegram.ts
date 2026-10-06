@@ -83,6 +83,9 @@ const endOf = (text: string, length: number) => (text.length > length ? `…${te
 // The start of the text, at most `length` characters.
 const startOf = (text: string, length: number) => (text.length > length ? `${text.slice(0, length - 1)}…` : text);
 
+// The draft a reply shows until its text arrives.
+const thinking = 'Thinking';
+
 // As much of the end of the text as one message shows.
 const draftOf = (text: string) => endOf(text, messageLength);
 
@@ -219,9 +222,9 @@ export const telegramChat = Layer.effect(
 				const written = yield* Ref.make('');
 
 				const show = (current: string) =>
-					current === ''
-						? showTyping(chatId, topicId)
-						: bot.sendDraft(chatId, topicId, draftId, markdown(draftOf(current))).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
+					bot
+						.sendDraft(chatId, topicId, draftId, markdown(current === '' ? thinking : draftOf(current)))
+						.pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
 
 				const stopped = bot.draftStops.pipe(
 					Stream.filter((stop) => stop.chatId === chatId && stop.topicId === topicId && stop.draftId.equals(draftId)),
