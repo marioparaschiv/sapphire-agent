@@ -46,7 +46,7 @@ const makeChat = (answer: (run: FakeClaudeRun) => FakeClaudeAnswer = () => ({ te
 			),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
 		const services = Layer.mergeAll(
-			telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest)),
+			telegramChat.pipe(Layer.provide([FakeTelegram.bot, Transcriber.layerTest, NodeFileSystem.layer])),
 			ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer, NodeFileSystem.layer])),
 			// Nothing to tick: a main-chat turn never wakes it.
 			Reconciler.layer.pipe(Layer.provide(Planner.layer(Effect.succeed([]))), Layer.provide(Pause.layer), Layer.provide([plannerDependencies(dir), NodeFileSystem.layer])),

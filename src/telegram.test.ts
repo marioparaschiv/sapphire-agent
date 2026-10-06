@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { type Cause, Effect, Exit, Fiber, Layer, Logger, Queue, Stream } from 'effect';
 import { TestClock } from 'effect/testing';
@@ -10,8 +12,7 @@ import { Transcriber } from './transcription.ts';
 
 const chatWith = (config: Layer.Layer<AppConfig>, transcriber: Layer.Layer<Transcriber> = Transcriber.layerTest) =>
 	telegramChat.pipe(
-		Layer.provide(FakeTelegram.bot),
-		Layer.provide(transcriber),
+		Layer.provide([FakeTelegram.bot, transcriber, NodeFileSystem.layer]),
 		Layer.provideMerge(FakeTelegram.layer),
 		Layer.provideMerge(config),
 	);
@@ -170,6 +171,29 @@ describe('telegramChat', () => {
 				telegram.sent.map(({ text, replyToMessageId }) => ({ text, replyToMessageId })),
 				[{ text: "Couldn't transcribe the voice note: no speech recognized\nSend it again, or type it.", replyToMessageId: voice }],
 			);
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('saves a photo to the state directory and passes its path on after the caption, in the main chat or a topic', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			// The bot can open a topic in the user's chat once the user wrote in it.
+			const captioned = telegram.write({ from: allowed, text: 'What is wrong here?', photo: encode('screenshot') });
+			const thread = yield* chat.openEpic({ identifier: 'HL-12', title: 'Images' }, 'working');
+			const topicId = Number(thread.split(':')[1]);
+			const inTopic = telegram.write({ from: allowed, photo: encode('another'), topicId });
+			const received = yield* chat.inbound.pipe(Stream.take(2), Stream.runCollect);
+			const captionedPath = `/tmp/sapphire-agent-test/images/${allowed}-${captioned}.jpg`;
+			const inTopicPath = `/tmp/sapphire-agent-test/images/${allowed}-${inTopic}.jpg`;
+
+			assert.deepStrictEqual(received, [
+				{ ref: `${allowed}:${captioned}`, conversation: { _tag: 'main' }, text: `What is wrong here?\n\n[Image: ${captionedPath}]`, replyTo: null },
+				{ ref: `${allowed}:${inTopic}:${topicId}`, conversation: { _tag: 'thread', thread }, text: `[Image: ${inTopicPath}]`, replyTo: null },
+			]);
+			assert.strictEqual(readFileSync(captionedPath, 'utf8'), 'screenshot');
+			assert.strictEqual(readFileSync(inTopicPath, 'utf8'), 'another');
 		}).pipe(Effect.provide(layer)),
 	);
 

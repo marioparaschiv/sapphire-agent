@@ -33,10 +33,27 @@ export type TelegramMessage = {
 	readonly replyToMessageId: number | null;
 	// The file of a voice note, for `download`.
 	readonly voiceFileId: string | null;
+	// A photo, or an image sent as a file, for `download`; its text is the caption.
+	readonly image: TelegramImage | null;
 };
+
+export type TelegramImage = { readonly fileId: string; readonly extension: string };
 
 // The user pressed stop on a draft (`sendDraft`).
 export type DraftStop = { readonly chatId: number; readonly topicId: number | null; readonly draftId: Long };
+
+// Telegram sends photos as JPEG.
+const imageOf = (media: Message['media']): TelegramImage | null => {
+	if (media?.type === 'photo') {
+		return { fileId: media.fileId, extension: 'jpg' };
+	}
+
+	if (media?.type === 'document' && media.mimeType.startsWith('image/')) {
+		return { fileId: media.fileId, extension: media.mimeType.slice('image/'.length).replace(/\+.*/, '') };
+	}
+
+	return null;
+};
 
 const toTelegramMessage = (message: Message): TelegramMessage => {
 	const topicId = message.isTopicMessage ? (message.replyToMessage?.threadId ?? null) : null;
@@ -51,6 +68,7 @@ const toTelegramMessage = (message: Message): TelegramMessage => {
 		topicId,
 		replyToMessageId: replyToMessageId === topicId ? null : replyToMessageId,
 		voiceFileId: message.media?.type === 'voice' ? message.media.fileId : null,
+		image: imageOf(message.media),
 	};
 };
 

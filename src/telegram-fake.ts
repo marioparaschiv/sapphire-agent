@@ -15,6 +15,8 @@ export type MessageSeed = {
 	readonly text?: string;
 	// The file of a voice note instead of text.
 	readonly voice?: Uint8Array;
+	// A photo, its caption in `text`.
+	readonly photo?: Uint8Array;
 	// A group chat with this id instead of the private chat.
 	readonly groupChatId?: number;
 	// The forum topic the message is written in; none writes in the main chat (General).
@@ -223,13 +225,19 @@ const make = Effect.gen(function* () {
 		);
 
 	return FakeTelegram.of({
-		write: ({ from, text = '', voice, groupChatId, topicId, replyTo }) => {
+		write: ({ from, text = '', voice, photo, groupChatId, topicId, replyTo }) => {
 			const chatId = groupChatId ?? from;
 			const messageId = addMessage(chatId);
 			const voiceFileId = voice === undefined ? null : `voice-${messageId}`;
 
 			if (voiceFileId !== null && voice !== undefined) {
 				files.set(voiceFileId, voice);
+			}
+
+			const photoFileId = `photo-${messageId}`;
+
+			if (photo !== undefined) {
+				files.set(photoFileId, photo);
 			}
 
 			written.push({
@@ -241,6 +249,7 @@ const make = Effect.gen(function* () {
 				topicId: topicId ?? null,
 				replyToMessageId: replyTo ?? null,
 				voiceFileId,
+				image: photo === undefined ? null : { fileId: photoFileId, extension: 'jpg' },
 			});
 			dispatch();
 

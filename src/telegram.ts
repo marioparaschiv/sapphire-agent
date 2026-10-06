@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 import { Long, md, type TextWithEntities } from '@mtcute/node';
-import { Clock, Duration, Effect, Fiber, Layer, Option, Ref, Result, Stream } from 'effect';
+import { Clock, Duration, Effect, Fiber, FileSystem, Layer, Option, Ref, Result, Stream } from 'effect';
 import { Permanent } from './call-policy.ts';
 import { Chat, type EpicHeading, type EpicState, type InboundMessage, type SliceProgress } from './chat.ts';
 import { AppConfig } from './config.ts';
-import { TelegramBot, type TelegramMessage } from './telegram-bot.ts';
+import { TelegramBot, type TelegramImage, type TelegramMessage } from './telegram-bot.ts';
 import { Transcriber } from './transcription.ts';
 
 // A MessageRef is `<chat id>:<message id>`, plus `:<topic id>` for a message in a topic. A ThreadRef is
@@ -99,8 +100,10 @@ const markdown = (text: string): TextWithEntities => {
 // The code block holds the question, cut to what one message shows besides the rest.
 const questionText = (question: string) => md`⏸ **The agent waits for input**\n\`\`\`\n${endOf(question, messageLength - 100)}\n\`\`\`\nWrite here to answer; it is typed into the agent.`;
 
-// Why a message is dropped, or what it is: text, or a voice note to transcribe first.
-const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number>): Result.Result<{ readonly voiceFileId: string | null }, string> => {
+type Content = { readonly _tag: 'text' } | { readonly _tag: 'voice'; readonly fileId: string } | { readonly _tag: 'image'; readonly image: TelegramImage };
+
+// Why a message is dropped, or what it is: text, a voice note to transcribe first, or an image to save first.
+const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number>): Result.Result<Content, string> => {
 	if (!allowedUserIds.includes(message.senderId)) {
 		return Result.fail(`dropped a Telegram message from user ${message.senderId}, who is not in telegram.allowedUserIds`);
 	}
@@ -109,48 +112,79 @@ const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number
 		return Result.fail(`dropped a Telegram message in ${message.chatType} ${message.chatId}; only the private chat with the bot is read`);
 	}
 
-	if (message.text === '' && message.voiceFileId === null) {
-		return Result.fail('dropped a Telegram message without text');
+	if (message.image !== null) {
+		return Result.succeed({ _tag: 'image', image: message.image });
 	}
 
-	return Result.succeed({ voiceFileId: message.text === '' ? message.voiceFileId : null });
+	if (message.text !== '') {
+		return Result.succeed({ _tag: 'text' });
+	}
+
+	return message.voiceFileId === null ? Result.fail('dropped a Telegram message without text') : Result.succeed({ _tag: 'voice', fileId: message.voiceFileId });
 };
 
+// Claude reads the image from the path the text ends with.
+const withImage = (caption: string, path: string) => [caption, `[Image: ${path}]`].filter((part) => part !== '').join('\n\n');
+
 // The Chat port over the Telegram bot. It lets through what an allowed user wrote in their private chat with the bot,
-// in the main chat (General) or in a topic, with voice notes transcribed; renders intents as messages and topics; and
+// in the main chat (General) or in a topic, with voice notes transcribed and images saved to the state directory; renders intents as messages and topics; and
 // streams replies as drafts. Epic and project topics go to the chat of the first allowed user.
 export const telegramChat = Layer.effect(
 	Chat,
 	Effect.gen(function* () {
-		const { telegram } = yield* AppConfig;
+		const { telegram, env } = yield* AppConfig;
+		const fs = yield* FileSystem.FileSystem;
 		const bot = yield* TelegramBot;
 		const transcriber = yield* Transcriber;
 		const [userChat] = telegram.allowedUserIds;
 
 		const showTyping = (chatId: number, topicId: number | null) => bot.sendTyping(chatId, topicId).pipe(Effect.catch((error) => Effect.logWarning('cannot show that the bot is typing', error)));
 
-		const answerVoiceNote = (message: TelegramMessage, text: TextWithEntities) =>
+		const answer = (message: TelegramMessage, text: TextWithEntities) =>
 			bot.sendText(message.chatId, text, { replyTo: message.messageId, topicId: message.topicId ?? undefined }).pipe(
-				Effect.catch((error) => Effect.logError('cannot answer a voice note', error)),
+				Effect.catch((error) => Effect.logError('cannot answer a Telegram message', error)),
+			);
+
+		const saveImage = (message: TelegramMessage, image: TelegramImage) =>
+			Effect.gen(function* () {
+				const directory = join(env.stateDirectory, 'images');
+				const path = join(directory, `${message.chatId}-${message.messageId}.${image.extension}`);
+
+				yield* fs.makeDirectory(directory, { recursive: true });
+				yield* fs.writeFile(path, yield* bot.download(image.fileId));
+
+				return withImage(message.text, path);
+			}).pipe(
+				Effect.map(Option.some),
+				Effect.catch((error) =>
+					Effect.logWarning('cannot save an image', error).pipe(
+						Effect.andThen(answer(message, md`Couldn't save the image: ${error.message}\nSend it again.`)),
+						Effect.as(Option.none<string>()),
+					),
+				),
 			);
 
 		// The transcript is shown as the answer to the voice note, so the user sees what the agent was told.
-		const textOf = (message: TelegramMessage, voiceFileId: string | null): Effect.Effect<Option.Option<string>> => {
-			if (voiceFileId === null) {
+		const textOf = (message: TelegramMessage, content: Content): Effect.Effect<Option.Option<string>> => {
+			if (content._tag === 'text') {
 				return Effect.succeed(Option.some(message.text));
 			}
 
+			if (content._tag === 'image') {
+				return saveImage(message, content.image);
+			}
+
 			return Effect.raceFirst(
-				bot.download(voiceFileId).pipe(Effect.flatMap((audio) => transcriber.transcribe(audio))),
+				bot.download(content.fileId).pipe(Effect.flatMap((audio) => transcriber.transcribe(audio))),
 				keepShowing(Effect.succeed(''), () => showTyping(message.chatId, message.topicId)),
 			).pipe(
 				Effect.matchEffect({
 					onFailure: (error) =>
 						Effect.logWarning('cannot transcribe a voice note', error).pipe(
-							Effect.andThen(answerVoiceNote(message, md`Couldn't transcribe the voice note: ${error.message}\nSend it again, or type it.`)),
+							Effect.andThen(answer(message, md`Couldn't transcribe the voice note: ${error.message}\nSend it again, or type it.`)),
 							Effect.as(Option.none()),
 						),
-					onSuccess: (transcript) => answerVoiceNote(message, md`🎙 ${transcript}`).pipe(Effect.as(Option.some(transcript))),
+					onSuccess: (transcript) => answer(message, md`🎙 ${transcript}`).pipe(Effect.as(Option.some(transcript))),
 				}),
 			);
 		};
@@ -162,7 +196,7 @@ export const telegramChat = Layer.effect(
 				return Effect.logWarning(result.failure).pipe(Effect.as(Result.failVoid));
 			}
 
-			return textOf(message, result.success.voiceFileId).pipe(
+			return textOf(message, result.success).pipe(
 				Effect.map(
 					Option.match({
 						onNone: () => Result.failVoid,
