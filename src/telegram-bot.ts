@@ -55,7 +55,7 @@ const toTelegramMessage = (message: Message): TelegramMessage => {
 
 // A random_id Telegram has seen already for the same peer refuses the send, so a send keyed by what it is for is sent
 // once, also when a crash makes it run again.
-export const randomIdOf = (key: string) => Long.fromBytesBE([...createHash('sha256').update(key).digest().subarray(0, 8)]);
+const randomIdOf = (key: string) => Long.fromBytesBE([...createHash('sha256').update(key).digest().subarray(0, 8)]);
 
 const sqlValue = (value: unknown): SQLInputValue => {
 	if (value === null || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'string' || value instanceof Uint8Array) {
@@ -134,14 +134,14 @@ const callFailure =
 		return new Transient({ message: `Telegram could not be reached to ${what}: ${error instanceof Error ? error.message : String(error)}` });
 	};
 
-// The bot's MTProto client (mtcute), logged in with the bot token for as long as the layer lives. mtcute keeps its
-// session and update state in `telegram.session` in the state directory, and catches up on what was sent while the
-// service was down, so updates resume after a restart without loss or replay.
 export type SendOptions = {
 	readonly replyTo?: number;
 	readonly topicId?: number;
 };
 
+// The bot's MTProto client (mtcute), logged in with the bot token for as long as the layer lives. mtcute keeps its
+// session and update state in `telegram.session` in the state directory, and catches up on what was sent while the
+// service was down, so updates resume after a restart without loss or replay.
 export class TelegramBot extends Context.Service<
 	TelegramBot,
 	{

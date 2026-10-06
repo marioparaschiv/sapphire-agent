@@ -15,7 +15,7 @@ type SubIssues = Effect.Effect<ReadonlyArray<SubIssue>, CallError>;
 // no run in flight the thread waits on the review (To Review, In Review), and goes once the epic is anywhere else, e.g.
 // its run was stopped. The results rule moves a finished run's epic to To Review after this tick's observation was
 // made, so a run with a result still seen in Implementing waits on the review too.
-export const topicState = (observation: Observation, epic: Epic, run: Option.Option<Run>): Option.Option<EpicState> => {
+const topicState = (observation: Observation, epic: Epic, run: Option.Option<Run>): Option.Option<EpicState> => {
 	if (Option.isSome(run)) {
 		switch (run.value.status) {
 			case 'claimed':
@@ -88,7 +88,7 @@ export const topicsRule = Effect.gen(function* () {
 			yield* close(topic);
 		});
 
-	const postPullRequest = (topic: Topic, epic: Epic, run: Run): Effect.Effect<Topic, unknown> =>
+	const postPullRequest = (topic: Topic, epic: Epic, run: Run) =>
 		Effect.gen(function* () {
 			const repo = yield* git.githubRepo(run.repo);
 			const pullRequest = Option.filter(yield* github.findPullRequest(repo, run.branch), (found) => found.state !== 'CLOSED');

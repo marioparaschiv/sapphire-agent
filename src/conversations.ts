@@ -8,7 +8,7 @@ import { Reconciler } from './reconciler.ts';
 
 export const unknownContext = "I don't know which conversation that message belongs to, so I can't continue from it. Reply to one of my answers, or send a new message.";
 
-export const emptyAnswer = 'Claude answered without any text.';
+const emptyAnswer = 'Claude answered without any text.';
 
 export const notRunning = (identifier: string) => `${identifier} is not running, so this message goes nowhere.`;
 
