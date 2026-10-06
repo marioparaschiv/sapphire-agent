@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Long, md, type TextWithEntities } from '@mtcute/node';
-import { Clock, Effect, Fiber, Layer, Option, Ref, Result, Stream } from 'effect';
+import { Clock, Duration, Effect, Fiber, Layer, Option, Ref, Result, Stream } from 'effect';
 import { Permanent } from './call-policy.ts';
 import { Chat, type EpicHeading, type EpicState, type InboundMessage, type SliceProgress } from './chat.ts';
 import { AppConfig } from './config.ts';
@@ -32,7 +32,7 @@ const titleLength = 128;
 const draftInterval = '1500 millis';
 
 // A typing action, a draft included, shows for a few seconds; one sent again by then keeps it up.
-const refreshAfterMillis = 4000;
+const refreshAfter = Duration.seconds(4);
 
 const stateIcons: Record<EpicState, string> = { working: '🟢', awaitingInput: '⏸', error: '🔴', review: '👀' };
 
@@ -45,7 +45,7 @@ const projectTitle = (name: string) => `📁 ${name}`.slice(0, titleLength);
 const sliceIcons: Record<SliceProgress, string> = { started: '▶️', done: '✔️' };
 
 // Shows what the bot writes, until interrupted: at once, then on each tick when it changed, or again once
-// `refreshAfterMillis` passed since it was last shown.
+// `refreshAfter` passed since it was last shown.
 const keepShowing = (written: Effect.Effect<string>, show: (text: string) => Effect.Effect<void>) =>
 	Effect.gen(function* () {
 		const shown = yield* Ref.make({ text: '', at: 0 });
@@ -65,7 +65,7 @@ const keepShowing = (written: Effect.Effect<string>, show: (text: string) => Eff
 						const text = yield* written;
 						const last = yield* Ref.get(shown);
 
-						if (text !== last.text || (yield* Clock.currentTimeMillis) - last.at >= refreshAfterMillis) {
+						if (text !== last.text || (yield* Clock.currentTimeMillis) - last.at >= Duration.toMillis(refreshAfter)) {
 							yield* showNow(text);
 						}
 					}),
