@@ -154,7 +154,7 @@ describe('loadAppConfig', () => {
 	it.effect('reports a missing bot.app field and a missing, loose or unparsable App key file together with the other problems', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const noAppId = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), app: { privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') } } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
+			const noAppId = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), bot: { ...bot(directory), app: { privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') } } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
 				Effect.flip,
 			);
 			const noKeyFile = yield* load(env, { config: unbound, key, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
