@@ -156,6 +156,8 @@ export class TelegramBot extends Context.Service<
 		readonly sendOnce: (chatId: number, text: TextWithEntities, key: string, options?: SendOptions) => Effect.Effect<void, CallError>;
 		// Shows the text as a draft answer with a stop button; the same draft id updates the same draft.
 		readonly sendDraft: (chatId: number, topicId: number | null, draftId: Long, text: TextWithEntities) => Effect.Effect<void, CallError>;
+		// Shows that the bot is typing, for a few seconds.
+		readonly sendTyping: (chatId: number, topicId: number | null) => Effect.Effect<void, CallError>;
 		// Returns the new topic's id.
 		readonly createTopic: (chatId: number, title: string) => Effect.Effect<number, CallError>;
 		readonly editTopic: (chatId: number, topicId: number, title: string) => Effect.Effect<void, CallError>;
@@ -229,6 +231,10 @@ export class TelegramBot extends Context.Service<
 							topMsgId: topicId ?? undefined,
 							action: { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text: text.text, entities: text.entities ?? [] } },
 						}),
+					).pipe(Effect.asVoid),
+				sendTyping: (chatId, topicId) =>
+					write('show that the bot is typing', async () =>
+						client.call({ _: 'messages.setTyping', peer: await client.resolvePeer(chatId), topMsgId: topicId ?? undefined, action: { _: 'sendMessageTypingAction' } }),
 					).pipe(Effect.asVoid),
 				createTopic: (chatId, title) =>
 					write('create a topic', () => client.createForumTopic({ chatId, title })).pipe(
