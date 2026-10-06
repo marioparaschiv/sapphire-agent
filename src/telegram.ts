@@ -29,7 +29,7 @@ const messageLength = 4096;
 const titleLength = 128;
 
 // setTyping allows 20 calls in 5 s and 40 in 30 s per chat; this leaves room for two replies streaming at once.
-const draftInterval = '1500 millis';
+export const draftInterval = '1500 millis';
 
 // A typing action, a draft included, shows for a few seconds; one sent again by then keeps it up.
 const refreshAfter = Duration.seconds(4);

@@ -217,6 +217,9 @@ export class TelegramBot extends Context.Service<
 
 			const sendParams = ({ replyTo, topicId }: SendOptions = {}) => ({ replyTo, threadId: topicId });
 
+			const setTyping = async (chatId: number, topicId: number | null, action: tl.TypeSendMessageAction) =>
+				client.call({ _: 'messages.setTyping', peer: await client.resolvePeer(chatId), topMsgId: topicId ?? undefined, action });
+
 			return TelegramBot.of({
 				messages: Stream.fromQueue(received),
 				draftStops: Stream.fromPubSub(stops),
@@ -224,18 +227,11 @@ export class TelegramBot extends Context.Service<
 				sendOnce: (chatId, text, key, options) =>
 					write('send a message', () => client.sendText(chatId, text, { ...sendParams(options), randomId: randomIdOf(key) })).pipe(Effect.asVoid, alreadyDone('RANDOM_ID_DUPLICATE')),
 				sendDraft: (chatId, topicId, draftId, text) =>
-					write('show a draft', async () =>
-						client.call({
-							_: 'messages.setTyping',
-							peer: await client.resolvePeer(chatId),
-							topMsgId: topicId ?? undefined,
-							action: { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text: text.text, entities: text.entities ?? [] } },
-						}),
+					write('show a draft', () =>
+						setTyping(chatId, topicId, { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text: text.text, entities: text.entities ?? [] } }),
 					).pipe(Effect.asVoid),
 				sendTyping: (chatId, topicId) =>
-					write('show that the bot is typing', async () =>
-						client.call({ _: 'messages.setTyping', peer: await client.resolvePeer(chatId), topMsgId: topicId ?? undefined, action: { _: 'sendMessageTypingAction' } }),
-					).pipe(Effect.asVoid),
+					write('show that the bot is typing', () => setTyping(chatId, topicId, { _: 'sendMessageTypingAction' })).pipe(Effect.asVoid),
 				createTopic: (chatId, title) =>
 					write('create a topic', () => client.createForumTopic({ chatId, title })).pipe(
 						// For a bot's private chat the service message's own id is in the bot's id space; the topic id is the thread's.

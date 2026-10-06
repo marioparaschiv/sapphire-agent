@@ -4,7 +4,7 @@ import { TestClock } from 'effect/testing';
 import { Chat } from './chat.ts';
 import { Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
-import { telegramChat } from './telegram.ts';
+import { draftInterval, telegramChat } from './telegram.ts';
 import { FakeTelegram } from './telegram-fake.ts';
 import { Transcriber } from './transcription.ts';
 
@@ -44,7 +44,7 @@ const slowTranscriptionLayer = chatWith(AppConfig.layerTest('/tmp/sapphire-agent
 const stranger = 6_200_300_400;
 
 // Moves the clock one draft tick at a time, so each tick runs before the next.
-const ticks = (n: number) => Effect.repeat(TestClock.adjust('1500 millis'), { times: n - 1 });
+const ticks = (n: number) => Effect.repeat(TestClock.adjust(draftInterval), { times: n - 1 });
 
 const encode = (text: string) => new TextEncoder().encode(text);
 
