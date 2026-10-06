@@ -54,7 +54,11 @@ const handledEvents: Record<string, ReturnType<typeof handledEvent>> = {
 };
 
 // Whether `signature` is the hex HMAC-SHA256 of the raw body with the secret.
-const isSignedWith = (secret: Redacted.Redacted<string>, body: Uint8Array, signature: string) => {
+const isSignedWith = (secret: Redacted.Redacted<string>, body: Uint8Array, signature: string | undefined) => {
+	if (signature === undefined) {
+		return false;
+	}
+
 	const expected = createHmac('sha256', Redacted.value(secret)).update(body).digest();
 	const given = Buffer.from(signature, 'hex');
 
@@ -63,10 +67,7 @@ const isSignedWith = (secret: Redacted.Redacted<string>, body: Uint8Array, signa
 
 // GitHub signs the raw body with the webhook secret: `X-Hub-Signature-256: sha256=<hex HMAC-SHA256>`.
 const isSigned = (secret: Redacted.Redacted<string>, body: Uint8Array, header: string | undefined) =>
-	header !== undefined && header.startsWith('sha256=') && isSignedWith(secret, body, header.slice('sha256='.length));
-
-// Linear signs the raw body with its webhook secret: `Linear-Signature: <hex HMAC-SHA256>`.
-const isSignedByLinear = (secret: Redacted.Redacted<string>, body: Uint8Array, header: string | undefined) => header !== undefined && isSignedWith(secret, body, header);
+	isSignedWith(secret, body, header?.startsWith('sha256=') ? header.slice('sha256='.length) : undefined);
 
 // The path Tailscale Funnel exposes for Linear's deliveries; GitHub's reach every other path through nginx.
 export const linearWebhookPath = '/linear';
@@ -105,7 +106,8 @@ export class WebhookServer extends Context.Service<
 				Effect.gen(function* () {
 					const body = new Uint8Array(yield* request.arrayBuffer);
 
-					if (!isSignedByLinear(linearWebhookSecret, body, request.headers['linear-signature'])) {
+					// Linear signs the raw body with its webhook secret: `Linear-Signature: <hex HMAC-SHA256>`.
+					if (!isSignedWith(linearWebhookSecret, body, request.headers['linear-signature'])) {
 						yield* Effect.logWarning('refused a Linear delivery without a valid signature');
 
 						return respond(401);
