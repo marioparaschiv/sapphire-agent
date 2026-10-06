@@ -70,7 +70,7 @@ Keyed by exact Linear team name:
 - `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
 - Paths accept `~`. Repo label rules: `linear-api.md`.
 
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/sapphire-agent`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
+Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Sapphire Agent (this repo, `~/sapphire-agent`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
 
 ```json
 "bot": {
