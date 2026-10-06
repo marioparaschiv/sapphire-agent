@@ -19,12 +19,7 @@ const repoNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 // The local clone an epic runs in: its project's repo, or `<labelReposDirectory>/<name>` for an epic labelled
 // `<repoPrefix><name>` or labelled `<name>` inside the label group named like the prefix (Linear shows `repo/<name>`).
-const resolveRepo = (config: AppConfigShape, project: Option.Option<Project>, epic: Epic): Result.Result<string, string> => {
-	if (Option.isNone(project)) {
-		return Result.fail(`team ${epic.team.name} is not a project`);
-	}
-
-	const { repo, labelReposDirectory } = project.value;
+const resolveRepo = (config: AppConfigShape, { repo, labelReposDirectory }: Project, epic: Epic): Result.Result<string, string> => {
 	const prefix = config.labels.repoPrefix;
 	const group = prefix.replace(/:$/, '');
 	const names = epic.labels.nodes.flatMap((label) => {
@@ -58,8 +53,11 @@ const resolveRepo = (config: AppConfigShape, project: Option.Option<Project>, ep
 
 export const repoOf = (config: AppConfigShape, projects: Projects['Service'], epic: Epic) =>
 	projects.get(epic.team.name).pipe(
-		Effect.flatMap((project) =>
-			Result.match(resolveRepo(config, project, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed }),
+		Effect.flatMap(
+			Option.match({
+				onNone: () => Effect.fail(new Permanent({ message: `team ${epic.team.name} is not a project` })),
+				onSome: (project) => Result.match(resolveRepo(config, project, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed }),
+			}),
 		),
 	);
 
