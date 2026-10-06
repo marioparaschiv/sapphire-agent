@@ -69,9 +69,12 @@ export class AgentEventServer extends Context.Service<
 						yield* journal.addRequest({ _tag: 'phase', identifier: run.identifier, phase: event.skill });
 					}
 
+					// A failed check does not fail the event, which is recorded already; the next tool call checks again.
 					const context =
 						run !== undefined && isStarted(run) && (event._tag === 'ToolUsed' || event._tag === 'SkillInvoked' || event._tag === 'TurnEnded')
-							? yield* checkContext(run, event.sessionId, event._tag === 'ToolUsed' ? event.agentId : null)
+							? yield* checkContext(run, event.sessionId, event._tag === 'ToolUsed' ? event.agentId : null).pipe(
+									Effect.catch((error) => Effect.logWarning(`cannot check ${run.identifier}'s context for a handoff`, error).pipe(Effect.as(Option.none<string>()))),
+								)
 							: Option.none<string>();
 
 					// Tool calls come too often to tick on each; the context check wakes the reconciler when it recorded something.

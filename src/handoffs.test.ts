@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
@@ -203,6 +203,29 @@ describe('handoffs', () => {
 			assert.deepStrictEqual(yield* h.hook('claude', bashHook(session.id, agentId), run.paneId), ok);
 
 			yield* h.restart;
+
+			const told = yield* h.hook('claude', bashHook(session.id, agentId), run.paneId);
+
+			assert.include(told.stdout, `HANDOFF ${join(tmpdir(), `sapphire-agent-handoff-TEST-10-${agentId}.md`)}`);
+		}),
+	);
+
+	it.effect('lets a tool call through when its transcript cannot be read, and checks again on the next call', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
+			const session: TranscriptSession = { id: run.session.id, cwd: run.worktreePath };
+			const agentId = 'a4f29c81d03e5b7a6';
+			const transcriptEntries = [...entries.prompt(session, 'Implement slice 2 of TEST-10.'), ...entries.toolCall(session, 254_000)];
+			const transcript = h.writeSubagentTranscript(session, agentId, transcriptEntries);
+
+			docPath('TEST-10', agentId);
+			rmSync(transcript);
+			mkdirSync(transcript);
+			assert.deepStrictEqual(yield* h.hook('claude', bashHook(session.id, agentId), run.paneId), ok);
+
+			rmSync(transcript, { recursive: true });
+			h.writeSubagentTranscript(session, agentId, transcriptEntries);
 
 			const told = yield* h.hook('claude', bashHook(session.id, agentId), run.paneId);
 

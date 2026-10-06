@@ -169,8 +169,8 @@ export type Harness = {
 	readonly writeResultFile: (run: Run, contents: string) => void;
 	// Writes the Claude session's transcript where Claude Code writes it.
 	readonly writeTranscript: (session: TranscriptSession, entries: ReadonlyArray<Record<string, unknown>>) => void;
-	// Writes the transcript of the session's subagent `agentId` where Claude Code writes it.
-	readonly writeSubagentTranscript: (session: TranscriptSession, agentId: string, entries: ReadonlyArray<Record<string, unknown>>) => void;
+	// Writes the transcript of the session's subagent `agentId` where Claude Code writes it, and returns its path.
+	readonly writeSubagentTranscript: (session: TranscriptSession, agentId: string, entries: ReadonlyArray<Record<string, unknown>>) => string;
 	// Paths of the worktrees git knows under the worktrees directory.
 	readonly worktrees: () => ReadonlyArray<string>;
 	readonly hasBranch: (branch: string) => boolean;
@@ -434,9 +434,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			writeTranscript: (session, entries) => {
 				writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries);
 			},
-			writeSubagentTranscript: (session, agentId, entries) => {
-				writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries, agentId);
-			},
+			writeSubagentTranscript: (session, agentId, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries, agentId),
 			worktrees: () =>
 				git(repo, 'worktree', 'list', '--porcelain')
 					.split('\n')
