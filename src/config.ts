@@ -304,8 +304,8 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 	// Defaults plus one team, the bot and the Telegram bot, with every path under `directory`, a freshly generated App key
 	// and the webhook server on a free port.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
-		Layer.sync(AppConfig, () => {
-			const decoded = Schema.decodeUnknownSync(Settings)({
+		Layer.sync(AppConfig, () => ({
+			...Schema.decodeUnknownSync(Settings)({
 				teams: { Test: { repo: join(directory, 'repo') } },
 				worktreesDirectory: join(directory, 'worktrees'),
 				linearWebhookSecretFile: join(directory, 'linear-webhook-secret'),
@@ -321,25 +321,21 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 					allowedUserIds: [7_100_200_300],
 				},
 				...settings,
-			});
-
-			return {
-				...decoded,
-				env: {
-					herdrBinPath: 'herdr',
-					herdrSocketPath: join(directory, 'herdr.sock'),
-					configDirectory: directory,
-					stateDirectory: directory,
-					linearKeyFile: join(directory, 'linear-key'),
-					claudeConfigPath: join(directory, 'claude.json'),
-					claudeConfigDirectory: join(directory, 'claude'),
-				},
-				linearApiKey: Redacted.make('lin_api_test'),
-				appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
-				webhookSecret: Redacted.make('test-webhook-secret'),
-				linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
-			};
-		});
+			}),
+			env: {
+				herdrBinPath: 'herdr',
+				herdrSocketPath: join(directory, 'herdr.sock'),
+				configDirectory: directory,
+				stateDirectory: directory,
+				linearKeyFile: join(directory, 'linear-key'),
+				claudeConfigPath: join(directory, 'claude.json'),
+				claudeConfigDirectory: join(directory, 'claude'),
+			},
+			linearApiKey: Redacted.make('lin_api_test'),
+			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
+			webhookSecret: Redacted.make('test-webhook-secret'),
+			linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
+		}));
 }
 
 export class TelegramConfig extends Context.Service<TelegramConfig, TelegramConfigShape>()('sapphire-agent/TelegramConfig') {
