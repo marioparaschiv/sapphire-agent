@@ -122,7 +122,7 @@ describe('telegramChat', () => {
 		}).pipe(Effect.provide(layer)),
 	);
 
-	it.effect("shows an epic as a topic named by its state, posts its PR there and in the main chat once, sums it up in the archive and deletes the topic", () =>
+	it.effect('shows an epic as a topic named by its state, posts its PR there and in the main chat once, sums it up in the archive and deletes the topic', () =>
 		Effect.gen(function* () {
 			const telegram = yield* FakeTelegram;
 			const chat = yield* Chat;
