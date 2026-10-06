@@ -2,7 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { Comments, type FlaggedRun, replyMismatch } from './comments.ts';
 import { AppConfig } from './config.ts';
-import { type MarkedComment, parseMarker } from './markers.ts';
+import { type MarkedComment, type Marker, type Notice, parseMarker } from './markers.ts';
 
 const minute = 60_000;
 const claimedAt = 1_791_000_000_000;
@@ -31,10 +31,13 @@ const tailBlock = `\`\`\`
 ❯ Which should win, local or remote?
 \`\`\``;
 
-const runDetails = `- Tab: \`UNB-12 Plugin settings sync\` (w2:t3), pane w2:p5
-- Worktree: \`/home/dev/.herdr/worktrees/unbound/mario-unb-12-plugin-settings-sync\` on branch \`mario/unb-12-plugin-settings-sync\``;
+const runItems = `- Tab: \`UNB-12 Plugin settings sync\` (w2:t3), pane w2:p5
+- Worktree: \`/home/dev/.herdr/worktrees/unbound/mario-unb-12-plugin-settings-sync\` on \`mario/unb-12-plugin-settings-sync\`
+- Label: \`agent-stuck\``;
 
-const startOver = 'Remove the label and move the epic back to Ready For Agent to start over.';
+const startOver = 'Remove the `agent-stuck` label and move the epic back to Ready For Agent to start over.';
+
+const retryAfterFix = 'Fix the problem, then remove the `agent-stuck` label to retry.';
 
 const withComments = <A>(use: (comments: Comments['Service']) => A) =>
 	Comments.useSync(use).pipe(Effect.provide(Comments.layer), Effect.provide(AppConfig.layerTest('/tmp/sapphire-agent-test')));
@@ -44,21 +47,21 @@ const assertComment = (comment: MarkedComment, text: string, marker: string) => 
 	assert.deepStrictEqual(parseMarker(comment.body), Option.some(comment.marker));
 };
 
+const assertNotice = (notice: Notice, text: string, marker: Marker) => {
+	assert.strictEqual(notice.text, text);
+	assert.deepStrictEqual(notice.marker, marker);
+};
+
 describe('Comments', () => {
-	it.effect('flags an agent waiting for input with the pane tail and how to answer it', () =>
+	it.effect('tells the user an agent waits for input, with the pane tail and how to answer it', () =>
 		withComments((comments) =>
-			assertComment(
+			assertNotice(
 				comments.awaitingInput(run),
-				`**sapphire-agent** (\`awaitingInput\`): the agent has been waiting for input for 4 min before writing its result file.
-
-${runDetails}
-
-Last lines of the pane:
-
+				`⏸ **UNB-12 needs input**: the agent has been waiting for input for 4 min without writing its result file.
+${runItems}
 ${tailBlock}
-
-The epic keeps the \`agent-stuck\` label. Reply to this comment and the reply is typed into the agent's pane. Or: ${startOver}`,
-				'<!-- sapphire-agent:UNB-12:awaitingInput:1791000000000-1791001800000 -->',
+Next: Answer the agent in its tab.`,
+				{ identifier: 'UNB-12', purpose: 'awaitingInput', key: '1791000000000-1791001800000' },
 			),
 		),
 	);
@@ -69,123 +72,93 @@ The epic keeps the \`agent-stuck\` label. Reply to this comment and the reply is
 
 			assert.strictEqual(comments.awaitingInput(run).marker.key, '1791000000000-1791001800000');
 			assert.strictEqual(later.marker.key, '1791000000000-1791003000000');
-			assert.isTrue(later.body.startsWith('**sapphire-agent** (`awaitingInput`): the agent has been idle for 4 min before writing its result file.'));
+			assert.isTrue(later.text.startsWith('⏸ **UNB-12 needs input**: the agent has been idle for 4 min without writing its result file.\n'));
+		}),
+	);
+
+	it.effect('shows only the last 10 lines of the pane', () =>
+		withComments((comments) => {
+			const tail = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join('\n');
+			const { text } = comments.agentStopped({ ...run, agentStatus: 'exited', tail });
+
+			assert.include(text, `\`\`\`\n${Array.from({ length: 10 }, (_, index) => `line ${index + 31}`).join('\n')}\n\`\`\``);
+			assert.notInclude(text, 'line 30\n');
 		}),
 	);
 
 	it.effect('flags a stale agent after the nudge', () =>
 		withComments((comments) =>
-			assertComment(
+			assertNotice(
 				comments.stale({ ...run, agentStatus: 'working', agentStatusSince: claimedAt + 10 * minute, now: claimedAt + 30 * minute, nudgedAt: claimedAt + 20 * minute }),
-				`**sapphire-agent** (\`stale\`): the agent has shown no new output for 20 min, even after a nudge before writing its result file.
-
-${runDetails}
-
-Last lines of the pane:
-
+				`🔴 **UNB-12 looks stuck**: the agent has shown no new output for 20 min, even after a nudge without writing its result file.
+${runItems}
 ${tailBlock}
-
-The epic keeps the \`agent-stuck\` label. Look at the agent in its tab. Or: ${startOver}`,
-				'<!-- sapphire-agent:UNB-12:stale:1791000000000-1791001200000 -->',
+Next: Look at the agent in its tab.`,
+				{ identifier: 'UNB-12', purpose: 'stale', key: '1791000000000-1791001200000' },
 			),
 		),
 	);
 
 	it.effect('flags an agent that exited or vanished as an error', () =>
 		withComments((comments) => {
-			assertComment(
+			assertNotice(
 				comments.agentStopped({ ...run, agentStatus: 'exited' }),
-				`**sapphire-agent** (\`error\`): the agent exited before writing its result file.
-
-${runDetails}
-
-Last lines of the pane:
-
+				`🔴 **UNB-12 stopped**: the agent exited without writing its result file.
+${runItems}
 ${tailBlock}
-
-The epic keeps the \`agent-stuck\` label. ${startOver}`,
-				'<!-- sapphire-agent:UNB-12:error:1791000000000 -->',
+Next: ${startOver}`,
+				{ identifier: 'UNB-12', purpose: 'error', key: '1791000000000' },
 			);
 			assert.isTrue(
 				comments
 					.agentStopped({ ...run, agentStatus: 'vanished', tail: '' })
-					.body.startsWith('**sapphire-agent** (`error`): the agent disappeared (its tab was closed or herdr restarted) before writing its result file.'),
+					.text.startsWith('🔴 **UNB-12 stopped**: the agent disappeared (its tab was closed or herdr restarted) without writing its result file.\n'),
 			);
 		}),
 	);
 
 	it.effect('flags a run over the wall-clock cap', () =>
 		withComments((comments) =>
-			assertComment(
+			assertNotice(
 				comments.overCap({ identifier: 'UNB-12', claimedAt, status: 'running', tail: '✻ Running tests… (12m 3s)', now: claimedAt + 95 * minute }),
-				`**sapphire-agent** (\`running\`): the run has been going for 95 min, over the 90 min cap. It keeps running.
-
-Last lines of the pane:
-
-\`\`\`
-✻ Running tests… (12m 3s)
-\`\`\`
-
-Look at the agent in its tab. Or: ${startOver}`,
-				'<!-- sapphire-agent:UNB-12:overCap:1791000000000 -->',
+				'⏰ **UNB-12 is over the time cap**: 95 min, cap 90 min. It keeps running.\n- Status: `running`\n```\n✻ Running tests… (12m 3s)\n```\nNext: Look at the agent in its tab.',
+				{ identifier: 'UNB-12', purpose: 'overCap', key: '1791000000000' },
 			),
 		),
 	);
 
 	it.effect('flags a start failure, with the pane tail when there is one', () =>
 		withComments((comments) => {
-			assertComment(
+			assertNotice(
 				comments.startFailed({
 					identifier: 'UNB-12',
 					claimedAt,
 					error: 'Claude did not start in w2:t3: no agent is running',
 					tail: Option.some('zsh: command not found: claude'),
 				}),
-				`**sapphire-agent** (\`error\`): couldn't start an agent for this epic: Claude did not start in w2:t3: no agent is running
-
-Last lines of the pane:
-
-\`\`\`
-zsh: command not found: claude
-\`\`\`
-
-Fix the problem, then remove the \`agent-stuck\` label to retry.`,
-				'<!-- sapphire-agent:UNB-12:startFailed:1791000000000 -->',
+				`🔴 **UNB-12 didn't start**: Claude did not start in w2:t3: no agent is running\n\`\`\`\nzsh: command not found: claude\n\`\`\`\nNext: ${retryAfterFix}`,
+				{ identifier: 'UNB-12', purpose: 'startFailed', key: '1791000000000' },
 			);
-			assertComment(
-				comments.startFailed({ identifier: 'UNB-12', claimedAt, error: 'the agent was not confirmed running within 300 s', tail: Option.none() }),
-				`**sapphire-agent** (\`error\`): couldn't start an agent for this epic: the agent was not confirmed running within 300 s
-
-Fix the problem, then remove the \`agent-stuck\` label to retry.`,
-				'<!-- sapphire-agent:UNB-12:startFailed:1791000000000 -->',
+			assert.strictEqual(
+				comments.startFailed({ identifier: 'UNB-12', claimedAt, error: 'the agent was not confirmed running within 300 s', tail: Option.none() }).text,
+				`🔴 **UNB-12 didn't start**: the agent was not confirmed running within 300 s\nNext: ${retryAfterFix}`,
 			);
 		}),
 	);
 
-	it.effect('flags an invalid result file', () =>
-		withComments((comments) =>
-			assertComment(
+	it.effect('flags an invalid result file and one without a PR', () =>
+		withComments((comments) => {
+			assertNotice(
 				comments.invalidResult({ identifier: 'UNB-12', claimedAt, error: 'not JSON: Unexpected token } in JSON at position 41' }),
-				`**sapphire-agent** (\`error\`): the agent's result file is invalid:
-
-\`\`\`
-not JSON: Unexpected token } in JSON at position 41
-\`\`\`
-
-${startOver}`,
-				'<!-- sapphire-agent:UNB-12:invalidResult:1791000000000 -->',
-			),
-		),
-	);
-
-	it.effect('flags a result file without a PR', () =>
-		withComments((comments) =>
-			assertComment(
+				`🔴 **UNB-12 wrote an invalid result file**\n\`\`\`\nnot JSON: Unexpected token } in JSON at position 41\n\`\`\`\nNext: ${startOver}`,
+				{ identifier: 'UNB-12', purpose: 'invalidResult', key: '1791000000000' },
+			);
+			assertNotice(
 				comments.noPullRequest({ identifier: 'UNB-12', claimedAt, branch: 'mario/unb-12-plugin-settings-sync' }),
-				`**sapphire-agent** (\`error\`): the agent wrote its result file, but branch \`mario/unb-12-plugin-settings-sync\` has no open or merged PR. ${startOver}`,
-				'<!-- sapphire-agent:UNB-12:noPullRequest:1791000000000 -->',
-			),
-		),
+				`🔴 **UNB-12 has no PR**: the agent wrote its result file, but \`mario/unb-12-plugin-settings-sync\` has no open or merged PR.\nNext: ${startOver}`,
+				{ identifier: 'UNB-12', purpose: 'noPullRequest', key: '1791000000000' },
+			);
+		}),
 	);
 
 	it.effect('flags replies that do not match the dispatched threads', () =>
@@ -203,96 +176,120 @@ ${startOver}`,
 				mismatch,
 				Option.some('no reply for PRRT_accepted_flag; replies to threads it was not given PRRT_other; more than one reply for PRRT_inline'),
 			);
-			assertComment(
+			assertNotice(
 				comments.threadMismatch({
 					identifier: 'UNB-12',
 					claimedAt,
 					job: { _tag: 'follow-up', threadIds: ['PRRT_inline', 'PRRT_accepted_flag'], instruction: null },
 					mismatch: 'no reply for PRRT_accepted_flag',
 				}),
-				`**sapphire-agent** (\`error\`): the agent's result file does not match the review threads it was given: no reply for PRRT_accepted_flag. Nothing was posted to the PR. Remove the label, move the epic to To Review and mention @orchestratorbot to ask for the follow-up again.`,
-				'<!-- sapphire-agent:UNB-12:threadMismatch:1791000000000 -->',
+				"🔴 **UNB-12's replies don't match its review threads**: no reply for PRRT_accepted_flag. Nothing was posted to the PR.\nNext: Remove the `agent-stuck` label, move the epic to To Review and ask for the follow-up again.",
+				{ identifier: 'UNB-12', purpose: 'threadMismatch', key: '1791000000000' },
 			);
-			assertComment(
-				comments.threadMismatch({ identifier: 'UNB-12', claimedAt, job: { _tag: 'orchestrate' }, mismatch: 'replies to threads it was not given PRRT_other' }),
-				`**sapphire-agent** (\`error\`): the agent's result file does not match the review threads it was given: replies to threads it was not given PRRT_other. Nothing was posted to the PR. ${startOver}`,
-				'<!-- sapphire-agent:UNB-12:threadMismatch:1791000000000 -->',
+			assert.strictEqual(
+				comments.threadMismatch({ identifier: 'UNB-12', claimedAt, job: { _tag: 'orchestrate' }, mismatch: 'replies to threads it was not given PRRT_other' }).text,
+				`🔴 **UNB-12's replies don't match its review threads**: replies to threads it was not given PRRT_other. Nothing was posted to the PR.\nNext: ${startOver}`,
 			);
 			assert.deepStrictEqual(replyMismatch(['PRRT_inline'], [{ threadId: 'PRRT_inline', body: 'Renamed it.' }]), Option.none());
 		}),
 	);
 
-	it.effect('tells the user a reply could not be typed into the pane', () =>
-		withComments((comments) =>
-			assertComment(
-				comments.replyFailed({ identifier: 'UNB-12', replyCommentId: 'comment-7', error: 'herdr agent_blocked: agent is waiting on a dialog' }),
-				"**sapphire-agent:** couldn't type your last reply into the agent's pane: herdr agent_blocked: agent is waiting on a dialog. Answer the agent in its tab.",
-				'<!-- sapphire-agent:UNB-12:replyFailed:comment-7 -->',
-			),
-		),
-	);
-
 	it.effect('says where a kept worktree is, for a run and for an orphan', () =>
 		withComments((comments) => {
 			const text =
-				'**sapphire-agent:** kept the worktree `/home/dev/.herdr/worktrees/unbound/mario-unb-12-plugin-settings-sync` because it has 2 unpushed commits. Push or discard that work and it is removed on a later poll.';
+				"📦 **Kept UNB-12's worktree**: it has 2 unpushed commits.\n- Worktree: `/home/dev/.herdr/worktrees/unbound/mario-unb-12-plugin-settings-sync`\nNext: Push or discard that work; the worktree is removed on a later poll.";
 
-			assertComment(
+			assertNotice(
 				comments.keptWorktree({ identifier: 'UNB-12', claimedAt: Option.some(claimedAt), worktreePath: run.worktreePath, reason: '2 unpushed commits' }),
 				text,
-				'<!-- sapphire-agent:UNB-12:keptWorktree:1791000000000 -->',
+				{ identifier: 'UNB-12', purpose: 'keptWorktree', key: '1791000000000' },
 			);
-			assertComment(
-				comments.keptWorktree({ identifier: 'UNB-12', claimedAt: Option.none(), worktreePath: run.worktreePath, reason: '2 unpushed commits' }),
-				text,
-				'<!-- sapphire-agent:UNB-12:keptWorktree:%2Fhome%2Fdev%2F.herdr%2Fworktrees%2Funbound%2Fmario-unb-12-plugin-settings-sync -->',
-			);
+			assertNotice(comments.keptWorktree({ identifier: 'UNB-12', claimedAt: Option.none(), worktreePath: run.worktreePath, reason: '2 unpushed commits' }), text, {
+				identifier: 'UNB-12',
+				purpose: 'keptWorktree',
+				key: run.worktreePath,
+			});
 		}),
 	);
 
 	it.effect('flags a transient failure streak, a permanent failure and a working orphan tab', () =>
 		withComments((comments) => {
-			assertComment(
+			assertNotice(
 				comments.transientFailure({ identifier: 'UNB-12', streakStartedAt: claimedAt, error: 'Linear answered HTTP 503: service unavailable', now: claimedAt + 11 * minute }),
-				'**sapphire-agent** (`error`): calls for this epic have been failing for 11 min: Linear answered HTTP 503: service unavailable. It keeps retrying on every poll; this comment is not repeated.',
-				'<!-- sapphire-agent:UNB-12:transientFailure:1791000000000 -->',
+				"⚠️ **UNB-12's calls keep failing** for 11 min: Linear answered HTTP 503: service unavailable\nNext: Nothing unless it lasts; it retries on every poll.",
+				{ identifier: 'UNB-12', purpose: 'transientFailure', key: '1791000000000' },
 			);
-			assertComment(
+			assertNotice(
 				comments.permanentFailure({ identifier: 'UNB-12', claimedAt, error: "git -C /home/dev/unbound fetch origin: fatal: 'origin' does not appear to be a git repository" }),
-				"**sapphire-agent** (`error`): a call for this epic failed and retrying cannot help: git -C /home/dev/unbound fetch origin: fatal: 'origin' does not appear to be a git repository\n\nFix the problem, then remove the `agent-stuck` label to retry.",
-				'<!-- sapphire-agent:UNB-12:permanentFailure:1791000000000 -->',
+				`🔴 **A call for UNB-12 failed for good**: git -C /home/dev/unbound fetch origin: fatal: 'origin' does not appear to be a git repository\nNext: ${retryAfterFix}`,
+				{ identifier: 'UNB-12', purpose: 'permanentFailure', key: '1791000000000' },
 			);
-			assertComment(
+			assertNotice(
 				comments.workingOrphan({ identifier: 'UNB-12', tabLabel: 'UNB-12 Plugin settings sync', tabId: 'w2:t3', paneId: 'w2:p5' }),
-				'**sapphire-agent:** the agent in tab `UNB-12 Plugin settings sync` (w2:t3), pane w2:p5, is working, but no run of this epic tracks it. It is left running, and its tab is closed once the agent stops working.',
-				'<!-- sapphire-agent:UNB-12:workingOrphan:w2%3At3 -->',
+				'👻 **An untracked agent works on UNB-12**: no run of the epic tracks it.\n- Tab: `UNB-12 Plugin settings sync` (w2:t3), pane w2:p5\nNext: Let it finish; its tab is closed once it stops working.',
+				{ identifier: 'UNB-12', purpose: 'workingOrphan', key: 'w2:t3' },
 			);
 		}),
 	);
 
-	it.effect('writes the PR summary with the author mention, the flags review body and thread replies', () =>
+	it.effect('sums up a finished run and lists at most 5 of its flags', () =>
+		withComments((comments) => {
+			const url = 'https://github.com/marioparaschiv/unbound/pull/120';
+
+			assertNotice(
+				comments.summary({ identifier: 'UNB-12', claimedAt, summary: 'Added settings sync.\n\n1. Synced plugin settings.', url }),
+				`✅ **UNB-12 is ready for review**: ${url}\nAdded settings sync.\n\n1. Synced plugin settings.\nNext: Review the PR.`,
+				{ identifier: 'UNB-12', purpose: 'summary', key: '1791000000000' },
+			);
+			assertNotice(
+				comments.flags({
+					identifier: 'UNB-12',
+					claimedAt,
+					flags: Array.from({ length: 7 }, (_, index) => ({ path: 'src/sync.ts', line: index + 1, body: `Finding ${index + 1}\nwith detail.` })),
+				}),
+				[
+					'🔎 **UNB-12 left 7 self-review findings unfixed**',
+					'- `src/sync.ts:1` Finding 1 with detail.',
+					'- `src/sync.ts:2` Finding 2 with detail.',
+					'- `src/sync.ts:3` Finding 3 with detail.',
+					'- `src/sync.ts:4` Finding 4 with detail.',
+					'- …and 3 more',
+					'Next: Ask for a follow-up to fix any of them.',
+				].join('\n'),
+				{ identifier: 'UNB-12', purpose: 'flags', key: '1791000000000' },
+			);
+		}),
+	);
+
+	it.effect('writes the only Linear and PR comments: the PR link, thread replies and one line after them', () =>
 		withComments((comments) => {
 			assertComment(
-				comments.summary({ identifier: 'UNB-12', claimedAt, summary: 'Added settings sync.\n\n1. Synced plugin settings.', authorLogin: 'marioparaschiv' }),
-				'Added settings sync.\n\n1. Synced plugin settings.\n\nReady for review, @marioparaschiv.',
-				'<!-- sapphire-agent:UNB-12:summary:1791000000000 -->',
+				comments.pullRequestOpened({ identifier: 'UNB-12', url: 'https://github.com/marioparaschiv/unbound/pull/120' }),
+				'PR opened: https://github.com/marioparaschiv/unbound/pull/120',
+				'<!-- sapphire-agent:UNB-12:pullRequestOpened:https%3A%2F%2Fgithub.com%2Fmarioparaschiv%2Funbound%2Fpull%2F120 -->',
 			);
-			assertComment(comments.flagsReview({ identifier: 'UNB-12', claimedAt }), 'Self-review findings I did not fix in this PR.', '<!-- sapphire-agent:UNB-12:flags:1791000000000 -->');
 			assertComment(
 				comments.threadReply({ identifier: 'UNB-12', claimedAt, threadId: 'PRRT_kwDOMx1c5s5Qj2', body: 'Renamed the sync function and derived the settings type.' }),
 				'Renamed the sync function and derived the settings type.',
 				'<!-- sapphire-agent:UNB-12:reply:PRRT_kwDOMx1c5s5Qj2.1791000000000 -->',
 			);
+			assertComment(comments.addressed({ identifier: 'UNB-12', claimedAt }), 'Addressed your concerns inline.', '<!-- sapphire-agent:UNB-12:addressed:1791000000000 -->');
 		}),
 	);
 
 	it.effect("writes a command's replies and its failure, keyed by the request and the claim", () =>
 		withComments((comments) => {
-			assertComment(comments.commandReply({ identifier: 'CMD-3', requestId: 7, body: 'Stopped UNB-12 and closed its tab.' }), 'Stopped UNB-12 and closed its tab.', '<!-- sapphire-agent:CMD-3:commandReply:7 -->');
-			assertComment(
-				comments.commandFailed({ identifier: 'CMD-3', claimedAt, reason: 'exited', tail: Option.some('⏺ Checking the PR.') }),
-				["**sapphire-agent** (`error`): CMD-3 exited, so I stopped it.", '', 'Last lines of the pane:', '', '```\n⏺ Checking the PR.\n```', '', 'Mention @orchestratorbot again to retry.'].join('\n'),
-				'<!-- sapphire-agent:CMD-3:commandFailed:1791000000000 -->',
+			const url = 'https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9';
+
+			assertNotice(
+				comments.commandReply({ identifier: 'CMD-3', requestId: 7, url, body: 'Stopped UNB-12 and closed its tab.' }),
+				`💬 **CMD-3** on ${url}\nStopped UNB-12 and closed its tab.`,
+				{ identifier: 'CMD-3', purpose: 'commandReply', key: '7' },
+			);
+			assertNotice(
+				comments.commandFailed({ identifier: 'CMD-3', claimedAt, url, reason: 'exited', tail: Option.some('⏺ Checking the PR.') }),
+				`🔴 **CMD-3 exited**, so I stopped it.\n- Comment: ${url}\n\`\`\`\n⏺ Checking the PR.\n\`\`\`\nNext: Mention @orchestratorbot again to retry.`,
+				{ identifier: 'CMD-3', purpose: 'commandFailed', key: '1791000000000' },
 			);
 		}),
 	);

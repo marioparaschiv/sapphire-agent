@@ -10,6 +10,7 @@ import {
 	MtcuteError,
 	MtTimeoutError,
 	TelegramClient,
+	type TextWithEntities,
 	tl,
 } from '@mtcute/node';
 import { LogManager } from '@mtcute/node/utils.js';
@@ -150,11 +151,11 @@ export class TelegramBot extends Context.Service<
 		// Stops of drafts, as they come; each subscriber gets every one.
 		readonly draftStops: Stream.Stream<DraftStop>;
 		// Returns the id of the new message.
-		readonly sendText: (chatId: number, text: string, options?: SendOptions) => Effect.Effect<number, CallError>;
+		readonly sendText: (chatId: number, text: TextWithEntities, options?: SendOptions) => Effect.Effect<number, CallError>;
 		// Sends the message unless one with the same key was sent already (`randomIdOf`).
-		readonly sendOnce: (chatId: number, text: string, key: string, options?: SendOptions) => Effect.Effect<void, CallError>;
+		readonly sendOnce: (chatId: number, text: TextWithEntities, key: string, options?: SendOptions) => Effect.Effect<void, CallError>;
 		// Shows the text as a draft answer with a stop button; the same draft id updates the same draft.
-		readonly sendDraft: (chatId: number, topicId: number | null, draftId: Long, text: string) => Effect.Effect<void, CallError>;
+		readonly sendDraft: (chatId: number, topicId: number | null, draftId: Long, text: TextWithEntities) => Effect.Effect<void, CallError>;
 		// Returns the new topic's id.
 		readonly createTopic: (chatId: number, title: string) => Effect.Effect<number, CallError>;
 		readonly editTopic: (chatId: number, topicId: number, title: string) => Effect.Effect<void, CallError>;
@@ -226,7 +227,7 @@ export class TelegramBot extends Context.Service<
 							_: 'messages.setTyping',
 							peer: await client.resolvePeer(chatId),
 							topMsgId: topicId ?? undefined,
-							action: { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text, entities: [] } },
+							action: { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text: text.text, entities: text.entities ?? [] } },
 						}),
 					).pipe(Effect.asVoid),
 				createTopic: (chatId, title) =>

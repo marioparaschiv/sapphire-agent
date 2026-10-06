@@ -2,10 +2,11 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { TestClock } from 'effect/testing';
 import { transcriptEntries as entries } from './claude-transcript-fixture.ts';
-import { parseMarker, renderMarker } from './markers.ts';
 import { type Harness, makeHarness, type StartedRunSeed } from './test-harness.ts';
 
 const statuses = (h: Harness) => h.runs.pipe(Effect.map((runs) => runs.map((run) => run.status)));
+
+const markers = (h: Harness, identifier: string) => h.notices(identifier).map(({ marker }) => marker);
 
 const question = '⏺ The sync needs a conflict rule.\n\n❯ Which should win, local or remote?';
 
@@ -29,7 +30,7 @@ const askedByMessage = (h: Harness, seed: Partial<StartedRunSeed> = {}) =>
 	});
 
 describe('monitoring', () => {
-	it.effect('flags an agent that sits quiet without a result file as awaitingInput, once, also across a restart', () =>
+	it.effect('flags an agent that sits quiet without a result file and without a topic as awaitingInput, once, also across a restart', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
 			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: question });
@@ -37,7 +38,7 @@ describe('monitoring', () => {
 			yield* h.tick;
 			yield* TestClock.adjust('179 seconds');
 			yield* h.tick;
-			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
 
 			// idle to done is still quiet, so the timer keeps running.
 			h.herdr.setAgentStatus(run.paneId, 'done');
@@ -47,19 +48,19 @@ describe('monitoring', () => {
 			yield* TestClock.adjust('1 minute');
 			yield* h.tick;
 
-			const [flag] = h.linear.comments(epic.id);
-			const [flagged] = yield* h.runs;
+			const [flag] = h.notices('TEST-10');
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.match(flag.body, /^\*\*sapphire-agent\*\* \(`awaitingInput`\): the agent finished its turn 3 min ago before writing its result file\./);
-			assert.include(flag.body, 'Which should win, local or remote?');
-			assert.deepStrictEqual([flagged.status, flagged.questionCommentId], ['awaitingInput', flag.id]);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['awaitingInput:0-0']);
+			assert.match(flag.text, /^⏸ \*\*TEST-10 needs input\*\*: the agent finished its turn 3 min ago without writing its result file\./);
+			assert.include(flag.text, 'Which should win, local or remote?');
+			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
 		}),
 	);
 
-	it.effect("asks the question of a run without a requesting session in its epic's topic instead of on Linear, once, also across a restart", () =>
+	it.effect("asks the question of a run in its epic's topic, once, also across a restart", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
 			const { epic } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: question });
@@ -76,15 +77,15 @@ describe('monitoring', () => {
 
 			assert.deepStrictEqual(
 				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
-				[{ text: `⏸ Waiting for input:\n\n${question}\n\nWrite here to answer; it is typed into the agent.`, topicId: topic.topicId }],
+				[{ text: `⏸ The agent waits for input\n${question}\nWrite here to answer; it is typed into the agent.`, topicId: topic.topicId }],
 			);
-			assert.deepStrictEqual([h.linear.comments(epic.id), h.linear.labelNames(epic.id)], [[], []]);
+			assert.deepStrictEqual([h.linear.comments(epic.id), h.linear.labelNames(epic.id), h.notices('TEST-10')], [[], [], []]);
 			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
 			assert.strictEqual(topic.title, '⏸ TEST-10 Plugin settings sync');
 		}),
 	);
 
-	it.effect('still asks the requesting session of a run that has a topic, then Linear, never the topic', () =>
+	it.effect("asks the requesting session first, then the epic's topic with the agent's message", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
 
@@ -95,21 +96,26 @@ describe('monitoring', () => {
 			yield* h.tick;
 			yield* TestClock.adjust('599 seconds');
 			yield* h.tick;
-			assert.deepStrictEqual([h.linear.comments(epic.id), yield* statuses(h)], [[], ['running']]);
+			assert.deepStrictEqual([h.telegram.sent, yield* statuses(h)], [[], ['running']]);
 
 			yield* TestClock.adjust('1 second');
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.strictEqual(h.telegram.topics().length, 2);
-			assert.deepStrictEqual(h.telegram.sent, []);
+			const [topic] = h.telegram.topics().filter(({ title }) => title !== '📁 Test');
+
+			assert.deepStrictEqual(
+				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
+				[{ text: '⏸ The agent waits for input\nTEST-10: Which should win on a conflict,\nlocal or remote?\nWrite here to answer; it is typed into the agent.', topicId: topic.topicId }],
+			);
+			assert.deepStrictEqual([h.linear.comments(epic.id), h.linear.labelNames(epic.id), h.notices('TEST-10')], [[], [], []]);
+			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
 		}),
 	);
 
 	it.effect('nudges an agent whose pane stopped changing once, then flags it as stale, keeping its tab', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ staleAfterSeconds: 600, nudgeGraceSeconds: 600 });
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '✻ Thinking… (12s · ↓ 3.1k tokens)' });
+			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '✻ Thinking… (12s · ↓ 3.1k tokens)' });
 
 			yield* h.tick;
 			// Only the spinner and its counters change: that is not progress.
@@ -122,15 +128,15 @@ describe('monitoring', () => {
 
 			assert.deepStrictEqual(h.herdr.sentKeys(), [{ paneId: run.paneId, keys: ['esc'] }]);
 			assert.deepStrictEqual(h.herdr.prompts(), [{ paneId: run.paneId, text: 'continue' }]);
-			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
 
 			yield* TestClock.adjust('10 minutes');
 			yield* h.tick;
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), [`stale:0-${10 * 60_000}`]);
-			assert.match(h.linear.comments(epic.id)[0].body, /has shown no new output for 20 min, even after a nudge/);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), [`stale:0-${10 * 60_000}`]);
+			assert.match(h.notices('TEST-10')[0].text, /^🔴 \*\*TEST-10 looks stuck\*\*: the agent has shown no new output for 20 min, even after a nudge/);
 			assert.deepStrictEqual(yield* statuses(h), ['stale']);
 			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
 			assert.strictEqual(h.herdr.sentKeys().length, 1);
@@ -145,15 +151,15 @@ describe('monitoring', () => {
 	it.effect('flags an agent that exited as error once, then closes its tab', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '$ claude\nSegmentation fault' });
+			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '$ claude\nSegmentation fault' });
 
 			h.herdr.setAgent(run.paneId, null);
 			yield* h.tick;
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['error:0']);
-			assert.match(h.linear.comments(epic.id)[0].body, /\(`error`\): the agent exited before writing its result file[\s\S]*Segmentation fault/);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['error:0']);
+			assert.match(h.notices('TEST-10')[0].text, /^🔴 \*\*TEST-10 stopped\*\*: the agent exited without writing its result file[\s\S]*Segmentation fault/);
 			assert.deepStrictEqual(h.herdr.closedTabs(), [run.tabId]);
 			assert.deepStrictEqual(yield* statuses(h), ['error']);
 		}),
@@ -162,14 +168,14 @@ describe('monitoring', () => {
 	it.effect('flags an agent whose tab vanished as error once', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
 			h.herdr.removeTab(run.tabId);
 			yield* h.tick;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['error:0']);
-			assert.include(h.linear.comments(epic.id)[0].body, 'disappeared (its tab was closed or herdr restarted)');
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['error:0']);
+			assert.include(h.notices('TEST-10')[0].text, 'disappeared (its tab was closed or herdr restarted)');
 			assert.deepStrictEqual(yield* statuses(h), ['error']);
 		}),
 	);
@@ -177,7 +183,7 @@ describe('monitoring', () => {
 	it.effect('flags a run over the wall-clock cap once and lets it keep running', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ maxRunSeconds: 3600 });
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
 			for (const file of ['api', 'cache', 'client', 'config', 'db', 'events', 'hooks', 'index', 'jobs', 'merge', 'queue', 'routes', 'schema', 'store', 'sync']) {
 				h.herdr.setTail(run.paneId, `⏺ Wrote src/sync/${file}.ts`);
@@ -188,8 +194,8 @@ describe('monitoring', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['overCap:0']);
-			assert.match(h.linear.comments(epic.id)[0].body, /the run has been going for 60 min, over the 60 min cap\. It keeps running\./);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['overCap:0']);
+			assert.match(h.notices('TEST-10')[0].text, /^⏰ \*\*TEST-10 is over the time cap\*\*: 60 min, cap 60 min\. It keeps running\./);
 			assert.deepStrictEqual(yield* statuses(h), ['running']);
 			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
 		}),
@@ -212,81 +218,16 @@ describe('monitoring', () => {
 		}),
 	);
 
-	it.effect('types a reply to the question into the pane once and marks it delivered; other replies are ignored', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: question });
-
-			yield* h.tick;
-			yield* TestClock.adjust('3 minutes');
-			yield* h.tick;
-
-			const [flagged] = yield* h.runs;
-			const unrelated = h.linear.addComment(epic.id, 'Note for later: check the iOS build.');
-
-			h.linear.addComment(epic.id, 'Not this one.', { parentId: unrelated.id });
-
-			const reply = h.linear.addComment(epic.id, 'Remote wins.\nKeep a backup of local.', { parentId: flagged.questionCommentId ?? '' });
-
-			yield* h.tick;
-			yield* h.restart;
-			yield* h.tick;
-
-			assert.deepStrictEqual(h.herdr.prompts(), [{ paneId: run.paneId, text: 'Remote wins. Keep a backup of local.' }]);
-			assert.deepStrictEqual(
-				h.linear.comments(epic.id).map((comment) => [comment.id === flagged.questionCommentId ? 'question' : comment.body.split('\n')[0], comment.reactions]),
-				[
-					['question', []],
-					['Note for later: check the iOS build.', []],
-					['Not this one.', []],
-					['Remote wins.', ['white_check_mark']],
-				],
-			);
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.deepStrictEqual((yield* h.runs)[0].deliveredReplyIds, [reply.id]);
-		}),
-	);
-
-	it.effect('posts a notice under the question when the reply cannot be typed, once', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'blocked', tail: 'Allow edit to src/sync/merge.ts? (y/n)' });
-
-			yield* h.tick;
-			yield* TestClock.adjust('3 minutes');
-			yield* h.tick;
-
-			const [flagged] = yield* h.runs;
-			const question = flagged.questionCommentId ?? '';
-			const reply = h.linear.addComment(epic.id, 'Yes, allow it.', { parentId: question });
-
-			yield* h.tick;
-			yield* h.restart;
-			yield* h.tick;
-
-			const notices = h.linear.comments(epic.id).filter((comment) => comment.parentId === question && comment.id !== reply.id);
-
-			assert.deepStrictEqual(h.herdr.prompts(), []);
-			assert.deepStrictEqual(
-				notices.map((notice) => Option.map(parseMarker(notice.body), (marker) => `${marker.purpose}:${marker.key}`)),
-				[Option.some(`replyFailed:${reply.id}`)],
-			);
-			assert.match(notices[0].body, /couldn't type your last reply into the agent's pane: .*agent_blocked/);
-			assert.deepStrictEqual(h.linear.comments(epic.id).find((comment) => comment.id === reply.id)?.reactions, []);
-			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
-		}),
-	);
-
-	it.effect('leaves a run that asked by message alone for staleAfterSeconds, then asks its question on Linear in one line, once, also across a restart', () =>
+	it.effect('leaves a run that asked by message alone for staleAfterSeconds, then, without a topic, flags its question in one line, once, also across a restart', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { epic, run } = yield* askedByMessage(h);
+			const { epic } = yield* askedByMessage(h);
 
 			yield* h.tick;
 			yield* TestClock.adjust('599 seconds');
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), []);
 			assert.deepStrictEqual([h.herdr.sentKeys(), h.herdr.prompts()], [[], []]);
 			assert.deepStrictEqual(yield* statuses(h), ['running']);
@@ -296,73 +237,63 @@ describe('monitoring', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			const [asked] = h.linear.comments(epic.id);
-			const [flagged] = yield* h.runs;
-
-			assert.strictEqual(asked.body, `TEST-10 asks: Which should win on a conflict, local or remote?\n\n${renderMarker({ identifier: 'TEST-10', purpose: 'awaitingInput', key: '0-0' })}`);
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.deepStrictEqual([flagged.status, flagged.questionCommentId], ['awaitingInput', asked.id]);
+			assert.deepStrictEqual(
+				h.notices('TEST-10').map(({ marker, text }) => [marker, text]),
+				[['awaitingInput:0-0', '❓ **TEST-10 asks:** Which should win on a conflict, local or remote?\nNext: Answer the agent in its tab.']],
+			);
+			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
-
-			const reply = h.linear.addComment(epic.id, 'Remote wins.', { parentId: asked.id });
-
-			yield* h.tick;
-			yield* h.tick;
-
-			assert.deepStrictEqual(h.herdr.prompts(), [{ paneId: run.paneId, text: 'Remote wins.' }]);
-			assert.deepStrictEqual(h.linear.comments(epic.id).find((comment) => comment.id === reply.id)?.reactions, ['white_check_mark']);
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 		}),
 	);
 
 	it.effect('stops waiting for staleAfterSeconds once the reply comes by message, and flags the run as awaitingInput as before', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { epic, session, asked } = yield* askedByMessage(h);
+			const { session, asked } = yield* askedByMessage(h);
 
 			yield* h.tick;
 			yield* TestClock.adjust('5 minutes');
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
 
 			h.writeTranscript(session, [...asked, ...entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.')]);
 			yield* h.tick;
 
-			const [flagged] = h.linear.comments(epic.id);
+			const [flagged] = h.notices('TEST-10');
 
-			assert.isFalse(flagged.body.startsWith('TEST-10 asks:'));
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
+			assert.isTrue(flagged.text.startsWith('⏸ **TEST-10 needs input**'));
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['awaitingInput:0-0']);
 			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
 		}),
 	);
 
-	it.effect('asks on Linear after staleAfterSeconds when that comes before awaitingInputAfterSeconds', () =>
+	it.effect('asks after staleAfterSeconds when that comes before awaitingInputAfterSeconds', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 600, staleAfterSeconds: 180 });
-			const { epic } = yield* askedByMessage(h);
 
+			yield* askedByMessage(h);
 			yield* h.tick;
 			yield* TestClock.adjust('180 seconds');
 			yield* h.tick;
 
-			const [asked] = h.linear.comments(epic.id);
-
-			assert.isTrue(asked.body.startsWith('TEST-10 asks: Which should win on a conflict, local or remote?'));
+			assert.isTrue(h.notices('TEST-10')[0].text.startsWith('❓ **TEST-10 asks:** Which should win on a conflict, local or remote?'));
 		}),
 	);
 
 	it.effect('flags a run with a reply-to as awaitingInput as before once its message was answered', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { epic, session, asked } = yield* askedByMessage(h, { tail: question });
+			const { session, asked } = yield* askedByMessage(h, { tail: question });
 
 			h.writeTranscript(session, [...asked, ...entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.'), ...entries.text(session, 'The sync needs a second conflict rule.')]);
 			yield* h.tick;
 			yield* TestClock.adjust('3 minutes');
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.include(h.linear.comments(epic.id)[0].body, 'Which should win, local or remote?');
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['awaitingInput:0-0']);
+			assert.include(h.notices('TEST-10')[0].text, 'Which should win, local or remote?');
 			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
 		}),
 	);

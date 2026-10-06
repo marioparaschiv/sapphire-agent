@@ -27,8 +27,6 @@ const orchestrate: Run = {
 	nudgedAt: null,
 	tailHash: null,
 	result: null,
-	questionCommentId: null,
-	deliveredReplyIds: [],
 };
 
 const followUp: Run = {
@@ -55,9 +53,51 @@ const followUp: Run = {
 		replies: [{ threadId: 'PRRT_1', body: 'Fixed.' }],
 		flags: [{ path: 'src/linear.ts', line: 12, body: 'Check the page size.' }],
 	},
-	questionCommentId: 'comment-9',
-	deliveredReplyIds: ['reply-1'],
 };
+
+// The runs table as migrations 0001 to 0010 left it.
+const runsBeforeNotices = `
+	CREATE TABLE runs (
+		epic_id TEXT PRIMARY KEY, identifier TEXT NOT NULL, team_id TEXT NOT NULL, status TEXT NOT NULL, job TEXT NOT NULL, repo TEXT NOT NULL,
+		branch TEXT NOT NULL, worktree_path TEXT, tab_id TEXT, pane_id TEXT, claimed_at INTEGER NOT NULL, started_at INTEGER, agent_status TEXT,
+		agent_status_since INTEGER, nudged_at INTEGER, tail_hash TEXT, result TEXT, question_comment_id TEXT, delivered_reply_ids TEXT NOT NULL,
+		session TEXT, reply_to TEXT
+	);
+`;
+
+const migrationNames = [
+	'create_journal',
+	'drop_mention_threads',
+	'create_delivery_mark',
+	'add_sessions',
+	'add_reply_to',
+	'add_command_acknowledged_at',
+	'create_chat_sessions',
+	'create_topics',
+	'create_projects',
+	'add_chat_session_cwd_and_thread',
+];
+
+// A journal file whose migrations up to `applied` ran, holding only the tables `schema` makes.
+const journalFileAt = (applied: number, schema: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem;
+		const filename = join(yield* fs.makeTempDirectoryScoped(), 'journal.db');
+		const database = new DatabaseSync(filename);
+
+		database.exec(`
+			CREATE TABLE effect_sql_migrations (migration_id integer PRIMARY KEY NOT NULL, created_at datetime NOT NULL DEFAULT current_timestamp, name VARCHAR(255) NOT NULL);
+			${schema}
+		`);
+
+		for (const [id, name] of migrationNames.slice(0, applied).entries()) {
+			database.prepare('INSERT INTO effect_sql_migrations (migration_id, name) VALUES (?, ?)').run(id + 1, name);
+		}
+
+		database.close();
+
+		return filename;
+	});
 
 describe('Journal', () => {
 	it.effect('round-trips runs through SQLite with their schema types', () =>
@@ -172,28 +212,57 @@ describe('Journal', () => {
 
 	it.effect('moves the chat sessions recorded before sessions had a directory to the main chat in the home directory, which they ran in', () =>
 		Effect.gen(function* () {
-			const fs = yield* FileSystem.FileSystem;
-			const filename = join(yield* fs.makeTempDirectoryScoped(), 'journal.db');
-			const database = new DatabaseSync(filename);
-
-			// The journal as migration 0009 left it.
-			database.exec(`
-				CREATE TABLE effect_sql_migrations (migration_id integer PRIMARY KEY NOT NULL, created_at datetime NOT NULL DEFAULT current_timestamp, name VARCHAR(255) NOT NULL);
+			const filename = yield* journalFileAt(
+				9,
+				`${runsBeforeNotices}
 				CREATE TABLE chat_sessions (message_ref TEXT PRIMARY KEY, session_id TEXT NOT NULL, created_at INTEGER NOT NULL);
-				INSERT INTO chat_sessions VALUES ('7100200300:12', 'session-a', 1000), ('7100200300:14', 'session-b', 2000);
-			`);
-
-			for (const [id, name] of ['create_journal', 'drop_mention_threads', 'create_delivery_mark', 'add_sessions', 'add_reply_to', 'add_command_acknowledged_at', 'create_chat_sessions', 'create_topics', 'create_projects'].entries()) {
-				database.prepare('INSERT INTO effect_sql_migrations (migration_id, name) VALUES (?, ?)').run(id + 1, name);
-			}
-
-			database.close();
-
+				INSERT INTO chat_sessions VALUES ('7100200300:12', 'session-a', 1000), ('7100200300:14', 'session-b', 2000);`,
+			);
 			const journal = yield* Layer.build(Journal.layer(filename)).pipe(Effect.map(Context.get(Journal)));
 
 			assert.deepStrictEqual(yield* journal.chatSession('7100200300:12'), Option.some({ sessionId: 'session-a', cwd: homedir() }));
 			assert.deepStrictEqual(yield* journal.latestChatSession, Option.some({ sessionId: 'session-b', cwd: homedir() }));
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
+	);
+
+	it.effect('drops the question columns of runs recorded before notices', () =>
+		Effect.gen(function* () {
+			const filename = yield* journalFileAt(
+				10,
+				`${runsBeforeNotices}
+				INSERT INTO runs (epic_id, identifier, team_id, status, job, repo, branch, claimed_at, question_comment_id, delivered_reply_ids, reply_to)
+				VALUES ('epic-1', 'HL-9', 'team-1', 'claimed', '{"_tag":"orchestrate"}', '/home/dev/sapphire-agent', 'mario/hl-9-foundation', 1000, 'comment-9', '["reply-1"]', 'planning');`,
+			);
+			const journal = yield* Layer.build(Journal.layer(filename)).pipe(Effect.map(Context.get(Journal)));
+
+			assert.deepStrictEqual(yield* journal.listRuns, [{ ...orchestrate, session: null }]);
+		}).pipe(Effect.provide(NodeFileSystem.layer)),
+	);
+
+	it.effect('keeps a notice in the outbox once per marker until it is sent', () =>
+		Effect.gen(function* () {
+			const journal = yield* Journal;
+			const stale = { marker: { identifier: 'HL-9', purpose: 'stale' as const, key: '1000-4000' }, text: '🔴 **HL-9 looks stuck**' };
+			const summary = { marker: { identifier: 'HL-9', purpose: 'summary' as const, key: '1000' }, text: '✅ **HL-9 is ready for review**' };
+
+			yield* journal.addNotice(stale);
+			yield* journal.addNotice(summary);
+			yield* journal.addNotice({ ...stale, text: 'written again' });
+
+			const unsent = yield* journal.unsentNotices;
+
+			assert.deepStrictEqual(
+				unsent.map(({ identifier, purpose, key, text }) => ({ marker: { identifier, purpose, key }, text })),
+				[stale, summary],
+			);
+
+			yield* journal.markNoticeSent(unsent[0].id);
+			yield* journal.addNotice(stale);
+
+			assert.deepStrictEqual((yield* journal.unsentNotices).map(({ purpose }) => purpose), ['summary']);
+			assert.isTrue(yield* journal.hasNotice(stale.marker));
+			assert.isFalse(yield* journal.hasNotice({ ...stale.marker, key: '1000-9000' }));
+		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
 
 	it.effect("keeps the main chat's newest session apart from a project thread's newest bot message", () =>
@@ -227,7 +296,7 @@ describe('Journal', () => {
 			assert.deepStrictEqual(reopened, [followUp]);
 			assert.deepStrictEqual(
 				tables.map(({ name }) => name),
-				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'projects', 'requests', 'runs', 'topics', 'transient_failures'],
+				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'notices', 'projects', 'requests', 'runs', 'topics', 'transient_failures'],
 			);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);

@@ -66,8 +66,9 @@ describe('cleanup', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['keptWorktree:0']);
-			assert.include(h.linear.comments(epic.id)[0].body, `kept the worktree \`${run.worktreePath}\` because it has 1 unpushed commit.`);
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['keptWorktree:0']);
+			assert.include(h.notices(epic.identifier)[0].text, `📦 **Kept TEST-10's worktree**: it has 1 unpushed commit.\n- Worktree: \`${run.worktreePath}\``);
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((found) => found.status),
 				['kept'],
@@ -80,7 +81,7 @@ describe('cleanup', () => {
 
 			assert.deepStrictEqual(h.worktrees(), []);
 			assert.deepStrictEqual(yield* h.runs, []);
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['keptWorktree:0']);
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['keptWorktree:0']);
 		}),
 	);
 
@@ -133,7 +134,8 @@ describe('cleanup', () => {
 			assert.isTrue(open(h, workingTab.tabId));
 			assert.isTrue(open(h, userTab.tabId));
 			assert.isTrue(open(h, otherWorkspace.tabId));
-			assert.deepStrictEqual(h.epicMarkers(working.id), [`workingOrphan:${workingTab.tabId}`]);
+			assert.deepStrictEqual(h.notices(working.identifier).map(({ marker }) => marker), [`workingOrphan:${workingTab.tabId}`]);
+			assert.deepStrictEqual(h.linear.comments(working.id), []);
 			assert.deepStrictEqual(h.linear.comments(shipped.id), []);
 
 			const runs = new Map((yield* h.runs).map((run) => [run.identifier, run]));
@@ -172,7 +174,8 @@ describe('cleanup', () => {
 
 			assert.deepStrictEqual(h.worktrees().toSorted(), [dirtyPath, inProgressPath, unrelatedPath].toSorted());
 			assert.isFalse(h.hasBranch('mario/test-30-done-long-ago'));
-			assert.deepStrictEqual(h.epicMarkers(dirty.id), [`keptWorktree:${dirtyPath}`]);
+			assert.deepStrictEqual(h.notices(dirty.identifier).map(({ marker }) => marker), [`keptWorktree:${dirtyPath}`]);
+			assert.deepStrictEqual(h.linear.comments(dirty.id), []);
 			assert.deepStrictEqual([...h.linear.comments(done.id), ...h.linear.comments(inProgress.id)], []);
 			assert.isFalse(existsSync(donePath));
 		}),

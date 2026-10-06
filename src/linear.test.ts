@@ -11,10 +11,10 @@ const withFixture = Effect.provide(LinearFixture.layer.pipe(Layer.provide(AppCon
 
 const stateId = (name: string) => testTeam.states.nodes.find((state) => state.name === name)?.id ?? '';
 
-const errorFlag = withMarker('The agent exited before opening a PR. Check the tab for details.', {
+const pullRequestOpened = withMarker('PR opened: https://github.com/test/repo/pull/1', {
 	identifier: 'TEST-10',
-	purpose: 'error',
-	key: '1790000000000',
+	purpose: 'pullRequestOpened',
+	key: 'https://github.com/test/repo/pull/1',
 });
 
 describe('Linear reads', () => {
@@ -116,64 +116,41 @@ describe('Linear reads', () => {
 			assert.strictEqual(error.message, '251 epics exceed the 250 issues one read can return');
 		}).pipe(withFixture),
 	);
+});
 
-	it.effect('reads the replies to question comments and every comment on an issue across pages', () =>
+describe('Linear writes', () => {
+	it.effect('posts a marked comment once, even when asked twice', () =>
 		Effect.gen(function* () {
 			const fixture = yield* LinearFixture;
 			const linear = yield* Linear;
 			const epic = fixture.addEpic({ identifier: 'TEST-10', title: 'Linear service on HttpClient' });
-			const question = fixture.addComment(epic.id, 'The agent is waiting for input:\n\n```\nWhich endpoint should I use?\n```');
-			const answer = fixture.addComment(epic.id, 'Use the GraphQL endpoint.', {
-				parentId: question.id,
-				createdAt: '2026-10-01T09:30:00.000Z',
-				reactions: ['white_check_mark'],
-			});
-			const other = fixture.addEpic({ identifier: 'TEST-11', title: 'Other epic' });
 
-			fixture.addComment(other.id, 'Unrelated');
+			yield* linear.comment(epic.id, pullRequestOpened);
+			yield* linear.comment(epic.id, pullRequestOpened);
+
+			assert.deepStrictEqual(
+				fixture.comments(epic.id).map((comment) => comment.body),
+				[`PR opened: https://github.com/test/repo/pull/1\n\n${renderMarker(pullRequestOpened.marker)}`],
+			);
+			assert.deepStrictEqual(fixture.mutations, [`comment ${epic.id}`]);
+		}).pipe(withFixture),
+	);
+
+	it.effect('finds the marker on a later page of comments', () =>
+		Effect.gen(function* () {
+			const fixture = yield* LinearFixture;
+			const linear = yield* Linear;
+			const epic = fixture.addEpic({ identifier: 'TEST-10', title: 'Linear service on HttpClient' });
 
 			for (let index = 0; index < 260; index += 1) {
 				fixture.addComment(epic.id, `Progress note ${index}`);
 			}
 
-			const replies = yield* linear.replies([question.id]);
+			fixture.addComment(epic.id, pullRequestOpened.body);
+			yield* linear.comment(epic.id, pullRequestOpened);
 
-			assert.deepStrictEqual(replies, [
-				{ id: answer.id, body: 'Use the GraphQL endpoint.', createdAt: '2026-10-01T09:30:00.000Z', parent: { id: question.id }, reactions: [{ emoji: 'white_check_mark' }] },
-			]);
-
-			const comments = yield* linear.comments(epic.id);
-
-			assert.strictEqual(comments.length, 262);
-			assert.deepStrictEqual(comments[1], replies[0]);
-			assert.strictEqual(comments[0].parent, null);
-			assert.strictEqual(comments.at(-1)?.body, 'Progress note 259');
-		}).pipe(withFixture),
-	);
-});
-
-describe('Linear writes', () => {
-	it.effect('posts a marked comment once, even when asked twice or as a reply', () =>
-		Effect.gen(function* () {
-			const fixture = yield* LinearFixture;
-			const linear = yield* Linear;
-			const epic = fixture.addEpic({ identifier: 'TEST-10', title: 'Linear service on HttpClient' });
-			const first = yield* linear.comment(epic.id, errorFlag);
-			const second = yield* linear.comment(epic.id, errorFlag);
-
-			assert.strictEqual(second, first);
-			assert.deepStrictEqual(
-				fixture.comments(epic.id).map((comment) => comment.body),
-				[`The agent exited before opening a PR. Check the tab for details.\n\n${renderMarker(errorFlag.marker)}`],
-			);
-
-			const question = fixture.addComment(epic.id, 'The agent is waiting for input.');
-			const reply = fixture.addComment(epic.id, 'Go ahead.', { parentId: question.id });
-			const replyFailed = withMarker('Could not type this reply into the pane.', { identifier: 'TEST-10', purpose: 'replyFailed', key: reply.id });
-			const notice = yield* linear.comment(epic.id, replyFailed, question.id);
-
-			assert.strictEqual(yield* linear.comment(epic.id, replyFailed, question.id), notice);
-			assert.deepStrictEqual(fixture.mutations, [`comment ${epic.id}`, `comment ${epic.id} in ${question.id}`]);
+			assert.strictEqual(fixture.comments(epic.id).length, 261);
+			assert.deepStrictEqual(fixture.mutations, []);
 		}).pipe(withFixture),
 	);
 
@@ -185,23 +162,19 @@ describe('Linear writes', () => {
 
 			fixture.crashAfterWrite(1);
 
-			const fiber = yield* linear.comment(epic.id, errorFlag).pipe(Effect.forkChild);
+			const fiber = yield* linear.comment(epic.id, pullRequestOpened).pipe(Effect.forkChild);
 
 			// The marker read, then the post whose answer is lost.
 			yield* fixture.awaitAnswers(2);
 			assert.strictEqual(fixture.comments(epic.id).length, 1);
 			yield* TestClock.adjust('2 seconds');
 
-			const id = yield* Fiber.join(fiber);
-
-			assert.deepStrictEqual(
-				fixture.comments(epic.id).map((comment) => comment.id),
-				[id],
-			);
+			yield* Fiber.join(fiber);
+			assert.strictEqual(fixture.comments(epic.id).length, 1);
 			assert.deepStrictEqual(fixture.mutations, [`comment ${epic.id}`]);
 
 			// A fresh process asking again finds the same comment.
-			assert.strictEqual(yield* linear.comment(epic.id, errorFlag), id);
+			yield* linear.comment(epic.id, pullRequestOpened);
 			assert.strictEqual(fixture.comments(epic.id).length, 1);
 		}).pipe(withFixture),
 	);
@@ -214,19 +187,15 @@ describe('Linear writes', () => {
 
 			fixture.failWrite(1, 429, 30);
 
-			const fiber = yield* linear.comment(epic.id, errorFlag).pipe(Effect.forkChild);
+			const fiber = yield* linear.comment(epic.id, pullRequestOpened).pipe(Effect.forkChild);
 
 			yield* fixture.awaitAnswers(2);
 			yield* TestClock.adjust('29999 millis');
 			assert.deepStrictEqual(fixture.comments(epic.id), []);
 			yield* TestClock.adjust('1 millis');
 
-			const id = yield* Fiber.join(fiber);
-
-			assert.deepStrictEqual(
-				fixture.comments(epic.id).map((comment) => comment.id),
-				[id],
-			);
+			yield* Fiber.join(fiber);
+			assert.strictEqual(fixture.comments(epic.id).length, 1);
 		}).pipe(withFixture),
 	);
 
@@ -238,17 +207,13 @@ describe('Linear writes', () => {
 
 			fixture.rateLimitWrite(1, 30);
 
-			const fiber = yield* linear.comment(epic.id, errorFlag).pipe(Effect.forkChild);
+			const fiber = yield* linear.comment(epic.id, pullRequestOpened).pipe(Effect.forkChild);
 
 			yield* fixture.awaitAnswers(2);
 			yield* TestClock.adjust('30 seconds');
 
-			const id = yield* Fiber.join(fiber);
-
-			assert.deepStrictEqual(
-				fixture.comments(epic.id).map((comment) => comment.id),
-				[id],
-			);
+			yield* Fiber.join(fiber);
+			assert.strictEqual(fixture.comments(epic.id).length, 1);
 		}).pipe(withFixture),
 	);
 
@@ -260,27 +225,11 @@ describe('Linear writes', () => {
 
 			fixture.failWrite(1, 400);
 
-			const error = yield* Effect.flip(linear.comment(epic.id, errorFlag));
+			const error = yield* Effect.flip(linear.comment(epic.id, pullRequestOpened));
 
 			assert.instanceOf(error, Permanent);
 			assert.strictEqual(error.message, 'Linear answered HTTP 400: injected failure of write 1');
 			assert.deepStrictEqual(fixture.comments(epic.id), []);
-		}).pipe(withFixture),
-	);
-
-	it.effect('reacts once per emoji', () =>
-		Effect.gen(function* () {
-			const fixture = yield* LinearFixture;
-			const linear = yield* Linear;
-			const epic = fixture.addEpic({ identifier: 'TEST-10', title: 'Linear service on HttpClient' });
-			const question = fixture.addComment(epic.id, 'The agent is waiting for input.');
-			const reply = fixture.addComment(epic.id, 'Use the fixture.', { parentId: question.id });
-
-			yield* linear.react(reply.id, 'white_check_mark');
-			yield* linear.react(reply.id, 'white_check_mark');
-
-			assert.deepStrictEqual(fixture.comments(epic.id)[1].reactions, ['white_check_mark']);
-			assert.deepStrictEqual(fixture.mutations, [`react ${reply.id} white_check_mark`]);
 		}).pipe(withFixture),
 	);
 

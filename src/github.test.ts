@@ -69,8 +69,6 @@ const GraphqlRequest = Schema.fromJsonString(
 const RestRequest = Schema.fromJsonString(
 	Schema.Struct({
 		body: Schema.String,
-		event: Schema.optionalKey(Schema.String),
-		comments: Schema.optionalKey(Schema.Array(Schema.Struct({ path: Schema.String, line: Schema.Int, side: Schema.String, body: Schema.String }))),
 	}),
 );
 
@@ -86,7 +84,6 @@ const repo = 'acme/web';
 const pullRequestServer = () => {
 	const state = {
 		comments: new Array<string>(),
-		reviews: new Array<typeof RestRequest.Type>(),
 		thread: { isResolved: false, comments: ['Rename this to fetchUsers @orchestratorbot'] },
 	};
 
@@ -99,20 +96,12 @@ const pullRequestServer = () => {
 
 				return { stdout: JSON.stringify({ id: 2_400_000 + state.comments.length, body: request.body, user: { login: 'mario' } }) };
 			}
-
-			state.reviews.push(request);
-
-			return { stdout: JSON.stringify({ id: 3_100_000 + state.reviews.length, state: 'COMMENTED', body: request.body }) };
 		}
 
 		const { query, variables } = graphqlRequest(call);
 
 		if (query.includes('query ConversationBodies')) {
 			return data({ repository: { issueOrPullRequest: { comments: page(state.comments) } } });
-		}
-
-		if (query.includes('query ReviewBodies')) {
-			return data({ repository: { pullRequest: { reviews: page(state.reviews.map(({ body }) => body)) } } });
 		}
 
 		if (query.includes('query ReviewThread')) {
@@ -137,14 +126,7 @@ const pullRequestServer = () => {
 	return { state, respond };
 };
 
-const summary = withMarker('Added the users import.\n\nReady for review, @mario.', { identifier: 'HL-11', purpose: 'summary', key: '1759500000000' });
-
-const flagsReview = withMarker('Self-review findings I did not fix in this PR.', { identifier: 'HL-11', purpose: 'flags', key: '1759500000000' });
-
-const flags = [
-	{ path: 'src/users.ts', line: 12, body: 'This loads every user into memory.' },
-	{ path: 'src/import.ts', line: 3, body: 'No retry on a failed page.' },
-];
+const summary = withMarker('Addressed your concerns inline.', { identifier: 'HL-11', purpose: 'addressed', key: '1759500000000' });
 
 const reply = withMarker('Renamed it to fetchUsers.', { identifier: 'HL-11', purpose: 'reply', key: 'PRRT_kwDOA1.1759500000000' });
 
@@ -233,37 +215,6 @@ describe('GitHub live layer', () => {
 			yield* Fiber.join(fiber);
 
 			assert.deepStrictEqual(server.state.comments, [summary.body]);
-		}),
-	);
-
-	it.effect('posts every flag in one review once, as the GitHub App', () =>
-		Effect.gen(function* () {
-			const server = pullRequestServer();
-			const { calls, layer } = liveWithGh(server.respond);
-
-			yield* Effect.gen(function* () {
-				(yield* GitHubAppFixture).install(repo);
-				yield* GitHub.use((github) => Effect.repeat(github.postFlagsReview(repo, 7, flagsReview, flags), { times: 1 }));
-			}).pipe(Effect.provide(layer));
-
-			assert.deepStrictEqual(server.state.reviews, [
-				{
-					event: 'COMMENT',
-					body: flagsReview.body,
-					comments: [
-						{ path: 'src/users.ts', line: 12, side: 'RIGHT', body: 'This loads every user into memory.' },
-						{ path: 'src/import.ts', line: 3, side: 'RIGHT', body: 'No retry on a failed page.' },
-					],
-				},
-			]);
-			assert.deepStrictEqual(
-				calls.map(({ args, env }) => [args.join(' '), env]),
-				[
-					['api graphql --input -', undefined],
-					[`api --method POST repos/${repo}/pulls/7/reviews --input -`, { GH_TOKEN: 'ghs_1001_1' }],
-					['api graphql --input -', undefined],
-				],
-			);
 		}),
 	);
 
@@ -432,7 +383,6 @@ describe('FakeGitHub', () => {
 			const crash = new Transient({ message: 'killed' });
 			const post = Effect.all([
 				github.postComment(repo, number, summary),
-				github.postFlagsReview(repo, number, flagsReview, flags),
 				github.replyToThread(repo, threadId, reply),
 				github.resolveThread(repo, threadId),
 			]);
@@ -442,7 +392,6 @@ describe('FakeGitHub', () => {
 			yield* post;
 
 			assert.deepStrictEqual(fake.botComments(repo, number), [summary.body]);
-			assert.lengthOf(fake.reviews(repo, number), 1);
 			assert.deepStrictEqual(
 				[fake.thread(threadId).isResolved, fake.thread(threadId).comments.map(({ body }) => body)],
 				[true, ['@orchestratorbot rename this', reply.body]],

@@ -3,7 +3,6 @@ import { Permanent, Transient } from './call-policy.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Journal } from './journal.ts';
-import { Linear } from './linear.ts';
 import { type Observation, Observer } from './observation.ts';
 import { makeFlag } from './run-actions.ts';
 
@@ -56,7 +55,6 @@ const isPermanent = (error: unknown): error is Permanent => error instanceof Per
 const makePolicy = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
-	const linear = yield* Linear;
 	const comments = yield* Comments;
 	const flag = yield* makeFlag;
 
@@ -75,7 +73,7 @@ const makePolicy = Effect.gen(function* () {
 					const now = yield* Clock.currentTimeMillis;
 
 					if (now - streakStartedAt >= config.flagTransientAfterSeconds * 1000) {
-						yield* linear.comment(work.epicId, comments.transientFailure({ identifier: work.identifier, streakStartedAt, error: error.message, now }));
+						yield* journal.addNotice(comments.transientFailure({ identifier: work.identifier, streakStartedAt, error: error.message, now }));
 					}
 				}),
 			),

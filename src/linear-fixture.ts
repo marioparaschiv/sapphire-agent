@@ -35,14 +35,7 @@ export type FixtureIssue = {
 // A label without teamId is a workspace label; parentName is its label group.
 export type FixtureLabel = { readonly id: string; readonly name: string; readonly teamId: string | null; readonly parentName: string | null };
 
-export type FixtureComment = {
-	readonly id: string;
-	readonly issueId: string;
-	readonly body: string;
-	readonly parentId: string | null;
-	readonly createdAt: string;
-	reactions: ReadonlyArray<string>;
-};
+export type FixtureComment = { readonly id: string; readonly issueId: string; readonly body: string };
 
 export type EpicSeed = {
 	readonly identifier: string;
@@ -61,30 +54,21 @@ export type EpicSeed = {
 
 export type LabelSeed = { readonly name: string; readonly teamId?: string; readonly parentName?: string };
 
-export type CommentSeed = {
-	// Makes the comment a reply in that comment's thread.
-	readonly parentId?: string;
-	// Defaults to one second after the previous comment, from 2026-10-01T00:00:00Z.
-	readonly createdAt?: string;
-	readonly reactions?: ReadonlyArray<string>;
-};
-
 export type LinearFixtureShape = {
 	// The GraphQL endpoint on 127.0.0.1.
 	readonly url: string;
 	readonly addEpic: (seed: EpicSeed) => FixtureIssue;
 	readonly addLabel: (seed: LabelSeed) => FixtureLabel;
-	// A comment as a user would post it in Linear, e.g. a reply in a question's thread.
-	readonly addComment: (issueId: string, body: string, seed?: CommentSeed) => FixtureComment;
+	// A comment as a user would post it in Linear.
+	readonly addComment: (issueId: string, body: string) => FixtureComment;
 	readonly issue: (issueId: string) => FixtureIssue;
 	// Sub-issues of the epic, in creation order.
 	readonly subIssues: (epicId: string) => ReadonlyArray<FixtureIssue>;
 	readonly stateName: (issueId: string) => string;
 	readonly labelNames: (issueId: string) => ReadonlyArray<string>;
-	// Every comment on the issue, replies included, in creation order.
+	// Every comment on the issue, in creation order.
 	readonly comments: (issueId: string) => ReadonlyArray<FixtureComment>;
-	// Applied writes in order, e.g. `move <issueId> <stateId>`, `comment <issueId>`, `comment <issueId> in <parentId>`,
-	// `react <commentId> <emoji>`, `create-label <name>`, `add-label <issueId> <labelId>`, `remove-label <issueId> <labelId>`.
+	// Applied writes in order, e.g. `move <issueId> <stateId>`, `comment <issueId>`, `create-label <name>`, `add-label <issueId> <labelId>`, `remove-label <issueId> <labelId>`.
 	readonly mutations: ReadonlyArray<string>;
 	// Every authorization header received.
 	readonly authorizations: ReadonlySet<string>;
@@ -132,14 +116,11 @@ const variableSchemas = {
 	EpicsByIdentifier: Schema.Struct({
 		filter: Schema.Struct({ or: Schema.Array(Schema.Struct({ team: Schema.Struct({ key: Schema.Struct({ eq: Schema.String }) }), number: Schema.Struct({ eq: Schema.Number }) })) }),
 	}),
-	Replies: Schema.Struct({ questionIds: Ids }),
 	Comments: Schema.Struct({ issueId: Schema.String, after: Schema.NullOr(Schema.String) }),
-	Reactions: Schema.Struct({ id: Schema.String }),
 	SubIssues: Schema.Struct({ parentIds: Ids, after: Schema.NullOr(Schema.String) }),
 	Labels: Schema.Struct({ name: Schema.String }),
 	Move: Schema.Struct({ id: Schema.String, stateId: Schema.String }),
-	Comment: Schema.Struct({ issueId: Schema.String, body: Schema.String, parentId: Schema.optionalKey(Schema.NullOr(Schema.String)) }),
-	React: Schema.Struct({ commentId: Schema.String, emoji: Schema.String }),
+	Comment: Schema.Struct({ issueId: Schema.String, body: Schema.String }),
 	CreateLabel: Schema.Struct({ name: Schema.String, teamId: Schema.String }),
 	AddLabel: Schema.Struct({ id: Schema.String, labelId: Schema.String }),
 	RemoveLabel: Schema.Struct({ id: Schema.String, labelId: Schema.String }),
@@ -206,18 +187,10 @@ const make = Effect.gen(function* () {
 	const team = (id: string) => find(teams, (candidate) => candidate.id === id, `Team ${id}`);
 	const issue = (id: string) => find(issues.values(), (candidate) => candidate.id === id, `Issue ${id}`);
 	const label = (id: string) => find(labels, (candidate) => candidate.id === id, `IssueLabel ${id}`);
-	const comment = (id: string) => find(comments, (candidate) => candidate.id === id, `Comment ${id}`);
 	const stateOf = (found: FixtureIssue) => find(team(found.teamId).states.nodes, (state) => state.id === found.stateId, `WorkflowState ${found.stateId}`);
 
-	const addComment = (issueId: string, body: string, seed: CommentSeed = {}) => {
-		const created: FixtureComment = {
-			id: `comment-${comments.length + 1}`,
-			issueId: issue(issueId).id,
-			body,
-			parentId: seed.parentId ?? null,
-			createdAt: seed.createdAt ?? new Date(Date.UTC(2026, 9, 1, 0, 0, comments.length)).toISOString(),
-			reactions: seed.reactions ?? [],
-		};
+	const addComment = (issueId: string, body: string) => {
+		const created: FixtureComment = { id: `comment-${comments.length + 1}`, issueId: issue(issueId).id, body };
 
 		comments.push(created);
 
@@ -247,13 +220,7 @@ const make = Effect.gen(function* () {
 		};
 	};
 
-	const toComment = (found: FixtureComment): Comment => ({
-		id: found.id,
-		body: found.body,
-		createdAt: found.createdAt,
-		parent: found.parentId === null ? null : { id: found.parentId },
-		reactions: found.reactions.map((emoji) => ({ emoji })),
-	});
+	const toComment = (found: FixtureComment): Comment => ({ id: found.id, body: found.body });
 
 	const resolve = (operation: Operation, variables: unknown): unknown => {
 		const issueList = [...issues.values()];
@@ -286,13 +253,6 @@ const make = Effect.gen(function* () {
 				return { issues: { nodes: issueList.filter(matches).slice(0, MAX_PAGE_SIZE).map(toEpic) } };
 			}
 
-			case 'Replies': {
-				const { questionIds } = Schema.decodeUnknownSync(variableSchemas.Replies)(variables);
-				const replies = comments.filter((candidate) => candidate.parentId !== null && questionIds.includes(candidate.parentId));
-
-				return { comments: { nodes: replies.slice(0, MAX_PAGE_SIZE).map(toComment) } };
-			}
-
 			case 'SubIssues': {
 				const { parentIds, after } = Schema.decodeUnknownSync(variableSchemas.SubIssues)(variables);
 				const children = issueList.filter((candidate) => candidate.parentId !== null && parentIds.includes(candidate.parentId));
@@ -317,12 +277,6 @@ const make = Effect.gen(function* () {
 				return { comments: { nodes: page.map(toComment), pageInfo: { hasNextPage, endCursor: page.at(-1)?.id ?? null } } };
 			}
 
-			case 'Reactions': {
-				const { id } = Schema.decodeUnknownSync(variableSchemas.Reactions)(variables);
-
-				return { comment: { reactions: comment(id).reactions.map((emoji) => ({ emoji })) } };
-			}
-
 			case 'Labels': {
 				const { name } = Schema.decodeUnknownSync(variableSchemas.Labels)(variables);
 				const named = labels.filter((candidate) => candidate.name === name);
@@ -342,23 +296,12 @@ const make = Effect.gen(function* () {
 			}
 
 			case 'Comment': {
-				const { issueId, body, parentId } = Schema.decodeUnknownSync(variableSchemas.Comment)(variables);
-				const parent = parentId ? comment(parentId).id : undefined;
-				const created = addComment(issueId, body, parent ? { parentId: parent } : {});
+				const { issueId, body } = Schema.decodeUnknownSync(variableSchemas.Comment)(variables);
 
-				mutations.push(`comment ${issueId}${parent ? ` in ${parent}` : ''}`);
+				addComment(issueId, body);
+				mutations.push(`comment ${issueId}`);
 
-				return { commentCreate: { success: true, comment: { id: created.id } } };
-			}
-
-			case 'React': {
-				const { commentId, emoji } = Schema.decodeUnknownSync(variableSchemas.React)(variables);
-				const found = comment(commentId);
-
-				found.reactions = [...found.reactions, emoji];
-				mutations.push(`react ${commentId} ${emoji}`);
-
-				return { reactionCreate: { success: true } };
+				return { commentCreate: { success: true } };
 			}
 
 			case 'CreateLabel': {

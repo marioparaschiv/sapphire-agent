@@ -30,8 +30,6 @@ const run: Run = {
 	nudgedAt: null,
 	tailHash: null,
 	result: null,
-	questionCommentId: null,
-	deliveredReplyIds: [],
 };
 
 // `scripts/ctl.sh <args>` as a separate process, with the state and config in `directory`.

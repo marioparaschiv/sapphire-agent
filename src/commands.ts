@@ -1,4 +1,4 @@
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Clock, Effect, Option } from 'effect';
 import { Permanent } from './call-policy.ts';
@@ -13,7 +13,7 @@ import { type Command, commandIdentifier, type CommandStatus, Journal, newSessio
 import { isSameWatch, quietStatuses, tailHash, trackAgent } from './monitoring.ts';
 import { type Observation, observedAgentStatus } from './observation.ts';
 import type { Rule, TaskWork } from './planner.ts';
-import { Projects } from './projects.ts';
+import { Projects, projectInRepo } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { makeNudge } from './run-actions.ts';
 
@@ -50,10 +50,10 @@ export const commandClaudeArgs = (ctl: string) => [
 
 const minutes = (millis: number) => Math.round(millis / 60_000);
 
-// Runs the command agents, one at a time, oldest first, and posts what they ask to post. A command's turn starts it in
-// a herdr tab in the local clone of the repo its comment is on: tab, Claude with the command prompt, then running. A
-// running command ends once its agent said it was done (`ctl.sh done`) and stopped working. It fails, with a reply as
-// the bot on the issue or PR it came from and its tab closed, when it does not start in time, its agent exits, sits
+// Runs the command agents, one at a time, oldest first, and posts what they ask to post as notices in the chat. A
+// command's turn starts it in a herdr tab in the local clone of the repo its comment is on: tab, Claude with the command
+// prompt, then running. A running command ends once its agent said it was done (`ctl.sh done`) and stopped working. It
+// fails, with a notice and its tab closed, when it does not start in time, its agent exits, sits
 // quiet for awaitingInputAfterSeconds, stays stale after a nudge, or runs past maxRunSeconds. Not paused: `resume`
 // itself comes in as a command.
 export const commandsRule = Effect.gen(function* () {
@@ -104,9 +104,7 @@ export const commandsRule = Effect.gen(function* () {
 
 	// The workspace of the project whose repo the command runs in, or workspaceLabel for a repo of no project.
 	const workspaceOf = (cwd: string) =>
-		projects.list.pipe(
-			Effect.map((found) => found.find((project) => project.repo === cwd || project.labelReposDirectory === dirname(cwd))?.team ?? config.workspaceLabel),
-		);
+		projects.list.pipe(Effect.map((found) => Option.match(projectInRepo(found, cwd), { onNone: () => config.workspaceLabel, onSome: (project) => project.team })));
 
 	// The notice goes first, keyed by the claim, so a crash before the journal records it never posts it twice.
 	const fail = (command: Command, reason: string, tail: Option.Option<string>) =>
@@ -114,9 +112,7 @@ export const commandsRule = Effect.gen(function* () {
 			const identifier = commandIdentifier(command);
 
 			yield* Effect.logError(`${reason}; failing it`);
-			yield* github
-				.postComment(command.repo, command.number, comments.commandFailed({ identifier, claimedAt: command.claimedAt ?? command.recordedAt, reason, tail }))
-				.pipe(Effect.catchTag('Permanent', (error) => Effect.logError(`cannot tell ${command.url} that ${identifier} failed`, error)));
+			yield* journal.addNotice(comments.commandFailed({ identifier, claimedAt: command.claimedAt ?? command.recordedAt, url: command.url, reason, tail }));
 			yield* closeTab(command);
 			yield* journal.putCommand({ ...command, status: 'error' });
 		});
@@ -263,10 +259,9 @@ export const commandsRule = Effect.gen(function* () {
 		});
 
 	const postReply = (command: Command, requestId: number, body: string) =>
-		github.postComment(command.repo, command.number, comments.commandReply({ identifier: commandIdentifier(command), requestId, body })).pipe(
-			Effect.andThen(Effect.log(`replied on ${command.url}`)),
-			Effect.catchTag('Permanent', (error) => Effect.logError(`cannot reply on ${command.url}; dropped request ${requestId}`, error)),
+		journal.addNotice(comments.commandReply({ identifier: commandIdentifier(command), requestId, url: command.url, body })).pipe(
 			Effect.andThen(journal.deleteRequest(requestId)),
+			Effect.andThen(Effect.log(`replied to ${command.url} in the chat`)),
 		);
 
 	// A thumbs-up on the comment tells its author the bot has it, before any reply. One that fails for now is tried again

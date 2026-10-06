@@ -3,17 +3,18 @@ import { homedir } from 'node:os';
 import { Clock, Duration, Effect, FiberMap, Option, Schedule, Stream } from 'effect';
 import { Chat, type InboundMessage, type ThreadRef } from './chat.ts';
 import { ClaudeChat } from './claude-chat.ts';
-import { cacheExpiryNotice, describeMismatch, readCacheRefreshDelay, readClaudeSettings, settingsMismatches } from './claude-settings.ts';
+import { cacheExpiryNotice, describeMismatch, readCacheRefreshDelay, readClaudeSettings, type SettingsMismatch, settingsMismatches } from './claude-settings.ts';
+import { itemList } from './comments.ts';
 import { type ChatSession, Journal, type ProjectSettings } from './journal.ts';
 import { acceptsMessages } from './observation.ts';
 import { Projects } from './projects.ts';
 import { Reconciler } from './reconciler.ts';
 
-export const unknownContext = "I don't know which conversation that message belongs to, so I can't continue from it. Reply to one of my answers, or send a new message.";
+export const unknownContext = "I can't tell which conversation that message continues.\nReply to one of my answers, or send a new message.";
 
-const emptyAnswer = 'Claude answered without any text.';
+const emptyAnswer = 'Claude answered without any text.\nSend the message again.';
 
-export const notRunning = (identifier: string) => `${identifier} is not running, so this message goes nowhere.`;
+export const notRunning = (identifier: string) => `${identifier} isn't running, so this message went nowhere.\nStart it again to talk to its agent.`;
 
 export const cacheReminder = "⏳ This chat's cache expires in 5 min.\nReply here to keep going.";
 
@@ -157,6 +158,13 @@ export const keepChatSessionWarm = Effect.gen(function* () {
 	return yield* Effect.schedule(warm, Schedule.fixed(refreshDelay.value));
 });
 
+const settingsNotice = (mismatches: ReadonlyArray<SettingsMismatch>) =>
+	[
+		"⚠️ **Chat Claude doesn't run with your settings**",
+		...itemList(mismatches.map(({ key, configured, reported }) => `${key}: \`${reported}\`, settings say \`${configured}\``)),
+		'Next: fix settings.json, or what overrides it for `claude -p`.',
+	].join('\n');
+
 // Starts one chat turn's Claude, kills it once it said what it runs with, and compares that with the user's settings.
 // Each mismatch is logged, and they are posted in the main chat together.
 export const checkChatSettings = Effect.gen(function* () {
@@ -170,5 +178,5 @@ export const checkChatSettings = Effect.gen(function* () {
 	}
 
 	yield* Effect.forEach(mismatches, (mismatch) => Effect.logWarning(describeMismatch(mismatch)), { discard: true });
-	yield* chat.send({ _tag: 'notice', thread: null, text: mismatches.map(describeMismatch).join('\n') });
+	yield* chat.send({ _tag: 'notice', thread: null, text: settingsNotice(mismatches), key: null });
 });

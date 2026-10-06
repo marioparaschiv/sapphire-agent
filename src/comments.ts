@@ -2,7 +2,7 @@ import { Context, Layer, Option } from 'effect';
 import { AppConfig, type AppConfigShape } from './config.ts';
 import { oneLine } from './herdr.ts';
 import type { AgentStatus, Job, RunStatus } from './journal.ts';
-import { type MarkedComment, withMarker } from './markers.ts';
+import { type MarkedComment, type Marker, type Notice, withMarker } from './markers.ts';
 import type { ResultFile } from './result-file.ts';
 
 // The run a flag is about, as the user sees it in herdr.
@@ -21,11 +21,37 @@ export type FlaggedRun = {
 	readonly now: number;
 };
 
+// A message lists at most this many items, so it reads at a glance.
+const maxItems = 5;
+
+const tailLines = 10;
+
+// The end of a pane's tail a message shows.
+export const shownTail = (tail: string) => tail.split('\n').slice(-tailLines).join('\n');
+
+export const itemList = (items: ReadonlyArray<string>) =>
+	items.length <= maxItems ? items.map((item) => `- ${item}`) : [...items.slice(0, maxItems - 1).map((item) => `- ${item}`), `- …and ${items.length - maxItems + 1} more`];
+
 const minutesBetween = (from: number, to: number) => Math.round((to - from) / 60_000);
 
 const withoutPrefix = (text: string, prefix: string) => (text.startsWith(prefix) ? text.slice(prefix.length).trimStart() : text);
 
 const codeBlock = (text: string) => `\`\`\`\n${text.replaceAll('```', "'''")}\n\`\`\``;
+
+// First line the cause, then the details, then the one thing to do next.
+type NoticeParts = {
+	readonly title: string;
+	readonly items?: ReadonlyArray<string>;
+	readonly body?: string;
+	// Shown as a code block, cut to its last lines.
+	readonly block?: Option.Option<string>;
+	readonly next: string;
+};
+
+const notice = (marker: Marker, { title, items = [], body, block = Option.none(), next }: NoticeParts): Notice => ({
+	marker,
+	text: [title, ...itemList(items), ...(body === undefined ? [] : [body]), ...Option.match(block, { onNone: () => [], onSome: (text) => [codeBlock(shownTail(text))] }), `Next: ${next}`].join('\n'),
+});
 
 const describeStop = (status: AgentStatus, minutes: number) => {
 	switch (status) {
@@ -60,171 +86,169 @@ export const replyMismatch = (threadIds: ReadonlyArray<string>, replies: ResultF
 };
 
 const make = (config: AppConfigShape) => {
-	const startOver = `Remove the label and move the epic back to ${config.states.ready} to start over.`;
+	const startOver = `Remove the \`${config.labels.stuck}\` label and move the epic back to ${config.states.ready} to start over.`;
 	const retryAfterFix = `Fix the problem, then remove the \`${config.labels.stuck}\` label to retry.`;
 
-	const runFlag = (run: FlaggedRun, status: 'awaitingInput' | 'stale' | 'error', next: string) =>
-		[
-			`**sapphire-agent** (\`${status}\`): the agent ${describeStop(run.agentStatus, minutesBetween(run.agentStatusSince, run.now))} before writing its result file.`,
-			'',
-			`- Tab: \`${run.tabLabel}\` (${run.tabId}), pane ${run.paneId}`,
-			`- Worktree: \`${run.worktreePath}\` on branch \`${run.branch}\``,
-			'',
-			'Last lines of the pane:',
-			'',
-			codeBlock(run.tail),
-			'',
-			`The epic keeps the \`${config.labels.stuck}\` label. ${next}`,
-		].join('\n');
+	const runFlag = (run: FlaggedRun, title: string, purpose: 'awaitingInput' | 'stale' | 'error', key: string, next: string) =>
+		notice(
+			{ identifier: run.identifier, purpose, key },
+			{
+				title: `${title}: the agent ${describeStop(run.agentStatus, minutesBetween(run.agentStatusSince, run.now))} without writing its result file.`,
+				items: [`Tab: \`${run.tabLabel}\` (${run.tabId}), pane ${run.paneId}`, `Worktree: \`${run.worktreePath}\` on \`${run.branch}\``, `Label: \`${config.labels.stuck}\``],
+				block: Option.some(run.tail),
+				next,
+			},
+		);
 
 	return {
-		// Its replies are typed into the pane, so the flag's id is kept as the run's question.
-		awaitingInput: (run: FlaggedRun) =>
-			withMarker(runFlag(run, 'awaitingInput', `Reply to this comment and the reply is typed into the agent's pane. Or: ${startOver}`), {
-				identifier: run.identifier,
-				purpose: 'awaitingInput',
-				key: `${run.claimedAt}-${run.agentStatusSince}`,
-			}),
+		awaitingInput: (run: FlaggedRun) => runFlag(run, `⏸ **${run.identifier} needs input**`, 'awaitingInput', `${run.claimedAt}-${run.agentStatusSince}`, 'Answer the agent in its tab.'),
 
-		// The question a run sent its reply-to session by message, which no one answered. It stands in for the
-		// awaitingInput flag of the quiet episode, so its replies are typed into the pane the same way.
+		// The question a run sent its reply-to session by message, which no one answered, while the epic has no topic to ask in.
 		messageQuestion: (run: Pick<FlaggedRun, 'identifier' | 'claimedAt' | 'agentStatusSince'> & { readonly message: string }) =>
-			withMarker(`${run.identifier} asks: ${withoutPrefix(oneLine(run.message), `${run.identifier}:`)}`, {
-				identifier: run.identifier,
-				purpose: 'awaitingInput',
-				key: `${run.claimedAt}-${run.agentStatusSince}`,
-			}),
+			notice(
+				{ identifier: run.identifier, purpose: 'awaitingInput', key: `${run.claimedAt}-${run.agentStatusSince}` },
+				{ title: `❓ **${run.identifier} asks:** ${withoutPrefix(oneLine(run.message), `${run.identifier}:`)}`, next: 'Answer the agent in its tab.' },
+			),
 
 		stale: (run: FlaggedRun & { readonly nudgedAt: number }) =>
-			withMarker(runFlag(run, 'stale', `Look at the agent in its tab. Or: ${startOver}`), {
-				identifier: run.identifier,
-				purpose: 'stale',
-				key: `${run.claimedAt}-${run.nudgedAt}`,
-			}),
+			runFlag(run, `🔴 **${run.identifier} looks stuck**`, 'stale', `${run.claimedAt}-${run.nudgedAt}`, 'Look at the agent in its tab.'),
 
 		// The agent exited or vanished without a result file.
-		agentStopped: (run: FlaggedRun) =>
-			withMarker(runFlag(run, 'error', startOver), { identifier: run.identifier, purpose: 'error', key: `${run.claimedAt}` }),
+		agentStopped: (run: FlaggedRun) => runFlag(run, `🔴 **${run.identifier} stopped**`, 'error', `${run.claimedAt}`, startOver),
 
 		overCap: (run: { readonly identifier: string; readonly claimedAt: number; readonly status: RunStatus; readonly tail: string; readonly now: number }) =>
-			withMarker(
-				[
-					`**sapphire-agent** (\`${run.status}\`): the run has been going for ${minutesBetween(run.claimedAt, run.now)} min, over the ${config.maxRunSeconds / 60} min cap. It keeps running.`,
-					'',
-					'Last lines of the pane:',
-					'',
-					codeBlock(run.tail),
-					'',
-					`Look at the agent in its tab. Or: ${startOver}`,
-				].join('\n'),
+			notice(
 				{ identifier: run.identifier, purpose: 'overCap', key: `${run.claimedAt}` },
+				{
+					title: `⏰ **${run.identifier} is over the time cap**: ${minutesBetween(run.claimedAt, run.now)} min, cap ${config.maxRunSeconds / 60} min. It keeps running.`,
+					items: [`Status: \`${run.status}\``],
+					block: Option.some(run.tail),
+					next: 'Look at the agent in its tab.',
+				},
 			),
 
 		startFailed: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string; readonly tail: Option.Option<string> }) =>
-			withMarker(
-				[
-					`**sapphire-agent** (\`error\`): couldn't start an agent for this epic: ${run.error}`,
-					...Option.match(run.tail, { onNone: () => [], onSome: (tail) => ['', 'Last lines of the pane:', '', codeBlock(tail)] }),
-					'',
-					retryAfterFix,
-				].join('\n'),
+			notice(
 				{ identifier: run.identifier, purpose: 'startFailed', key: `${run.claimedAt}` },
+				{ title: `🔴 **${run.identifier} didn't start**: ${run.error}`, block: run.tail, next: retryAfterFix },
 			),
 
 		invalidResult: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string }) =>
-			withMarker([`**sapphire-agent** (\`error\`): the agent's result file is invalid:`, '', codeBlock(run.error), '', startOver].join('\n'), {
-				identifier: run.identifier,
-				purpose: 'invalidResult',
-				key: `${run.claimedAt}`,
-			}),
+			notice(
+				{ identifier: run.identifier, purpose: 'invalidResult', key: `${run.claimedAt}` },
+				{ title: `🔴 **${run.identifier} wrote an invalid result file**`, block: Option.some(run.error), next: startOver },
+			),
 
 		noPullRequest: (run: { readonly identifier: string; readonly claimedAt: number; readonly branch: string }) =>
-			withMarker(`**sapphire-agent** (\`error\`): the agent wrote its result file, but branch \`${run.branch}\` has no open or merged PR. ${startOver}`, {
-				identifier: run.identifier,
-				purpose: 'noPullRequest',
-				key: `${run.claimedAt}`,
-			}),
+			notice(
+				{ identifier: run.identifier, purpose: 'noPullRequest', key: `${run.claimedAt}` },
+				{ title: `🔴 **${run.identifier} has no PR**: the agent wrote its result file, but \`${run.branch}\` has no open or merged PR.`, next: startOver },
+			),
 
 		// `mismatch` comes from replyMismatch.
 		threadMismatch: (run: { readonly identifier: string; readonly claimedAt: number; readonly job: Job; readonly mismatch: string }) =>
-			withMarker(
-				`**sapphire-agent** (\`error\`): the agent's result file does not match the review threads it was given: ${run.mismatch}. Nothing was posted to the PR. ${
-					run.job._tag === 'follow-up'
-						? `Remove the label, move the epic to ${config.states.toReview} and mention @${config.bot.login} to ask for the follow-up again.`
-						: startOver
-				}`,
+			notice(
 				{ identifier: run.identifier, purpose: 'threadMismatch', key: `${run.claimedAt}` },
+				{
+					title: `🔴 **${run.identifier}'s replies don't match its review threads**: ${run.mismatch}. Nothing was posted to the PR.`,
+					next:
+						run.job._tag === 'follow-up'
+							? `Remove the \`${config.labels.stuck}\` label, move the epic to ${config.states.toReview} and ask for the follow-up again.`
+							: startOver,
+				},
 			),
-
-		// Posted under the question comment the reply belongs to.
-		replyFailed: (reply: { readonly identifier: string; readonly replyCommentId: string; readonly error: string }) =>
-			withMarker(`**sapphire-agent:** couldn't type your last reply into the agent's pane: ${reply.error}. Answer the agent in its tab.`, {
-				identifier: reply.identifier,
-				purpose: 'replyFailed',
-				key: reply.replyCommentId,
-			}),
 
 		// `claimedAt` is none for an orphan worktree that no run tracks.
 		keptWorktree: (kept: { readonly identifier: string; readonly claimedAt: Option.Option<number>; readonly worktreePath: string; readonly reason: string }) =>
-			withMarker(
-				`**sapphire-agent:** kept the worktree \`${kept.worktreePath}\` because it has ${kept.reason}. Push or discard that work and it is removed on a later poll.`,
+			notice(
 				{
 					identifier: kept.identifier,
 					purpose: 'keptWorktree',
 					key: Option.match(kept.claimedAt, { onNone: () => kept.worktreePath, onSome: (claimedAt) => `${claimedAt}` }),
 				},
+				{
+					title: `📦 **Kept ${kept.identifier}'s worktree**: it has ${kept.reason}.`,
+					items: [`Worktree: \`${kept.worktreePath}\``],
+					next: 'Push or discard that work; the worktree is removed on a later poll.',
+				},
 			),
 
 		// `streakStartedAt` is what Journal.recordTransient returns.
 		transientFailure: (failure: { readonly identifier: string; readonly streakStartedAt: number; readonly error: string; readonly now: number }) =>
-			withMarker(
-				`**sapphire-agent** (\`error\`): calls for this epic have been failing for ${minutesBetween(failure.streakStartedAt, failure.now)} min: ${failure.error}. It keeps retrying on every poll; this comment is not repeated.`,
+			notice(
 				{ identifier: failure.identifier, purpose: 'transientFailure', key: `${failure.streakStartedAt}` },
+				{
+					title: `⚠️ **${failure.identifier}'s calls keep failing** for ${minutesBetween(failure.streakStartedAt, failure.now)} min: ${failure.error}`,
+					next: 'Nothing unless it lasts; it retries on every poll.',
+				},
 			),
 
 		permanentFailure: (failure: { readonly identifier: string; readonly claimedAt: number; readonly error: string }) =>
-			withMarker(`**sapphire-agent** (\`error\`): a call for this epic failed and retrying cannot help: ${failure.error}\n\n${retryAfterFix}`, {
-				identifier: failure.identifier,
-				purpose: 'permanentFailure',
-				key: `${failure.claimedAt}`,
-			}),
-
-		workingOrphan: (tab: { readonly identifier: string; readonly tabLabel: string; readonly tabId: string; readonly paneId: string }) =>
-			withMarker(
-				`**sapphire-agent:** the agent in tab \`${tab.tabLabel}\` (${tab.tabId}), pane ${tab.paneId}, is working, but no run of this epic tracks it. It is left running, and its tab is closed once the agent stops working.`,
-				{ identifier: tab.identifier, purpose: 'workingOrphan', key: tab.tabId },
+			notice(
+				{ identifier: failure.identifier, purpose: 'permanentFailure', key: `${failure.claimedAt}` },
+				{ title: `🔴 **A call for ${failure.identifier} failed for good**: ${failure.error}`, next: retryAfterFix },
 			),
 
-		// GitHub refuses review requests from the PR's author, which is the user's own account, so a mention notifies them.
-		summary: (run: { readonly identifier: string; readonly claimedAt: number; readonly summary: string; readonly authorLogin: string }) =>
-			withMarker(`${run.summary}\n\nReady for review, @${run.authorLogin}.`, { identifier: run.identifier, purpose: 'summary', key: `${run.claimedAt}` }),
+		workingOrphan: (tab: { readonly identifier: string; readonly tabLabel: string; readonly tabId: string; readonly paneId: string }) =>
+			notice(
+				{ identifier: tab.identifier, purpose: 'workingOrphan', key: tab.tabId },
+				{
+					title: `👻 **An untracked agent works on ${tab.identifier}**: no run of the epic tracks it.`,
+					items: [`Tab: \`${tab.tabLabel}\` (${tab.tabId}), pane ${tab.paneId}`],
+					next: 'Let it finish; its tab is closed once it stops working.',
+				},
+			),
 
-		// The body of the one review that holds every flag as an inline comment.
-		flagsReview: (run: { readonly identifier: string; readonly claimedAt: number }) =>
-			withMarker('Self-review findings I did not fix in this PR.', { identifier: run.identifier, purpose: 'flags', key: `${run.claimedAt}` }),
+		summary: (run: { readonly identifier: string; readonly claimedAt: number; readonly summary: string; readonly url: string }) =>
+			notice(
+				{ identifier: run.identifier, purpose: 'summary', key: `${run.claimedAt}` },
+				{ title: `✅ **${run.identifier} is ready for review**: ${run.url}`, body: run.summary, next: 'Review the PR.' },
+			),
+
+		// The self-review findings the run did not fix.
+		flags: (run: { readonly identifier: string; readonly claimedAt: number; readonly flags: ResultFile['flags'] }) =>
+			notice(
+				{ identifier: run.identifier, purpose: 'flags', key: `${run.claimedAt}` },
+				{
+					title: `🔎 **${run.identifier} left ${run.flags.length} self-review ${run.flags.length === 1 ? 'finding' : 'findings'} unfixed**`,
+					items: run.flags.map(({ path, line, body }) => `\`${path}:${line}\` ${oneLine(body)}`),
+					next: 'Ask for a follow-up to fix any of them.',
+				},
+			),
+
+		// Once per PR, whichever run sees it first.
+		pullRequestOpened: (pullRequest: { readonly identifier: string; readonly url: string }) =>
+			withMarker(`PR opened: ${pullRequest.url}`, { identifier: pullRequest.identifier, purpose: 'pullRequestOpened', key: pullRequest.url }),
 
 		threadReply: (reply: { readonly identifier: string; readonly claimedAt: number; readonly threadId: string; readonly body: string }) =>
 			withMarker(reply.body, { identifier: reply.identifier, purpose: 'reply', key: `${reply.threadId}.${reply.claimedAt}` }),
 
-		// What a command's agent asked to say, posted by the bot.
-		commandReply: (reply: { readonly identifier: string; readonly requestId: number; readonly body: string }) =>
-			withMarker(reply.body, { identifier: reply.identifier, purpose: 'commandReply', key: `${reply.requestId}` }),
+		// The one PR comment of a run that replied to review threads.
+		addressed: (run: { readonly identifier: string; readonly claimedAt: number }) =>
+			withMarker('Addressed your concerns inline.', { identifier: run.identifier, purpose: 'addressed', key: `${run.claimedAt}` }),
 
-		// Posted by the bot when a command ends without its agent saying it was done.
-		commandFailed: (command: { readonly identifier: string; readonly claimedAt: number; readonly reason: string; readonly tail: Option.Option<string> }) =>
-			withMarker(
-				[
-					`**sapphire-agent** (\`error\`): ${command.identifier} ${command.reason}, so I stopped it.`,
-					...Option.match(command.tail, { onNone: () => [], onSome: (tail) => ['', 'Last lines of the pane:', '', codeBlock(tail)] }),
-					'',
-					`Mention @${config.bot.login} again to retry.`,
-				].join('\n'),
+		// What a command's agent asked to say.
+		commandReply: (reply: { readonly identifier: string; readonly requestId: number; readonly url: string; readonly body: string }): Notice => ({
+			marker: { identifier: reply.identifier, purpose: 'commandReply', key: `${reply.requestId}` },
+			text: [`💬 **${reply.identifier}** on ${reply.url}`, reply.body].join('\n'),
+		}),
+
+		// A command that ended without its agent saying it was done.
+		commandFailed: (command: { readonly identifier: string; readonly claimedAt: number; readonly url: string; readonly reason: string; readonly tail: Option.Option<string> }) =>
+			notice(
 				{ identifier: command.identifier, purpose: 'commandFailed', key: `${command.claimedAt}` },
+				{
+					title: `🔴 **${command.identifier} ${command.reason}**, so I stopped it.`,
+					items: [`Comment: ${command.url}`],
+					block: command.tail,
+					next: `Mention @${config.bot.login} again to retry.`,
+				},
 			),
-	} satisfies Record<string, (...args: never) => MarkedComment>;
+	} satisfies Record<string, (...args: never) => MarkedComment | Notice>;
 };
 
-// Every Linear and PR comment sapphire-agent writes, each ending with its marker (see markers.ts for the keys).
+// Every notice, and the few Linear and PR comments, sapphire-agent writes, each with its marker (see markers.ts for the
+// keys).
 export class Comments extends Context.Service<Comments, ReturnType<typeof make>>()('sapphire-agent/Comments') {
 	static readonly layer = Layer.effect(Comments, AppConfig.useSync(make));
 }

@@ -1,6 +1,7 @@
 import { Effect, Option, Semaphore } from 'effect';
 import type { CallError } from './call-policy.ts';
 import { Chat, type EpicState, type Phase, type SliceProgress } from './chat.ts';
+import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
@@ -35,9 +36,10 @@ const topicState = (observation: Observation, epic: Epic, run: Option.Option<Run
 };
 
 // Gives each running epic a thread in the chat, made when its run is dispatched, which shows the run's state, posts
-// its PR once it opens, its slices as they start and finish and its run's phases as they start, and goes once the epic
-// ships (with a summary line in the archive thread) or its run stops. Its work is a task, not the epic's: the chat
-// failing never flags the epic, and is tried again next tick. Not pausable.
+// its PR once it opens (also on the Linear epic, the one comment sapphire-agent writes there), its slices as they start
+// and finish and its run's phases as they start, and goes once the epic ships (with a summary line in the archive
+// thread) or its run stops. Its work is a task, not the epic's: the chat failing never flags the epic, and is tried
+// again next tick. Not pausable.
 export const topicsRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
@@ -45,6 +47,7 @@ export const topicsRule = Effect.gen(function* () {
 	const git = yield* Git;
 	const github = yield* GitHub;
 	const linear = yield* Linear;
+	const comments = yield* Comments;
 	const archiveLock = yield* Semaphore.make(1);
 
 	// Two epics shipping in the same tick share one archive thread.
@@ -97,6 +100,8 @@ export const topicsRule = Effect.gen(function* () {
 				return topic;
 			}
 
+			// The epic hears of each PR once, whichever run sees it first.
+			yield* linear.comment(epic.id, comments.pullRequestOpened({ identifier: epic.identifier, url: pullRequest.value.url }));
 			yield* chat.send({ _tag: 'pullRequestOpened', thread: topic.thread, epic, url: pullRequest.value.url });
 
 			const posted = { ...topic, pullRequestUrl: pullRequest.value.url };

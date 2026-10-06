@@ -106,10 +106,10 @@ describe('topics', () => {
 		}),
 	);
 
-	it.effect('posts an opened PR once in the topic and once in the main chat', () =>
+	it.effect('posts an opened PR once in the topic, once in the main chat and once on the Linear epic', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
+			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
 
 			greet(h);
 			yield* h.tick;
@@ -128,6 +128,10 @@ describe('topics', () => {
 					{ text: `PR opened: ${pullRequest.url}`, topicId: topic.topicId },
 					{ text: `TEST-10 Plugin settings sync: PR opened ${pullRequest.url}`, topicId: null },
 				],
+			);
+			assert.deepStrictEqual(
+				h.linear.comments(epic.id).map(({ body }) => body.split('\n\n')[0]),
+				[`PR opened: ${pullRequest.url}`],
 			);
 		}),
 	);

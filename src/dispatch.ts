@@ -84,8 +84,6 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session:
 	nudgedAt: null,
 	tailHash: null,
 	result: null,
-	questionCommentId: null,
-	deliveredReplyIds: [],
 });
 
 // Takes over a tab that is already open for the run, e.g. one opened just before a crash.

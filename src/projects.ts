@@ -1,6 +1,11 @@
+import { dirname } from 'node:path';
 import { Context, Effect, Layer, Option, Stream, SubscriptionRef } from 'effect';
 import { AppConfig } from './config.ts';
 import { Journal, type JournalError, type Project } from './journal.ts';
+
+// The project whose repo, or one of whose label repos, is the directory.
+export const projectInRepo = (projects: ReadonlyArray<Project>, directory: string) =>
+	Option.fromUndefinedOr(projects.find((project) => project.repo === directory || project.labelReposDirectory === dirname(directory)));
 
 // The projects sapphire-agent watches, read from the journal at startup and kept in memory. The service is their only
 // writer: `sapphire project` records requests, which the requests rule applies here.

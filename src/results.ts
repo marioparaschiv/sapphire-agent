@@ -29,21 +29,28 @@ export const resultsRule = Effect.gen(function* () {
 
 	const fail = (run: Run): Effect.Effect<void, JournalError> => (run.status === 'error' ? Effect.void : journal.putRun({ ...run, status: 'error' }));
 
-	// Every part of the result as a marked PR write, each skipped when its marker is already there (a resolved thread is
-	// not resolved again). Once this returns, every part is on the PR.
-	const postResult = (run: Run, result: ResultFile, repo: string, pullRequest: PullRequest): Effect.Effect<void, CallError> =>
+	// The PR link on the epic, in case no topic saw the PR open; the replies as marked PR writes, each skipped when its
+	// marker is already there (a resolved thread is not resolved again); then the summary and the flags as notices, once
+	// each. Once this returns, every part is posted.
+	const postResult = (run: Run, result: ResultFile, repo: string, pullRequest: PullRequest): Effect.Effect<void, CallError | JournalError> =>
 		Effect.gen(function* () {
 			const { identifier, claimedAt } = run;
 
-			yield* github.postComment(repo, pullRequest.number, comments.summary({ identifier, claimedAt, summary: result.summary, authorLogin: pullRequest.author.login }));
-
-			if (result.flags.length > 0) {
-				yield* github.postFlagsReview(repo, pullRequest.number, comments.flagsReview({ identifier, claimedAt }), result.flags);
-			}
+			yield* linear.comment(run.epicId, comments.pullRequestOpened({ identifier, url: pullRequest.url }));
 
 			for (const { threadId, body } of result.replies) {
 				yield* github.replyToThread(repo, threadId, comments.threadReply({ identifier, claimedAt, threadId, body }));
 				yield* github.resolveThread(repo, threadId);
+			}
+
+			if (result.replies.length > 0) {
+				yield* github.postComment(repo, pullRequest.number, comments.addressed({ identifier, claimedAt }));
+			}
+
+			yield* journal.addNotice(comments.summary({ identifier, claimedAt, summary: result.summary, url: pullRequest.url }));
+
+			if (result.flags.length > 0) {
+				yield* journal.addNotice(comments.flags({ identifier, claimedAt, flags: result.flags }));
 			}
 		});
 

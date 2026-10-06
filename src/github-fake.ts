@@ -4,11 +4,6 @@ import { GitHubApp } from './github-app.ts';
 import { type Bodies, containsMarker, GitHub, maxNodes, preferredPullRequest, type PullRequest, type PullRequestState } from './github.ts';
 import type { MarkedComment } from './markers.ts';
 
-export type FakeReview = {
-	readonly body: string;
-	readonly comments: ReadonlyArray<{ readonly path: string; readonly line: number; readonly side: 'RIGHT'; readonly body: string }>;
-};
-
 // A comment or review comment as GitHub stores it. `id` is its node id.
 export type FakeComment = { readonly id: string; readonly url: string; readonly body: string; readonly author: string };
 
@@ -19,7 +14,6 @@ type PullRequestRecord = {
 	readonly branch: string;
 	pullRequest: PullRequest;
 	readonly comments: Array<FakeComment>;
-	readonly flagReviews: Array<FakeReview>;
 	readonly threadIds: Array<string>;
 };
 
@@ -40,7 +34,6 @@ export type FakeGitHubControls = {
 	readonly comments: (repo: string, number: number) => ReadonlyArray<string>;
 	// The comments the GitHub App posted on the PR.
 	readonly botComments: (repo: string, number: number) => ReadonlyArray<string>;
-	readonly reviews: (repo: string, number: number) => ReadonlyArray<FakeReview>;
 	readonly thread: (threadId: string) => FakeThread;
 	// Whether the GitHub App gave the comment with this node id a thumbs-up.
 	readonly hasThumbsUp: (commentId: string) => boolean;
@@ -128,22 +121,6 @@ const makeFake = (appLogin: string) => {
 				),
 			),
 
-		postFlagsReview: (repo, number, marked, flags) =>
-			record(repo, number).pipe(
-				Effect.flatMap((found) =>
-					unlessMarked(
-						found.flagReviews.map(({ body }) => body),
-						marked,
-						`${repo}#${number} reviews`,
-						() =>
-							found.flagReviews.push({
-								body: marked.body,
-								comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body })),
-							}),
-					),
-				),
-			),
-
 		replyToThread: (repo, threadId, marked) =>
 			threadRecord(repo, threadId).pipe(
 				Effect.flatMap(({ pullRequest, thread }) =>
@@ -198,7 +175,7 @@ const makeFake = (appLogin: string) => {
 			const number = pullRequests.filter((candidate) => candidate.repo === repo).length + 1;
 			const pullRequest = { number, url: `https://github.com/${repo}/pull/${number}`, state, author: { login: author } };
 
-			pullRequests.push({ repo, branch, pullRequest, comments: [], flagReviews: [], threadIds: [] });
+			pullRequests.push({ repo, branch, pullRequest, comments: [], threadIds: [] });
 
 			return pullRequest;
 		},
@@ -231,8 +208,6 @@ const makeFake = (appLogin: string) => {
 		comments: (repo, number) => (findRecord(repo, number)?.comments ?? []).map(({ body }) => body),
 
 		botComments: (repo, number) => (findRecord(repo, number)?.comments ?? []).filter(({ author }) => author === appLogin).map(({ body }) => body),
-
-		reviews: (repo, number) => [...(findRecord(repo, number)?.flagReviews ?? [])],
 
 		thread: (threadId) => {
 			const found = threads.get(threadId);

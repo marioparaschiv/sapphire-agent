@@ -229,9 +229,9 @@ const reply = Command.make('reply', { url: Argument.String('comment-url'), text:
 			return yield* new Refused({ message: `${url} is not a comment that mentioned the bot` });
 		}
 
-		yield* record({ _tag: 'reply', commandId: command.value.id, body: text }, `the bot replies on ${url} on the next tick`);
+		yield* record({ _tag: 'reply', commandId: command.value.id, body: text }, `the bot answers ${url} in the chat on the next tick`);
 	}),
-).pipe(Command.withDescription('Replies as the bot on the issue or PR of the comment that mentioned it'));
+).pipe(Command.withDescription("Answers the comment that mentioned the bot, in its author's chat with the bot"));
 
 const done = Command.make('done', { command: Argument.String('command').pipe(Argument.withDescription('The command, e.g. CMD-3')) }, ({ command: identifier }) =>
 	Effect.gen(function* () {

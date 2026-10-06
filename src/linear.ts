@@ -35,22 +35,9 @@ export const Epic = Schema.Struct({
 
 export type Epic = typeof Epic.Type;
 
-const Reaction = Schema.Struct({ emoji: Schema.String });
-
-export const Comment = Schema.Struct({
-	id: Schema.String,
-	body: Schema.String,
-	createdAt: Schema.String,
-	parent: Schema.NullOr(Schema.Struct({ id: Schema.String })),
-	reactions: Schema.Array(Reaction),
-});
+export const Comment = Schema.Struct({ id: Schema.String, body: Schema.String });
 
 export type Comment = typeof Comment.Type;
-
-// A comment in a question's thread.
-export const Reply = Schema.Struct({ ...Comment.fields, parent: Schema.Struct({ id: Schema.String }) });
-
-export type Reply = typeof Reply.Type;
 
 export const SubIssue = Schema.Struct({
 	id: Schema.String,
@@ -69,8 +56,6 @@ const EPIC_FIELDS = `
 	labels { nodes { id name parent { name } } }
 	children(first: 1) { nodes { id } }
 `;
-
-const COMMENT_FIELDS = 'id body createdAt parent { id } reactions { emoji }';
 
 // Linear rejects larger pages.
 export const MAX_PAGE_SIZE = 250;
@@ -121,18 +106,11 @@ export type LinearShape = {
 	readonly epics: (ids: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
 	// The issues with the given identifiers (e.g. HL-8) wherever they are now; fails Permanent for more than 250.
 	readonly epicsByIdentifier: (identifiers: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
-	// The replies in the threads of the given comments, at most 250.
-	readonly replies: (questionIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Reply>, CallError>;
-	// Every comment on the issue, replies included, oldest first.
-	readonly comments: (issueId: string) => Effect.Effect<ReadonlyArray<Comment>, CallError>;
 	// The sub-issues of every given issue.
 	readonly subIssues: (parentIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<SubIssue>, CallError>;
 	readonly moveIssue: (issueId: string, stateId: string) => Effect.Effect<void, CallError>;
-	// Returns the ID of the issue's comment carrying the marker, posting it first (as a reply when parentId is
-	// given) only if no comment carries it yet.
-	readonly comment: (issueId: string, comment: MarkedComment, parentId?: string) => Effect.Effect<string, CallError>;
-	// Adds the reaction unless the comment already has that emoji.
-	readonly react: (commentId: string, emoji: string) => Effect.Effect<void, CallError>;
+	// Posts the comment unless one on the issue carries its marker already.
+	readonly comment: (issueId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
 	// A workspace label wins over a team label of the same name; the team label is created if neither exists.
 	readonly addLabel: (issueId: string, teamId: string, name: string) => Effect.Effect<void, CallError>;
 	readonly removeLabel: (issueId: string, labelId: string) => Effect.Effect<void, CallError>;
@@ -192,7 +170,7 @@ const make = (endpoint: string) =>
 					CommentsPage,
 					`query Comments($issueId: ID!, $after: String) {
 						comments(first: ${MAX_PAGE_SIZE}, after: $after, filter: { issue: { id: { eq: $issueId } } }) {
-							nodes { ${COMMENT_FIELDS} }
+							nodes { id body }
 							pageInfo { hasNextPage endCursor }
 						}
 					}`,
@@ -262,8 +240,7 @@ const make = (endpoint: string) =>
 
 		const withPolicy = withCallPolicy(callTimeouts.linear);
 
-		// Each method is one unit under the call policy, so a retry repeats the marker or reaction check before
-		// writing again.
+		// Each method is one unit under the call policy, so a retry repeats the marker check before writing again.
 		return Linear.of({
 			teams: (names) =>
 				request(
@@ -343,22 +320,6 @@ const make = (endpoint: string) =>
 				);
 			},
 
-			replies: (questionIds) =>
-				questionIds.length === 0
-					? Effect.succeed([])
-					: request(
-							Schema.Struct({ comments: nodes(Reply) }),
-							`query Replies($questionIds: [ID!]) {
-								comments(first: ${MAX_PAGE_SIZE}, filter: { parent: { id: { in: $questionIds } } }) { nodes { ${COMMENT_FIELDS} } }
-							}`,
-							{ questionIds },
-						).pipe(
-							Effect.map((result) => result.comments.nodes),
-							withPolicy,
-						),
-
-			comments: (issueId) => readComments(issueId).pipe(withPolicy),
-
 			subIssues: (parentIds) => (parentIds.length === 0 ? Effect.succeed([]) : readSubIssues(parentIds).pipe(withPolicy)),
 
 			moveIssue: (issueId, stateId) =>
@@ -370,45 +331,18 @@ const make = (endpoint: string) =>
 					{ id: issueId, stateId },
 				).pipe(Effect.asVoid, withPolicy),
 
-			comment: (issueId, comment, parentId) =>
+			comment: (issueId, comment) =>
 				Effect.gen(function* () {
-					const existing = (yield* readComments(issueId)).find((candidate) => hasMarker(candidate.body, comment.marker));
-
-					if (existing) {
-						return existing.id;
-					}
-
-					const result = yield* request(
-						Schema.Struct({ commentCreate: Schema.Struct({ ...Success.fields, comment: Schema.Struct({ id: Schema.String }) }) }),
-						`mutation Comment($issueId: String!, $body: String!, $parentId: String) {
-							commentCreate(input: { issueId: $issueId, body: $body, parentId: $parentId }) { success comment { id } }
-						}`,
-						{ issueId, body: comment.body, parentId },
-					);
-
-					return result.commentCreate.comment.id;
-				}).pipe(withPolicy),
-
-			react: (commentId, emoji) =>
-				Effect.gen(function* () {
-					const { comment } = yield* request(
-						Schema.Struct({ comment: Schema.Struct({ reactions: Schema.Array(Reaction) }) }),
-						`query Reactions($id: String!) {
-							comment(id: $id) { reactions { emoji } }
-						}`,
-						{ id: commentId },
-					);
-
-					if (comment.reactions.some((reaction) => reaction.emoji === emoji)) {
+					if ((yield* readComments(issueId)).some((candidate) => hasMarker(candidate.body, comment.marker))) {
 						return;
 					}
 
 					yield* request(
-						Schema.Struct({ reactionCreate: Success }),
-						`mutation React($commentId: String!, $emoji: String!) {
-							reactionCreate(input: { commentId: $commentId, emoji: $emoji }) { success }
+						Schema.Struct({ commentCreate: Success }),
+						`mutation Comment($issueId: String!, $body: String!) {
+							commentCreate(input: { issueId: $issueId, body: $body }) { success }
 						}`,
-						{ commentId, emoji },
+						{ issueId, body: comment.body },
 					);
 				}).pipe(withPolicy),
 

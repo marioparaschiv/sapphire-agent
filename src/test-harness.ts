@@ -2,6 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem, NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope, Stream, SubscriptionRef } from 'effect';
 import { TestConsole } from 'effect/testing';
@@ -159,6 +160,8 @@ export type Harness = {
 	readonly commands: Effect.Effect<ReadonlyArray<Command>>;
 	// markerKeys of the issue's comments.
 	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
+	// The notices written for the epic or command, oldest first, with `<purpose>:<key>` and whether the chat got them.
+	readonly notices: (identifier: string) => ReadonlyArray<JournalNotice>;
 	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
 	// row claimed at the current TestClock time.
 	readonly startedRun: (seed: StartedRunSeed) => Effect.Effect<{ readonly epic: Epic; readonly run: StartedRun & { readonly session: Session } }>;
@@ -176,6 +179,8 @@ export type Harness = {
 	// exit code and stderr once the service answered.
 	readonly hook: (agent: string, payload: string, paneId: string | null) => Effect.Effect<HookOutcome>;
 };
+
+export type JournalNotice = { readonly marker: string; readonly text: string; readonly sent: boolean };
 
 export type HookOutcome = { readonly code: number | null; readonly stderr: string };
 
@@ -269,6 +274,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					deleteTopic: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteTopic(epicId))),
 					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
 					addChatSession: (messageRefs, post) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, post))),
+					addNotice: (notice) => crashPoint.pipe(Effect.andThen(journal.addNotice(notice))),
+					markNoticeSent: (id) => crashPoint.pipe(Effect.andThen(journal.markNoticeSent(id))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -351,8 +358,6 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					nudgedAt: null,
 					tailHash: null,
 					result: null,
-					questionCommentId: null,
-					deliveredReplyIds: [],
 				};
 
 				yield* (yield* journal).putRun(run).pipe(Effect.orDie);
@@ -402,6 +407,14 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			runs: journal.pipe(Effect.flatMap((found) => found.listRuns), Effect.orDie),
 			commands: journal.pipe(Effect.flatMap((found) => found.listCommands), Effect.orDie),
 			epicMarkers: (issueId) => markerKeys(linear.comments(issueId).map((comment) => comment.body)),
+			notices: (identifier) => {
+				const database = new DatabaseSync(join(dir, 'journal.db'), { readOnly: true });
+				const rows = database.prepare('SELECT purpose, key, text, sent_at FROM notices WHERE identifier = ? ORDER BY id').all(identifier);
+
+				database.close();
+
+				return rows.map(({ purpose, key, text, sent_at }) => ({ marker: `${String(purpose)}:${String(key)}`, text: String(text), sent: sent_at !== null }));
+			},
 			startedRun,
 			writeResultFile: (run, contents) => {
 				if (run.worktreePath === null) {

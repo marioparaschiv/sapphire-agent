@@ -1,4 +1,4 @@
-import { Long } from '@mtcute/node';
+import { Long, type TextWithEntities, type tl } from '@mtcute/node';
 import { Context, Effect, Layer, PubSub, Queue, Stream, SubscriptionRef } from 'effect';
 import { type CallError, Permanent } from './call-policy.ts';
 import { type DraftStop, type SendOptions, TelegramBot, type TelegramMessage } from './telegram-bot.ts';
@@ -23,7 +23,15 @@ export type MessageSeed = {
 	readonly replyTo?: number;
 };
 
-export type SentMessage = { readonly messageId: number; readonly chatId: number; readonly text: string; readonly replyToMessageId: number | null; readonly topicId: number | null };
+// `text` is what the user reads, its formatting in `entities`.
+export type SentMessage = {
+	readonly messageId: number;
+	readonly chatId: number;
+	readonly text: string;
+	readonly entities: ReadonlyArray<tl.TypeMessageEntity>;
+	readonly replyToMessageId: number | null;
+	readonly topicId: number | null;
+};
 
 export type Draft = { readonly chatId: number; readonly topicId: number | null; readonly draftId: string; readonly text: string };
 
@@ -102,7 +110,7 @@ const make = Effect.gen(function* () {
 	const knownChat = <A>(chatId: number, what: string, apply: () => Effect.Effect<A, CallError>) =>
 		Effect.suspend(() => (chats.has(chatId) ? apply() : refused(what, 'PEER_ID_INVALID')));
 
-	const send = (chatId: number, text: string, { replyTo, topicId }: SendOptions = {}) =>
+	const send = (chatId: number, { text, entities = [] }: TextWithEntities, { replyTo, topicId }: SendOptions = {}) =>
 		Effect.suspend(() => {
 			if (topicId !== undefined && !topics.has(topicId)) {
 				return refused('send a message', 'TOPIC_DELETED');
@@ -110,7 +118,7 @@ const make = Effect.gen(function* () {
 
 			const messageId = addMessage(chatId);
 
-			sent.push({ messageId, chatId, text, replyToMessageId: replyTo ?? null, topicId: topicId ?? null });
+			sent.push({ messageId, chatId, text, entities, replyToMessageId: replyTo ?? null, topicId: topicId ?? null });
 
 			return SubscriptionRef.update(sentCount, (count) => count + 1).pipe(Effect.as(messageId));
 		});
@@ -138,15 +146,16 @@ const make = Effect.gen(function* () {
 								return Effect.void;
 							}
 
-							usedRandomIds.add(`${chatId}:${key}`);
-
-							return send(chatId, text, options).pipe(Effect.asVoid);
+							return send(chatId, text, options).pipe(
+								Effect.andThen(Effect.sync(() => usedRandomIds.add(`${chatId}:${key}`))),
+								Effect.asVoid,
+							);
 						}),
 					),
 				sendDraft: (chatId, topicId, draftId, text) =>
 					write(() =>
 						knownChat(chatId, 'show a draft', () => {
-							drafts.push({ chatId, topicId, draftId: draftId.toString(), text });
+							drafts.push({ chatId, topicId, draftId: draftId.toString(), text: text.text });
 
 							return SubscriptionRef.update(draftCount, (count) => count + 1);
 						}),

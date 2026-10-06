@@ -4,6 +4,7 @@ import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
 import { EpicState, MessageRef, Phase, ThreadRef } from './chat.ts';
+import { Marker, type Notice } from './markers.ts';
 import { ResultFile } from './result-file.ts';
 
 // claimed: recorded before the run is started. running: Claude is confirmed started. awaitingInput: the agent sat
@@ -53,7 +54,7 @@ export const Run = Schema.Struct({
 	paneId: Schema.NullOr(Schema.String),
 	// None for a run claimed before sessions were recorded, or adopted from a tab Claude already ran in.
 	session: Schema.NullOr(Schema.fromJsonString(Session)),
-	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks on Linear.
+	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks in the epic's topic.
 	replyTo: Schema.NullOr(Schema.String),
 	claimedAt: Millis,
 	// When Claude was confirmed started in the pane.
@@ -65,10 +66,6 @@ export const Run = Schema.Struct({
 	nudgedAt: Schema.NullOr(Millis),
 	tailHash: Schema.NullOr(Schema.String),
 	result: Schema.NullOr(Schema.fromJsonString(ResultFile)),
-	// The awaitingInput comment whose replies are typed into the pane; cleared when the episode ends.
-	questionCommentId: Schema.NullOr(Schema.String),
-	// Replies already typed into the pane, so a crash before the delivery emoji is added never types one twice.
-	deliveredReplyIds: Schema.fromJsonString(Schema.Array(Schema.String)),
 });
 
 export type Run = typeof Run.Type;
@@ -193,6 +190,11 @@ export type ChatPost = typeof ChatPost.Type;
 export const ChatMessage = Schema.Struct({ messageRef: MessageRef, ...ChatPost.fields, createdAt: Millis });
 
 export type ChatMessage = typeof ChatMessage.Type;
+
+// A notice in the outbox, oldest first, until the notices rule sent it.
+export const UnsentNotice = Schema.Struct({ id: Schema.Int, ...Marker.fields, text: Schema.String });
+
+export type UnsentNotice = typeof UnsentNotice.Type;
 
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
@@ -371,6 +373,25 @@ const migrations = SqliteMigrator.layer({
 			yield* sql`DROP TABLE chat_sessions`;
 			yield* sql`ALTER TABLE chat_messages RENAME TO chat_sessions`;
 		}),
+		'0011_create_notices': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// Sent notices stay, so a notice written again for the same marker is not sent again.
+			yield* sql`
+				CREATE TABLE notices (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					identifier TEXT NOT NULL,
+					purpose TEXT NOT NULL,
+					key TEXT NOT NULL,
+					text TEXT NOT NULL,
+					created_at INTEGER NOT NULL,
+					sent_at INTEGER,
+					UNIQUE (identifier, purpose, key)
+				)
+			`;
+			yield* sql`ALTER TABLE runs DROP COLUMN question_comment_id`;
+			yield* sql`ALTER TABLE runs DROP COLUMN delivered_reply_ids`;
+		}),
 	}),
 });
 
@@ -422,6 +443,12 @@ export class Journal extends Context.Service<
 		// Inserts each project or replaces the one of the same team, all in one transaction.
 		readonly putProjects: (projects: ReadonlyArray<Project>) => Effect.Effect<void, JournalError>;
 		readonly deleteProject: (team: string) => Effect.Effect<void, JournalError>;
+		// Puts the notice in the outbox, unless one with the same marker was put there already.
+		readonly addNotice: (notice: Notice) => Effect.Effect<void, JournalError>;
+		readonly hasNotice: (marker: Marker) => Effect.Effect<boolean, JournalError>;
+		// Oldest first.
+		readonly unsentNotices: Effect.Effect<ReadonlyArray<UnsentNotice>, JournalError>;
+		readonly markNoticeSent: (id: number) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -604,6 +631,34 @@ export class Journal extends Context.Service<
 					execute: (team) => sql`DELETE FROM projects WHERE team = ${team}`,
 				});
 
+				const insertNotice = SqlSchema.void({
+					Request: Schema.Struct({ ...Marker.fields, text: Schema.String, createdAt: Millis }),
+					execute: (row) => sql`INSERT INTO notices ${sql.insert(row)} ON CONFLICT (identifier, purpose, key) DO NOTHING`,
+				});
+
+				const addNotice = ({ marker, text }: Notice) => Clock.currentTimeMillis.pipe(Effect.flatMap((createdAt) => insertNotice({ ...marker, text, createdAt })));
+
+				const findNotice = SqlSchema.findOneOption({
+					Request: Marker,
+					Result: Schema.Struct({ id: Schema.Int }),
+					execute: ({ identifier, purpose, key }) => sql`SELECT id FROM notices WHERE identifier = ${identifier} AND purpose = ${purpose} AND key = ${key}`,
+				});
+
+				const hasNotice = (marker: Marker) => findNotice(marker).pipe(Effect.map(Option.isSome));
+
+				const unsentNotices = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: UnsentNotice,
+					execute: () => sql`SELECT id, identifier, purpose, key, text FROM notices WHERE sent_at IS NULL ORDER BY id`,
+				})(undefined);
+
+				const markSent = SqlSchema.void({
+					Request: Schema.Struct({ id: Schema.Int, sentAt: Millis }),
+					execute: ({ id, sentAt }) => sql`UPDATE notices SET sent_at = ${sentAt} WHERE id = ${id}`,
+				});
+
+				const markNoticeSent = (id: number) => Clock.currentTimeMillis.pipe(Effect.flatMap((sentAt) => markSent({ id, sentAt })));
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -632,6 +687,10 @@ export class Journal extends Context.Service<
 					listProjects,
 					putProjects,
 					deleteProject,
+					addNotice,
+					hasNotice,
+					unsentNotices,
+					markNoticeSent,
 				});
 			}),
 		).pipe(

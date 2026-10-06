@@ -476,7 +476,7 @@ describe('checkChatSettings', () => {
 			return chat;
 		});
 
-	it.effect('posts one line in the main chat naming each key settings.json sets but a chat turn does not run with, before Claude answers', () =>
+	it.effect('posts one notice in the main chat naming each key settings.json sets but a chat turn does not run with, before Claude answers', () =>
 		Effect.gen(function* () {
 			const chat = yield* check({ outputStyle: 'Explanatory', model: 'sonnet' });
 			const [run] = chat.claude.runs;
@@ -487,7 +487,7 @@ describe('checkChatSettings', () => {
 					{
 						chatId: chat.user,
 						topicId: null,
-						text: '⚠️ Chat Claude runs with model claude-opus-5-5[1m], but your settings say sonnet\n⚠️ Chat Claude runs with outputStyle ADHD, but your settings say Explanatory',
+						text: "⚠️ Chat Claude doesn't run with your settings\n- model: claude-opus-5-5[1m], settings say sonnet\n- outputStyle: ADHD, settings say Explanatory\nNext: fix settings.json, or what overrides it for claude -p.",
 					},
 				],
 			);

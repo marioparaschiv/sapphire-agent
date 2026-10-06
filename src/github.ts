@@ -3,7 +3,6 @@ import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy } from './call-policy.ts';
 import { GitHubApp } from './github-app.ts';
 import { hasMarker, type MarkedComment, type Marker } from './markers.ts';
-import type { ResultFile } from './result-file.ts';
 
 export const PullRequestState = Schema.Literals(['OPEN', 'CLOSED', 'MERGED']);
 
@@ -22,8 +21,6 @@ export type PullRequest = typeof PullRequest.Type;
 export const Bodies = Schema.Struct({ totalCount: Schema.Int, nodes: Schema.Array(Schema.Struct({ body: Schema.String })) });
 
 export type Bodies = typeof Bodies.Type;
-
-export type Flags = ResultFile['flags'];
 
 // `@<login>` as a whole word, so neither `@<login>x` nor an email address like `a@<login>` counts. GitHub logins are
 // case-insensitive.
@@ -63,8 +60,6 @@ export class GitHub extends Context.Service<
 	{
 		// See preferredPullRequest.
 		readonly findPullRequest: (repo: string, branch: string) => Effect.Effect<Option.Option<PullRequest>, CallError>;
-		// One COMMENT review holding every flag as an inline comment on the PR's new code.
-		readonly postFlagsReview: (repo: string, number: number, comment: MarkedComment, flags: Flags) => Effect.Effect<void, CallError>;
 		readonly replyToThread: (repo: string, threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
 		readonly resolveThread: (repo: string, threadId: string) => Effect.Effect<void, CallError>;
 		// A conversation comment on the issue or PR.
@@ -120,17 +115,6 @@ export class GitHub extends Context.Service<
 				return { owner, name };
 			};
 
-			const reviewBodies = (repo: string, number: number) =>
-				graphql(
-					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ reviews: Bodies }) }) }),
-					`query ReviewBodies($owner: String!, $name: String!, $number: Int!) {
-						repository(owner: $owner, name: $name) {
-							pullRequest(number: $number) { reviews(last: ${maxNodes}) { totalCount nodes { body } } }
-						}
-					}`,
-					{ ...ownerAndName(repo), number },
-				).pipe(Effect.map(({ repository }) => repository.pullRequest.reviews));
-
 			const reviewThread = (threadId: string) =>
 				graphql(
 					Schema.Struct({ node: Schema.NullOr(Schema.Struct({ isResolved: Schema.Boolean, comments: Bodies })) }),
@@ -180,20 +164,6 @@ export class GitHub extends Context.Service<
 					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']).pipe(
 						Effect.map(preferredPullRequest),
 						withPolicy,
-					),
-
-				postFlagsReview: (repo, number, { marker, body }, flags) =>
-					Effect.flatMap(app.installationToken(repo), (token) =>
-						unlessMarked(
-							reviewBodies(repo, number),
-							marker,
-							`${repo}#${number} reviews`,
-							post(
-								`repos/${repo}/pulls/${number}/reviews`,
-								{ event: 'COMMENT', body, comments: flags.map(({ path, line, body }) => ({ path, line, side: 'RIGHT', body })) },
-								token,
-							),
-						),
 					),
 
 				replyToThread: (repo, threadId, { marker, body }) =>

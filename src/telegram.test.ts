@@ -115,7 +115,7 @@ describe('telegramChat', () => {
 			assert.strictEqual(received.ref, `${allowed}:${next}`);
 			assert.deepStrictEqual(
 				telegram.sent.map(({ text, replyToMessageId }) => ({ text, replyToMessageId })),
-				[{ text: 'Could not transcribe the voice note: no speech recognized', replyToMessageId: voice }],
+				[{ text: "Couldn't transcribe the voice note: no speech recognized\nSend it again, or type it.", replyToMessageId: voice }],
 			);
 		}).pipe(Effect.provide(layer)),
 	);
@@ -184,6 +184,66 @@ describe('telegramChat', () => {
 				],
 			);
 			assert.deepStrictEqual(telegram.topics(), [{ chatId: allowed, topicId: archiveId, title: '✅ Done' }]);
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('renders the markdown of a notice and a reply as Telegram formatting', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			const message = telegram.write({ from: allowed, text: 'hello' });
+			const thread = yield* chat.openProject('Test');
+
+			yield* chat.send({
+				_tag: 'notice',
+				thread,
+				text: '🔴 **HL-9 stopped**: see [the PR](https://github.com/test/repo/pull/7).\n- Worktree: `/tmp/hl-9`\n```\n**not bold** in a pane\n```\nNext: start over.',
+				key: null,
+			});
+			yield* chat.send({ _tag: 'reply', to: `${allowed}:${message}`, text: 'Run `sapphire status`.' });
+
+			const [notice, reply] = telegram.sent;
+
+			assert.deepStrictEqual(
+				[notice.text, notice.topicId],
+				['🔴 HL-9 stopped: see the PR.\n- Worktree: /tmp/hl-9\n**not bold** in a pane\nNext: start over.', Number(thread.split(':')[1])],
+			);
+			assert.deepStrictEqual(
+				notice.entities.map((entity) => [entity._, notice.text.slice(entity.offset, entity.offset + entity.length), entity._ === 'messageEntityTextUrl' ? entity.url : null]),
+				[
+					['messageEntityBold', 'HL-9 stopped', null],
+					['messageEntityTextUrl', 'the PR', 'https://github.com/test/repo/pull/7'],
+					['messageEntityCode', '/tmp/hl-9', null],
+					['messageEntityPre', '**not bold** in a pane', null],
+				],
+			);
+			assert.deepStrictEqual(
+				[reply.text, reply.entities.map(({ _ }) => _)],
+				['Run sapphire status.', ['messageEntityCode']],
+			);
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('shows a keyed notice once, also when it is sent again after a crash', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			const notice = { _tag: 'notice', thread: null, text: '📦 **Kept HL-9 worktree**', key: 'HL-9:keptWorktree:1000' } as const;
+
+			telegram.write({ from: allowed, text: 'hello' });
+			yield* chat.send(notice);
+			yield* chat.send(notice);
+			yield* chat.send({ ...notice, key: 'HL-9:keptWorktree:2000' });
+
+			assert.deepStrictEqual(
+				telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
+				[
+					{ text: '📦 Kept HL-9 worktree', topicId: null },
+					{ text: '📦 Kept HL-9 worktree', topicId: null },
+				],
+			);
 		}).pipe(Effect.provide(layer)),
 	);
 
