@@ -426,6 +426,26 @@ describe('project topics', () => {
 		}).pipe(Effect.scoped),
 	);
 
+	it.effect("holds a project topic's reminder while a new turn there is answering", () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat((run) => ({ text: [`answer to ${run.prompt}`], hang: run.prompt === 'write the changelog' }));
+			const { topicId } = yield* withProject(chat);
+
+			yield* chat.start;
+			chat.telegram.write({ from: chat.user, text: 'plan the release', topicId });
+			yield* chat.awaitRecorded(1);
+			yield* TestClock.adjust('50 minutes');
+			chat.telegram.write({ from: chat.user, text: 'write the changelog', topicId });
+			yield* chat.claude.awaitRuns(2);
+			yield* TestClock.adjust('10 minutes');
+
+			assert.deepStrictEqual(
+				inTopic(chat, topicId).map(({ text }) => text),
+				['answer to plan the release'],
+			);
+		}).pipe(Effect.scoped),
+	);
+
 	it.effect('brings a waiting reminder back after a restart, and posts it once', () =>
 		Effect.gen(function* () {
 			const chat = yield* makeChat();

@@ -83,6 +83,11 @@ export const answerChatMessages = Effect.scoped(
 					return yield* chat.send({ _tag: 'reply', to: message.ref, text: unknownContext });
 				}
 
+				// A turn in the thread takes the place of its waiting reminder, which must not interrupt the turn's reply.
+				if (topic !== null) {
+					yield* FiberMap.remove(reminders, topic.thread);
+				}
+
 				const sessionId = randomUUID();
 				const cwd = Option.match(parent, { onNone: () => topic?.project.repo ?? homedir(), onSome: (session) => session.cwd });
 				const text = claude
@@ -94,11 +99,10 @@ export const answerChatMessages = Effect.scoped(
 				const sent = yield* chat.streamReply(message.ref, text);
 
 				yield* journal.addChatSession(sent, { sessionId, cwd, thread: topic?.thread ?? null, kind: 'turn' });
-
-				if (topic !== null) {
-					yield* scheduleReminder(topic.thread);
-				}
-			}).pipe(Effect.catch((error) => Effect.logError('cannot answer a chat message', error)));
+			}).pipe(
+				Effect.ensuring(topic === null ? Effect.void : scheduleReminder(topic.thread)),
+				Effect.catch((error) => Effect.logError('cannot answer a chat message', error)),
+			);
 
 		const pass = (message: InboundMessage, thread: string) =>
 			Effect.gen(function* () {
