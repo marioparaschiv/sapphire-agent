@@ -23,7 +23,8 @@ const Team = Schema.Struct({
 });
 
 const Settings = Schema.Struct({
-	pollSeconds: IntAtLeast(5, 30),
+	// The backstop poll. Linear webhook deliveries and herdr events trigger the ticks that matter in between.
+	pollSeconds: IntAtLeast(5, 600),
 	maxInFlight: IntAtLeast(1, 1),
 	// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
 	awaitingInputAfterSeconds: IntAtLeast(30, 180),
@@ -53,6 +54,8 @@ const Settings = Schema.Struct({
 		stuck: Name('agent-stuck'),
 		repoPrefix: Name('repo:'),
 	}).pipe(withDefault({})),
+	// The secret Linear signs its webhook deliveries with. They reach the server on 127.0.0.1:bot.app.webhookPort at /linear.
+	linearWebhookSecretFile: Path,
 	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
 	// The handle whose @mention by one of `allowedUsers` starts a command run. The GitHub App answers, and its webhook
 	// deliveries bring the mentions to a server on 127.0.0.1:webhookPort.
@@ -107,6 +110,7 @@ export type AppConfigShape = Settings & {
 	readonly linearApiKey: Redacted.Redacted<string>;
 	readonly appPrivateKey: KeyObject;
 	readonly webhookSecret: Redacted.Redacted<string>;
+	readonly linearWebhookSecret: Redacted.Redacted<string>;
 };
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
@@ -165,6 +169,8 @@ const readApiKey = (path: string) => readSecretFile(path, 'Linear API key').pipe
 
 const readWebhookSecret = (path: string) => readSecretFile(path, 'GitHub App webhook secret').pipe(Effect.map(Redacted.make));
 
+const readLinearWebhookSecret = (path: string) => readSecretFile(path, 'Linear webhook secret').pipe(Effect.map(Redacted.make));
+
 const readPrivateKey = (path: string) =>
 	readSecretFile(path, 'GitHub App private key').pipe(
 		Effect.flatMap((pem) => Effect.try({ try: () => createPrivateKey(pem), catch: () => [`${path} is not a PEM private key`] })),
@@ -178,22 +184,24 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
-// Reads env, the config file, the Linear API key and the GitHub App's private key and webhook secret, and reports every
-// problem in one StartupError.
+// Reads env, the config file, the Linear API key and webhook secret and the GitHub App's private key and webhook secret,
+// and reports every problem in one StartupError.
 export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
 	const linearApiKey = yield* readWhen(envResults.linearKeyFile, readApiKey);
 	const appPrivateKey = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.privateKeyFile), readPrivateKey);
 	const webhookSecret = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.webhookSecretFile), readWebhookSecret);
+	const linearWebhookSecret = yield* readWhen(Result.map(settings, ({ linearWebhookSecretFile }) => linearWebhookSecretFile), readLinearWebhookSecret);
 	const problems = [
 		...Object.values(envResults).flatMap((result) => (Result.isFailure(result) ? configProblems(result.failure) : [])),
 		...problemsOf(settings),
 		...problemsOf(linearApiKey),
 		...problemsOf(appPrivateKey),
 		...problemsOf(webhookSecret),
+		...problemsOf(linearWebhookSecret),
 	];
-	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret });
+	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret, linearWebhookSecret });
 
 	if (problems.length > 0 || Result.isFailure(loaded)) {
 		return yield* new StartupError({ problems });
@@ -205,6 +213,7 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		linearApiKey: loaded.success.linearApiKey,
 		appPrivateKey: loaded.success.appPrivateKey,
 		webhookSecret: loaded.success.webhookSecret,
+		linearWebhookSecret: loaded.success.linearWebhookSecret,
 	};
 });
 
@@ -218,6 +227,7 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 			...Schema.decodeUnknownSync(Settings)({
 				teams: { Test: { repo: join(directory, 'repo') } },
 				worktreesDirectory: join(directory, 'worktrees'),
+				linearWebhookSecretFile: join(directory, 'linear-webhook-secret'),
 				bot: {
 					login: 'orchestratorbot',
 					app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
@@ -237,5 +247,6 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 			linearApiKey: Redacted.make('lin_api_test'),
 			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
 			webhookSecret: Redacted.make('test-webhook-secret'),
+			linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
 		}));
 }

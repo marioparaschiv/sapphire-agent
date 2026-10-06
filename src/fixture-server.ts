@@ -1,5 +1,6 @@
+import { createHmac } from 'node:crypto';
 import { createServer, type RequestListener } from 'node:http';
-import { Effect } from 'effect';
+import { Effect, Redacted } from 'effect';
 
 // A node:http server on 127.0.0.1 and a free port while the scope is open. Returns its base URL, e.g.
 // `http://127.0.0.1:41234`.
@@ -25,3 +26,14 @@ export const serveFixture = (listener: RequestListener) =>
 
 		return `http://127.0.0.1:${address.port}`;
 	});
+
+export const hmacHex = (secret: Redacted.Redacted<string>, body: string) => createHmac('sha256', Redacted.value(secret)).update(body).digest('hex');
+
+// POSTs the JSON body with the given headers and returns the HTTP status.
+export const postJson = async (url: string, body: string, headers: Record<string, string>) => {
+	const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+
+	await response.arrayBuffer();
+
+	return response.status;
+};
