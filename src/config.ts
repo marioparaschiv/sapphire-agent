@@ -72,6 +72,16 @@ const Settings = Schema.Struct({
 		}),
 		allowedUsers: Schema.Array(Schema.NonEmptyString).check(Schema.makeFilter((users) => users.length > 0 || 'no allowed users configured')),
 	}),
+	// The Telegram bot the user talks to in a private chat, logged in over MTProto with an app's api_id and api_hash
+	// (my.telegram.org). Messages from anyone but `allowedUserIds` are dropped.
+	telegram: Schema.Struct({
+		botTokenFile: Path,
+		apiIdFile: Path,
+		apiHashFile: Path,
+		allowedUserIds: Schema.Array(Schema.Int.check(Schema.isGreaterThan(0))).check(Schema.makeFilter((ids) => ids.length > 0 || 'no allowed users configured')),
+		// Where the voice note model is; defaults to `<state directory>/models/<transcriptionModel>`.
+		transcriptionModelDirectory: Schema.optionalKey(Path),
+	}),
 });
 
 export type Settings = typeof Settings.Type;
@@ -108,12 +118,24 @@ const env = {
 
 export type Env = { readonly [K in keyof typeof env]: Config.Success<(typeof env)[K]> };
 
+export const transcriptionModel = 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8';
+
+export const transcriptionModelFiles = { encoder: 'encoder.int8.onnx', decoder: 'decoder.int8.onnx', joiner: 'joiner.int8.onnx', tokens: 'tokens.txt' } as const;
+
 export type AppConfigShape = Settings & {
 	readonly env: Env;
 	readonly linearApiKey: Redacted.Redacted<string>;
 	readonly appPrivateKey: KeyObject;
 	readonly webhookSecret: Redacted.Redacted<string>;
 	readonly linearWebhookSecret: Redacted.Redacted<string>;
+};
+
+// Only the service talks to Telegram and transcribes voice notes; the CLI runs without these.
+export type TelegramConfigShape = {
+	readonly botToken: Redacted.Redacted<string>;
+	readonly apiId: number;
+	readonly apiHash: Redacted.Redacted<string>;
+	readonly transcriptionModelDirectory: string;
 };
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
@@ -174,10 +196,36 @@ const readWebhookSecret = (path: string) => readSecretFile(path, 'GitHub App web
 
 const readLinearWebhookSecret = (path: string) => readSecretFile(path, 'Linear webhook secret').pipe(Effect.map(Redacted.make));
 
+const readTelegramBotToken = (path: string) => readSecretFile(path, 'Telegram bot token').pipe(Effect.map(Redacted.make));
+
+const readTelegramApiId = (path: string) =>
+	readSecretFile(path, 'Telegram api_id').pipe(
+		Effect.flatMap((text) => Schema.decodeEffect(Schema.NumberFromString.pipe(Schema.decodeTo(Schema.Int)))(text).pipe(Effect.mapError(() => [`${path} is not a number`]))),
+	);
+
+const readTelegramApiHash = (path: string) => readSecretFile(path, 'Telegram api_hash').pipe(Effect.map(Redacted.make));
+
 const readPrivateKey = (path: string) =>
 	readSecretFile(path, 'GitHub App private key').pipe(
 		Effect.flatMap((pem) => Effect.try({ try: () => createPrivateKey(pem), catch: () => [`${path} is not a PEM private key`] })),
 	);
+
+const resolveTranscriptionModelDirectory = (settings: Settings, stateDirectory: string) =>
+	settings.telegram.transcriptionModelDirectory ?? join(stateDirectory, 'models', transcriptionModel);
+
+const checkTranscriptionModel = (directory: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem;
+		const files = Object.values(transcriptionModelFiles);
+		const present = yield* Effect.forEach(files, (file) => fs.exists(join(directory, file)), { concurrency: 'unbounded' });
+		const missing = files.filter((_, index) => !present[index]);
+
+		if (missing.length > 0) {
+			return yield* Effect.fail([`no transcription model in ${directory}: ${missing.join(', ')} missing; download ${transcriptionModel} there`]);
+		}
+
+		return directory;
+	}).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail([`${directory}: ${error.message}`])));
 
 const configProblems = (error: Config.ConfigError) => (Schema.isSchemaError(error.cause) ? schemaProblems('', error.cause) : [error.message]);
 
@@ -187,9 +235,9 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
-// Reads env, the config file, the Linear API key and webhook secret and the GitHub App's private key and webhook secret,
-// and reports every problem in one StartupError.
-export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
+// Reads env, the config file, the Linear API key and webhook secret and the GitHub App's private key and webhook
+// secret. Returns the config file and the state directory too, so the Telegram config is read from them in the same pass.
+const readAppConfig = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
 	const linearApiKey = yield* readWhen(envResults.linearKeyFile, readApiKey);
@@ -205,26 +253,56 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		...problemsOf(linearWebhookSecret),
 	];
 	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret, linearWebhookSecret });
+	const config: Result.Result<AppConfigShape, ReadonlyArray<string>> =
+		problems.length > 0 || Result.isFailure(loaded)
+			? Result.fail(problems)
+			: Result.succeed({
+					...loaded.success.settings,
+					env: loaded.success.env,
+					linearApiKey: loaded.success.linearApiKey,
+					appPrivateKey: loaded.success.appPrivateKey,
+					webhookSecret: loaded.success.webhookSecret,
+					linearWebhookSecret: loaded.success.linearWebhookSecret,
+				});
 
-	if (problems.length > 0 || Result.isFailure(loaded)) {
-		return yield* new StartupError({ problems });
-	}
+	return { settings, stateDirectory: envResults.stateDirectory, config };
+});
 
-	return {
-		...loaded.success.settings,
-		env: loaded.success.env,
-		linearApiKey: loaded.success.linearApiKey,
-		appPrivateKey: loaded.success.appPrivateKey,
-		webhookSecret: loaded.success.webhookSecret,
-		linearWebhookSecret: loaded.success.linearWebhookSecret,
-	};
+// Reads the Telegram bot token, api_id and api_hash and checks the transcription model is there.
+const readTelegramConfig = (settings: Result.Result<Settings, unknown>, stateDirectory: Result.Result<string, unknown>) =>
+	Effect.gen(function* () {
+		const botToken = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.botTokenFile), readTelegramBotToken);
+		const apiId = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiIdFile), readTelegramApiId);
+		const apiHash = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiHashFile), readTelegramApiHash);
+		const transcriptionModelDirectory = yield* readWhen(
+			Result.all({ settings, stateDirectory }).pipe(Result.map(({ settings, stateDirectory }) => resolveTranscriptionModelDirectory(settings, stateDirectory))),
+			checkTranscriptionModel,
+		);
+		const problems = [...problemsOf(botToken), ...problemsOf(apiId), ...problemsOf(apiHash), ...problemsOf(transcriptionModelDirectory)];
+		const loaded = Result.all({ botToken, apiId, apiHash, transcriptionModelDirectory });
+
+		return problems.length > 0 || Result.isFailure(loaded) ? Result.fail(problems) : Result.succeed<TelegramConfigShape>(loaded.success);
+	});
+
+const orStartupError = <A>(result: Result.Result<A, ReadonlyArray<string>>) =>
+	Result.isFailure(result) ? Effect.fail(new StartupError({ problems: result.failure })) : Effect.succeed(result.success);
+
+// What the CLI needs, every problem in one StartupError.
+export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = readAppConfig.pipe(Effect.flatMap(({ config }) => orStartupError(config)));
+
+// What the service needs, the Telegram config included, every problem in one StartupError.
+export const loadServiceConfig = Effect.gen(function* () {
+	const { settings, stateDirectory, config } = yield* readAppConfig;
+	const telegram = yield* readTelegramConfig(settings, stateDirectory);
+
+	return yield* orStartupError(Result.all({ app: config, telegram }).pipe(Result.mapError(() => [...problemsOf(config), ...problemsOf(telegram)])));
 });
 
 export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sapphire-agent/AppConfig') {
 	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
-	// Defaults plus one team and the bot, with every path under `directory`, a freshly generated App key and the webhook
-	// server on a free port.
+	// Defaults plus one team, the bot and the Telegram bot, with every path under `directory`, a freshly generated App key
+	// and the webhook server on a free port.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
 		Layer.sync(AppConfig, () => ({
 			...Schema.decodeUnknownSync(Settings)({
@@ -235,6 +313,12 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 					login: 'orchestratorbot',
 					app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
 					allowedUsers: ['marioparaschiv'],
+				},
+				telegram: {
+					botTokenFile: join(directory, 'telegram-bot-token'),
+					apiIdFile: join(directory, 'telegram-api-id'),
+					apiHashFile: join(directory, 'telegram-api-hash'),
+					allowedUserIds: [7_100_200_300],
 				},
 				...settings,
 			}),
@@ -252,4 +336,20 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 			webhookSecret: Redacted.make('test-webhook-secret'),
 			linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
 		}));
+}
+
+export class TelegramConfig extends Context.Service<TelegramConfig, TelegramConfigShape>()('sapphire-agent/TelegramConfig') {
+	// AppConfig and TelegramConfig, read in one pass.
+	static readonly layerWithAppConfig = Layer.effectContext(
+		loadServiceConfig.pipe(Effect.map(({ app, telegram }) => Context.make(AppConfig, app).pipe(Context.add(TelegramConfig, telegram)))),
+	);
+
+	// The model in `<directory>/models/<transcriptionModel>`, as AppConfig.layerTest's state directory has it.
+	static readonly layerTest = (directory: string) =>
+		Layer.succeed(TelegramConfig, {
+			botToken: Redacted.make('123456:test-bot-token'),
+			apiId: 1_234_567,
+			apiHash: Redacted.make('test-api-hash'),
+			transcriptionModelDirectory: join(directory, 'models', transcriptionModel),
+		});
 }

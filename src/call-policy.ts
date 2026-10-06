@@ -28,6 +28,7 @@ export const callTimeouts = {
 	git: Duration.seconds(30),
 	gh: Duration.seconds(20),
 	linear: Duration.seconds(20),
+	telegram: Duration.seconds(20),
 } as const;
 
 const maxRetries = 3;

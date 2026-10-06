@@ -15,7 +15,7 @@ export type ResolvedTeam = { readonly team: Team; readonly stateIds: Readonly<Re
 export type Observation = {
 	// By team id. A configured team missing from Linear, or missing a state, is left out: its epics are not touched.
 	readonly teams: ReadonlyMap<string, ResolvedTeam>;
-	// By epic id: every epic the journal tracks, every ready epic, and the epics of owned tabs and worktrees.
+	// By epic id: every epic the journal tracks (a run or a chat thread), every ready epic, and the epics of owned tabs and worktrees.
 	readonly epics: ReadonlyMap<string, Epic>;
 	// Top-level epics in a team's ready state, at most 50.
 	readonly ready: ReadonlyArray<Epic>;
@@ -37,6 +37,9 @@ export const isOver = (run: Run) => run.status === 'ended' || run.status === 'ke
 export type StartedRun = Run & { readonly worktreePath: string; readonly tabId: string; readonly paneId: string };
 
 export const isStarted = (run: Run): run is StartedRun => run.worktreePath !== null && run.tabId !== null && run.paneId !== null;
+
+// A run whose agent can be sent a message (`send` requests).
+export const acceptsMessages = (run: Run) => isInFlight(run) && isStarted(run);
 
 // A run that was never confirmed running belongs in the ready state, or in To Review for a follow-up (or in
 // implementing, once the start moved it); a started run in implementing or in review. Elsewhere its tab is closed.
@@ -155,11 +158,12 @@ export class Observer extends Context.Service<Observer, { readonly observe: Effe
 			const observe = Effect.gen(function* () {
 				const teams = yield* resolveTeams(config, yield* linear.teams(Object.keys(config.teams)), warnOnce);
 				const runs = yield* journal.listRuns;
+				const topics = yield* journal.listTopics;
 				const repos = [...new Set([...Object.values(config.teams).map((team) => team.repo), ...runs.map((run) => run.repo)])];
 				const [ready, tracked, tabs, worktrees] = yield* Effect.all(
 					[
 						linear.readyEpics([...teams.values()].map(({ stateIds }) => stateIds.ready)),
-						linear.epics(runs.map((run) => run.epicId)),
+						linear.epics([...new Set([...runs, ...topics].map(({ epicId }) => epicId))]),
 						herdr.workspaceTabs,
 						Effect.forEach(repos, listWorktrees, { concurrency: 'unbounded' }).pipe(Effect.map((lists) => lists.flat())),
 					],

@@ -3,10 +3,12 @@ import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Effect, FileSystem, Layer, Stream } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 import { AgentEventServer } from './agent-event-server.ts';
+import { ClaudeChat } from './claude-chat.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
-import { AppConfig } from './config.ts';
+import { AppConfig, TelegramConfig } from './config.ts';
+import { answerChatMessages, keepChatSessionWarm } from './conversations.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { GitHubApp } from './github-app.ts';
@@ -21,11 +23,19 @@ import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { telegramChat } from './telegram.ts';
+import { TelegramBot } from './telegram-bot.ts';
+import { Transcriber } from './transcription.ts';
 import { WebhookServer } from './webhook-server.ts';
 
 const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
 
-const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, Prompts.layer).pipe(Layer.provideMerge(GitHubApp.layer()));
+const ChatLive = telegramChat.pipe(Layer.provide(TelegramBot.layer), Layer.provide(Transcriber.layer));
+
+const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, ChatLive, ClaudeChat.layer).pipe(
+	Layer.provideMerge(Prompts.layer),
+	Layer.provideMerge(GitHubApp.layer()),
+);
 
 const MainLive = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
 	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
@@ -45,6 +55,8 @@ const program = Effect.gen(function* () {
 
 	yield* Effect.forkChild(Stream.runForEach(herdr.events, () => reconciler.wake));
 	yield* Effect.forkChild(missedDeliveries.run);
+	yield* Effect.forkChild(answerChatMessages);
+	yield* Effect.forkChild(keepChatSessionWarm);
 	yield* Effect.forkChild(
 		fs.watch(config.env.stateDirectory).pipe(
 			Stream.filter((event) => basename(event.path) === wakeFileName),
@@ -57,4 +69,4 @@ const program = Effect.gen(function* () {
 });
 
 // Refused before the services are built, which reaches out to GitHub.
-NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(AppConfig.layer.pipe(Layer.provideMerge(NodeServices.layer)))));
+NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(TelegramConfig.layerWithAppConfig.pipe(Layer.provideMerge(NodeServices.layer)))));

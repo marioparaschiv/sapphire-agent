@@ -183,7 +183,7 @@ describe('Journal', () => {
 			assert.deepStrictEqual(reopened, [followUp]);
 			assert.deepStrictEqual(
 				tables.map(({ name }) => name),
-				['commands', 'delivery_mark', 'effect_sql_migrations', 'requests', 'runs', 'transient_failures'],
+				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'requests', 'runs', 'topics', 'transient_failures'],
 			);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);

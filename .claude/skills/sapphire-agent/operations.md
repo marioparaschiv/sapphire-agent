@@ -12,7 +12,9 @@ How the live service is installed, started, paused, drained, deployed, inspected
 - herdr also starts its server on demand when a client attaches. `ExecCondition` runs `herdr status server` and skips the start if it prints `status: running`, so systemd never starts a second server. `inactive` for this unit is normal when herdr was started another way.
 - `ExecStart` pins `~/.nvm/versions/node/v24.21.0/bin/node`. Update both units after a Node upgrade.
 - Apply config or code changes with `systemctl --user restart sapphire-agent` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
-- Unit `PATH` is `/usr/local/bin:/usr/bin:/bin`; `git` and `gh` must be there. `gh` must be logged in as the user, for reads. Every comment is posted by the GitHub App (below), with no `gh` login.
+- Unit `PATH` is `~/.local/bin:/usr/local/bin:/usr/bin:/bin`; `git`, `gh`, `ffmpeg` (voice notes) and `claude` (the main chat, `~/.local/bin/claude`) must be there; the chat's Claude runs `sapphire` (`~/.local/bin/sapphire`). After changing the unit, reinstall it (`sh scripts/install.sh`) so systemd picks it up.
+- The Telegram bot must be in Threaded mode with users not allowed to create threads (BotFather, Bot Settings, Threaded mode, "Disallow users to create new threads"), so General stays the main chat and only the service makes topics.
+- The transcription model lives in `$HERDR_PLUGIN_STATE_DIR/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (`config.md`); the service does not start without it. `gh` must be logged in as the user, for reads. Every comment is posted by the GitHub App (below), with no `gh` login.
 - The service listens for the App's and Linear's webhook deliveries on `127.0.0.1:<bot.app.webhookPort>` (default 3790) while it runs (Webhook and Linear webhook below).
 - A command agent runs `node` through `scripts/ctl.sh` in its tab's shell, so `node` (24) must be on the user's shell `PATH`.
 
@@ -25,7 +27,15 @@ How the live service is installed, started, paused, drained, deployed, inspected
 3. Copy both units to `~/.config/systemd/user/`.
 4. `systemctl --user daemon-reload` and `enable` both.
 
-The Claude hooks are not installed by the script: `~/.claude/settings.json` has one `{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }` entry under each of `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd` (`rules.md`, Agent events).
+The Claude hooks are not installed by the script: `~/.claude/settings.json` has one `{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }` entry under each of `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd`, and the same entry under `PostToolUse` with the `Skill` matcher, for the phases a topic shows (`rules.md`, Agent events):
+
+```json
+"PostToolUse": [
+  { "matcher": "Skill", "hooks": [{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }] }
+]
+```
+
+Add the `PostToolUse` entry only once the running service knows it: an older one refuses the event, and the hook fails on every skill.
 
 Editing a file in `systemd/` does nothing until you rerun the install (or copy it) and `daemon-reload`.
 

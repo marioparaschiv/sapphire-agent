@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
+import { EpicState, MessageRef, Phase, ThreadRef } from './chat.ts';
 import { ResultFile } from './result-file.ts';
 
 // claimed: recorded before the run is started. running: Claude is confirmed started. awaitingInput: the agent sat
@@ -128,6 +129,8 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('done', { commandId: Schema.Int }),
 	// Recorded by the agent event server when a run's agent starts another session in its pane.
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
+	// Recorded by the agent event server when a run's agent starts a phase.
+	Schema.TaggedStruct('phase', { identifier: Schema.String, phase: Phase }),
 ]);
 
 export type Request = typeof Request.Type;
@@ -135,6 +138,21 @@ export type Request = typeof Request.Type;
 export const RequestRow = Schema.Struct({ id: Schema.Int, request: Schema.fromJsonString(Request), createdAt: Millis });
 
 export type RequestRow = typeof RequestRow.Type;
+
+// An epic's thread in the chat: made when its run is dispatched, gone once the epic ships or its run stops.
+export const Topic = Schema.Struct({
+	epicId: Schema.String,
+	identifier: Schema.String,
+	thread: ThreadRef,
+	// What the thread shows now.
+	state: EpicState,
+	// The PR whose link was posted, so it is posted once.
+	pullRequestUrl: Schema.NullOr(Schema.String),
+	// The slice milestones posted, `<sub-issue id>:<progress>`, so each is posted once.
+	milestones: Schema.fromJsonString(Schema.Array(Schema.String)),
+});
+
+export type Topic = typeof Topic.Type;
 
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
@@ -247,6 +265,39 @@ const migrations = SqliteMigrator.layer({
 
 			yield* sql`ALTER TABLE commands ADD COLUMN acknowledged_at INTEGER`;
 		}),
+		'0007_create_chat_sessions': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// The Claude session each bot message of the main chat was written in; a reply to the message forks it.
+			yield* sql`
+				CREATE TABLE chat_sessions (
+					message_ref TEXT PRIMARY KEY,
+					session_id TEXT NOT NULL,
+					created_at INTEGER NOT NULL
+				)
+			`;
+		}),
+		'0008_create_topics': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`
+				CREATE TABLE topics (
+					epic_id TEXT PRIMARY KEY,
+					identifier TEXT NOT NULL,
+					thread TEXT NOT NULL,
+					state TEXT NOT NULL,
+					pull_request_url TEXT,
+					milestones TEXT NOT NULL
+				)
+			`;
+			// At most one row: the thread shipped epics are summed up in.
+			yield* sql`
+				CREATE TABLE archive_thread (
+					id INTEGER PRIMARY KEY CHECK (id = 1),
+					thread TEXT NOT NULL
+				)
+			`;
+		}),
 	}),
 });
 
@@ -280,6 +331,17 @@ export class Journal extends Context.Service<
 		// When the newest webhook delivery the last complete scan saw was delivered, in ms; none before the first scan.
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
 		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
+		// Records that the main chat's bot messages were written in the Claude session.
+		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) => Effect.Effect<void, JournalError>;
+		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<string>, JournalError>;
+		// The session of the newest bot message.
+		readonly latestChatSession: Effect.Effect<Option.Option<string>, JournalError>;
+		readonly listTopics: Effect.Effect<ReadonlyArray<Topic>, JournalError>;
+		// Inserts the topic or replaces the one of the same epic.
+		readonly putTopic: (topic: Topic) => Effect.Effect<void, JournalError>;
+		readonly deleteTopic: (epicId: string) => Effect.Effect<void, JournalError>;
+		readonly archiveThread: Effect.Effect<Option.Option<ThreadRef>, JournalError>;
+		readonly setArchiveThread: (thread: ThreadRef) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -387,6 +449,58 @@ export class Journal extends Context.Service<
 					execute: (deliveredAt) => sql`INSERT OR REPLACE INTO delivery_mark (id, delivered_at) VALUES (1, ${deliveredAt})`,
 				});
 
+				const insertChatSession = SqlSchema.void({
+					Request: Schema.Struct({ messageRef: MessageRef, sessionId: Schema.String, createdAt: Millis }),
+					execute: (row) => sql`INSERT OR REPLACE INTO chat_sessions ${sql.insert(row)}`,
+				});
+
+				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) =>
+					Clock.currentTimeMillis.pipe(
+						Effect.flatMap((createdAt) =>
+							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, sessionId, createdAt }), { discard: true })),
+						),
+					);
+
+				const chatSession = (messageRef: MessageRef) =>
+					SqlSchema.findOneOption({
+						Request: MessageRef,
+						Result: Schema.Struct({ sessionId: Schema.String }),
+						execute: (ref) => sql`SELECT session_id FROM chat_sessions WHERE message_ref = ${ref}`,
+					})(messageRef).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
+
+				const latestChatSession = SqlSchema.findOneOption({
+					Request: Schema.Void,
+					Result: Schema.Struct({ sessionId: Schema.String }),
+					execute: () => sql`SELECT session_id FROM chat_sessions ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+				})(undefined).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
+
+				const listTopics = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: Topic,
+					execute: () => sql`SELECT * FROM topics ORDER BY rowid`,
+				})(undefined);
+
+				const putTopic = SqlSchema.void({
+					Request: Topic,
+					execute: (row) => sql`INSERT OR REPLACE INTO topics ${sql.insert(row)}`,
+				});
+
+				const deleteTopic = SqlSchema.void({
+					Request: EpicId,
+					execute: (epicId) => sql`DELETE FROM topics WHERE epic_id = ${epicId}`,
+				});
+
+				const archiveThread = SqlSchema.findOneOption({
+					Request: Schema.Void,
+					Result: Schema.Struct({ thread: ThreadRef }),
+					execute: () => sql`SELECT thread FROM archive_thread`,
+				})(undefined).pipe(Effect.map(Option.map(({ thread }) => thread)));
+
+				const setArchiveThread = SqlSchema.void({
+					Request: ThreadRef,
+					execute: (thread) => sql`INSERT OR REPLACE INTO archive_thread (id, thread) VALUES (1, ${thread})`,
+				});
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -403,6 +517,14 @@ export class Journal extends Context.Service<
 					claimRun,
 					deliveryMark,
 					setDeliveryMark,
+					addChatSession,
+					chatSession,
+					latestChatSession,
+					listTopics,
+					putTopic,
+					deleteTopic,
+					archiveThread,
+					setArchiveThread,
 				});
 			}),
 		).pipe(

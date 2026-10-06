@@ -27,9 +27,9 @@ Which Linear states a run belongs in (`activeRoles`): a started run in Implement
 `scripts/ctl.sh` and the agent event server only append requests to the journal (`journal-and-markers.md`); the rules act on them, oldest first, at most one per epic per tick. This rule takes `stop`, `send` and `session`:
 
 - `stop <EPIC>`: the epic's run, if in flight, is ended: its tab is closed even while the agent works, status `ended`. The epic stays in its Linear state; move it to start over. Not in flight any more: dropped.
-- `send <EPIC> <text>`: typed into the run's agent (`herdr agent prompt`), as a question reply is. No started run in flight, or no tab: dropped. herdr refuses it (the agent sits at a dialog): logged and dropped, not tried again.
+- `send <EPIC> <text>`: typed into the run's agent (`herdr agent prompt`), as a question reply is. A chat message in the epic's thread is recorded as one (`architecture.md`, The chat). No started run in flight, or no tab: dropped. herdr refuses it (the agent sits at a dialog): logged and dropped, not tried again.
 - `session <EPIC> <id>`: recorded by the agent event server (Agent events) when the run's agent started another session in its pane. The run's session id becomes that one, so the question relay reads the session the agent is in now; its name stays. Not in flight any more: dropped.
-- `start` requests are left to the dispatch rule.
+- `start` requests are left to the dispatch rule, `phase` requests to the topics rule.
 - `follow-up` requests are left to the follow-up rule, except one whose epic has no run left (cleanup dropped it) or only a `kept` one: dropped.
 
 A request is dropped once acted on, so a crash before that ends the run again (a no-op) or types the message again. Not pausable: a stop must work while paused.
@@ -75,6 +75,7 @@ For each started run that is `running`, `awaitingInput` or `stale`, every tick r
 - A run with a stored result, or whose epic moved on, is left to the results rule.
 - Agent `exited` (pane without Claude) or `vanished` (tab gone): `error` flag with the tail, close the tab, `error`.
 - `running`, quiet and waiting on a reply to its message (Question relay): not flagged or nudged. Quiet for `staleAfterSeconds`: its question is asked on the epic, which becomes the run's question, `awaitingInput`.
+- Otherwise `running` and quiet for `awaitingInputAfterSeconds`, without a session to reply to and with a chat thread: the tail is posted in the thread as its question (once per quiet episode, keyed by its start), `awaitingInput` without a Linear question, label or comment. The user's messages in the thread reach the agent as `send` requests, so the Linear relay never sees them.
 - Otherwise `running` and quiet for `awaitingInputAfterSeconds`: `awaitingInput` flag with the tail; its comment id becomes the run's question.
 - `running` and working with unchanged output for `staleAfterSeconds`: record `nudgedAt`, then nudge once (Esc, then the prompt `continue`). Still unchanged `nudgeGraceSeconds` later: `stale` flag, `stale`. It keeps its slot and its tab.
 - `awaitingInput` with a question: relay replies (below).
@@ -83,7 +84,7 @@ For each started run that is `running`, `awaitingInput` or `stale`, every tick r
 
 ### Question relay
 
-A run with a session to reply to (`ctl.sh start --reply-to`) asks it directly: its agent sends the question as one line `<ID>: <question>` to that session (`SendMessage`) and ends its turn; the reply arrives as a message, which wakes it. Monitoring reads the run's Claude transcript (`~/.claude/projects/<cwd with every non-alphanumeric as ->/<session id>.jsonl`): the run waits on a reply while its last `SendMessage` to that session has no input after it (a prompt, a message, an interrupt; a background task finishing does not count). A reply within `staleAfterSeconds` of the quiet start wakes the agent, which ends the episode, and nothing is posted. Otherwise the question goes on the epic as one line, `<ID> asks: <question>` (the `awaitingInput` label and marker, no tab or pane tail), and is relayed like any question. A run without a session to reply to, or no longer waiting on one, asks on Linear:
+A run with a session to reply to (`ctl.sh start --reply-to`) asks it directly: its agent sends the question as one line `<ID>: <question>` to that session (`SendMessage`) and ends its turn; the reply arrives as a message, which wakes it. Monitoring reads the run's Claude transcript (`~/.claude/projects/<cwd with every non-alphanumeric as ->/<session id>.jsonl`): the run waits on a reply while its last `SendMessage` to that session has no input after it (a prompt, a message, an interrupt; a background task finishing does not count). A reply within `staleAfterSeconds` of the quiet start wakes the agent, which ends the episode, and nothing is posted. Otherwise the question goes on the epic as one line, `<ID> asks: <question>` (the `awaitingInput` label and marker, no tab or pane tail), and is relayed like any question. A run without a session to reply to asks in its epic's chat thread (Monitoring), or on Linear when the epic has none (e.g. the thread could not be made); a run with one that is no longer waiting on it asks on Linear:
 
 - The `awaitingInput` comment is the question: it holds the pane tail and says to reply to it. It is posted once per quiet episode, also across restarts (its marker is keyed by the claim and the start of the quiet spell).
 - Each tick fetches the replies to every current question in one request. A reply counts when it is a child of the run's question, has no marker, does not start with `**sapphire-agent`, and has no `white_check_mark` reaction. Replies to any other comment are ignored.
@@ -137,13 +138,28 @@ A failed scan (GitHub unreachable or refusing, a journal error) is logged as `ca
 
 ## Agent events
 
-The coding agents report their session events through one-line hooks in their own settings: Claude's `~/.claude/settings.json` runs `sapphire hook claude` (`async`, so Claude never waits on it) on `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd`. `sapphire hook <agent>` (`src/agent-hook.ts`, node built-ins only, about 50 ms) sends the payload from stdin and `$HERDR_PANE_ID` as one JSON line to `$STATE/events.sock` and waits for the one-line answer. The service not running (no socket, or refused) is a silent success: events only make it act sooner. Anything else the service refuses exits 1 with the reason on stderr.
+The coding agents report their session events through one-line hooks in their own settings: Claude's `~/.claude/settings.json` runs `sapphire hook claude` (`async`, so Claude never waits on it) on `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd` and `PostToolUse` for the `Skill` tool (`operations.md`, Install). `sapphire hook <agent>` (`src/agent-hook.ts`, node built-ins only, about 50 ms) sends the payload from stdin and `$HERDR_PANE_ID` as one JSON line to `$STATE/events.sock` and waits for the one-line answer. The service not running (no socket, or refused) is a silent success: events only make it act sooner. Anything else the service refuses exits 1 with the reason on stderr.
 
-`AgentEventServer` (`agent-event-server.ts`) decodes the payload with that agent's adapter (`claude-hooks.ts`) into an agent-neutral `AgentEvent` (`agent-event.ts`): `SessionStarted` (with how: `startup`, `resume`, `clear`, `compact`, `fork`), `TurnStarted`, `TurnEnded`, `Notified`, `SessionEnded`. A subagent's events are dropped. An event from the pane of a run in flight or a command claimed or running wakes the reconciler; a `SessionStarted` whose session is not the run's recorded one also records a `session` request (Requests). Events from any other pane are answered and dropped.
+`AgentEventServer` (`agent-event-server.ts`) decodes the payload with that agent's adapter (`claude-hooks.ts`) into an agent-neutral `AgentEvent` (`agent-event.ts`): `SessionStarted` (with how: `startup`, `resume`, `clear`, `compact`, `fork`), `TurnStarted`, `TurnEnded`, `Notified`, `SessionEnded`, `SkillInvoked` (the skill's name without a plugin's `<plugin>:` prefix). A subagent's events are dropped. An event from the pane of a run in flight or a command claimed or running wakes the reconciler; a `SessionStarted` whose session is not the run's recorded one also records a `session` request (Requests), and a `SkillInvoked` of `sreview`, `review-verify` or `pr` from a run's pane records a `phase` request (Topics). Events from any other pane are answered and dropped.
 
 Another agent (e.g. pi) needs an adapter (`(payload) => Option<AgentEvent>`) added to `adapters` in `agent-event-server.ts`, and a hook in that agent that runs `sapphire hook <name>`.
 
-## 8. Commands
+## 8. Topics
+
+Not pausable. Each running epic gets a thread in the chat (a Telegram forum topic in the user's private chat with the bot, `architecture.md`, The chat), recorded in the journal (`topics`: epic, thread, the state it shows, the PR it posted). Its work is a task (`<ID> thread`), not the epic's: a chat failure is logged and tried again next tick, and never flags the epic.
+
+- Open: a run in flight whose epic is in the run's states and has no thread gets one, named by its state, then the thread is recorded. Only running epics get one.
+- State: `working` (claimed, running), `awaitingInput`, `error` (error, stale); with no run in flight, `review` while the epic is in To Review or In Review (or still seen in Implementing by a run with a stored result, which the results rule moved this tick). A change renames the thread, then the new state is recorded.
+- PR: while the epic has a run, an open or merged PR for its branch is posted once in the thread and once in the main chat, then recorded.
+- Slices: while the thread shows a state, each sub-issue (all of the threads' epics read in one request) is posted with its identifier and title once when it is in the implementing state (started) and once when it is in a completed state (done), then recorded on the topic (`milestones`). One seen done first gets only the done.
+- Phases: each `phase` request is posted in the epic's thread (`/sreview started`), then dropped; with no thread it is dropped.
+- Messages: the user's messages in the thread go to the run's agent; a question of a run without a session to reply to is posted there (Monitoring).
+- Shipped: one line (identifier, title, PR or `no PR`, sub-issue count as slices) in the archive thread, `✅ Done`, opened on first use and recorded (`archive_thread`); then the epic's thread is deleted and its row dropped.
+- Anything else (the run was stopped, the epic was moved back or away, or is gone from Linear): the thread is deleted with no summary, then its row dropped.
+
+Messages are sent with a `random_id` derived from what they are for, and Telegram refuses a `random_id` it has seen, so a crash between a post and its record never posts twice; renaming to the same name and deleting a deleted topic are no-ops.
+
+## 9. Commands
 
 Not paused. Runs the command agents, one at a time, oldest first. Command statuses: `ignored`, `queued` (waiting for its turn), `claimed` (its turn came; being started), `running`, `ended` (the agent said it was done; tab closed), `error` (failed; the comment got a reply saying so; tab closed). Commands hold no `maxInFlight` slot: a stop or a pause must work while every slot is taken, so at most `maxInFlight` runs plus one command agent are alive.
 
@@ -246,5 +262,8 @@ A new claim reuses the existing worktree if it is on the same branch and opens a
 - A run whose agent keeps reporting `working` holds its slot and its tab until it stops or is flagged `stale`.
 - A crash after a message was typed into the pane but before its `send` request was dropped types it again, as with question replies.
 - The command agent's replies go to the issue's or PR's conversation, also for a mention in a review thread.
+- A crash right after a topic was made, before it was recorded, leaves that topic behind empty and the next tick makes another: a bot cannot list topics (`messages.getForumTopics` is user-only), so it cannot find the one it made. Delete the stray topic by hand.
+- How a draft's stop reaches the bot is not documented by Telegram; the adapter takes an `updateUserTyping` with `sendMessageStopDraftAction` for the draft's id. If Telegram reports it some other way, stop does nothing and the reply finishes.
+- The private chat must not let users create threads (BotFather, Threaded mode, "Disallow users to create new threads"), or Telegram clients turn every message in General into a new topic, which belongs to no epic and is dropped.
 - A mention whose delivery failed more than 3 days ago is lost: GitHub no longer lists it, so it cannot be redelivered. Mention the bot again.
 - A delivery that the service refuses every time (401 for a webhook secret that does not match, 400 for an unexpected payload) is redelivered on every scan until it is fixed or 3 days have passed.

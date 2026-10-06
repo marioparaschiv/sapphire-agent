@@ -1,6 +1,6 @@
 # Config
 
-Where configuration lives, every field with its default (`src/config.ts`), the team-to-repo mapping, the API key, the Linear webhook secret and the GitHub App key and webhook secret files, the env vars, and how startup reports problems.
+Where configuration lives, every field with its default (`src/config.ts`), the team-to-repo mapping, the API key, the Linear webhook secret, the GitHub App key and webhook secret files, the Telegram bot token, api_id and api_hash files, the env vars, and how startup reports problems.
 
 ## Files
 
@@ -11,6 +11,8 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 | GitHub App private key | `bot.app.privateKeyFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/app.pem` |
 | GitHub App webhook secret | `bot.app.webhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` |
 | Linear webhook secret | `linearWebhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/linear-webhook-secret` |
+| Telegram bot token, api_id, api_hash | `telegram.botTokenFile`, `telegram.apiIdFile`, `telegram.apiHashFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/telegram-bot-token`, `telegram-api-id`, `telegram-api-hash` |
+| Telegram session (mtcute) | `$HERDR_PLUGIN_STATE_DIR/telegram.session` |
 | Claude config (trust) | `~/.claude.json` (override `CLAUDE_CONFIG_PATH`) |
 | Claude session transcripts | `~/.claude/projects` (override the directory holding `projects` with `CLAUDE_CONFIG_DIR`) |
 | Journal | `$HERDR_PLUGIN_STATE_DIR/journal.db` |
@@ -46,6 +48,10 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `bot.app.webhookSecretFile` | required | `~` expanded. The App's webhook secret, see below. |
 | `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://webhook.marioparaschiv.com/github` to it, and Tailscale Funnel forwards `/linear` (`operations.md`). 0 picks a free port (tests). |
 | `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
+| `telegram.botTokenFile` | required | `~` expanded. The Telegram bot's token, see below. |
+| `telegram.apiIdFile`, `telegram.apiHashFile` | required | `~` expanded. The `api_id` and `api_hash` of a Telegram app (my.telegram.org), which the bot logs in over MTProto with, see below. |
+| `telegram.allowedUserIds` | required | Non-empty array of numeric Telegram user ids. Only their messages in their private chat with the bot reach the service; anyone else's are dropped and logged (`architecture.md`, The chat). Epic topics and notifications go to the private chat of the first id. |
+| `telegram.transcriptionModelDirectory` | `$HERDR_PLUGIN_STATE_DIR/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | `~` expanded. The sherpa-onnx Parakeet TDT 0.6B v3 int8 model voice notes are transcribed with: `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`. Transcription also needs `ffmpeg` on `PATH`. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
@@ -80,6 +86,17 @@ Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemin
 
 with the App's real ID (`operations.md` covers creating and installing the App).
 
+It also needs a `telegram` entry, with the bot's files and the user's numeric Telegram id:
+
+```json
+"telegram": {
+	"botTokenFile": "~/.config/herdr/plugins/config/sapphire-agent/telegram-bot-token",
+	"apiIdFile": "~/.config/herdr/plugins/config/sapphire-agent/telegram-api-id",
+	"apiHashFile": "~/.config/herdr/plugins/config/sapphire-agent/telegram-api-hash",
+	"allowedUserIds": [123456789]
+}
+```
+
 ## API key
 
 - Plain text file containing a Linear personal API key; whitespace trimmed.
@@ -102,6 +119,13 @@ with the App's real ID (`operations.md` covers creating and installing the App).
 - The signing secret Linear shows on the webhook's page (Settings, API, Webhooks), as plain text; whitespace trimmed. Every Linear delivery's `Linear-Signature` is checked against it.
 - Same rules as the API key: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no Linear webhook secret: create <path> with mode 600`; empty fails.
 
+## Telegram bot token, api_id and api_hash
+
+- The token BotFather gives the bot (`123456:ABC...`), as plain text; whitespace trimmed.
+- `api_id` (a number) and `api_hash` come from the Telegram app registered at my.telegram.org, each as plain text in its own file.
+- Same rules as the API key for all three: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no Telegram bot token: create <path> with mode 600` (or `api_id`, `api_hash`); empty fails; an `api_id` that is no number fails with `<path> is not a number`.
+- The bot logs in at startup; a refused login stops startup with `Telegram refused to log in as the bot: ...`, outside the `StartupError`.
+
 ## Env vars
 
 Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl.sh` defaults the four required ones to the same values, and a command's tab gets the service's own values (`rules.md`).
@@ -118,7 +142,7 @@ Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl
 
 ## Startup errors
 
-Env, the config file, the API key, the Linear webhook secret and the App's private key and webhook secret are all checked before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero:
+Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero. The CLI (`ctl.ts`) checks the same minus the Telegram files and the model, which only the service uses:
 
 ```
 StartupError: cannot start, fix these and restart:
@@ -127,6 +151,7 @@ StartupError: cannot start, fix these and restart:
 - /home/dev/.config/herdr/plugins/config/sapphire-agent/config.json maxInflight: Expected no excess property
 - no Linear API key: create /home/dev/.config/sapphire-agent/linear-key with mode 600
 - /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem is readable by other users; run chmod 600 /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem
+- no transcription model in /home/dev/.local/state/herdr/plugins/sapphire-agent/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8: encoder.int8.onnx, tokens.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 there
 ```
 
 A file whose path comes from a missing env var or an invalid config file is not read; that problem is already reported. Startup also stops while the old dispatcher's `claims.json` still holds claims (`operations.md`).

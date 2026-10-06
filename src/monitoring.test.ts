@@ -59,6 +59,53 @@ describe('monitoring', () => {
 		}),
 	);
 
+	it.effect("asks the question of a run without a requesting session in its epic's topic instead of on Linear, once, also across a restart", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
+			const { epic } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: question });
+
+			h.telegram.write({ from: h.telegramUser, text: 'hi' });
+			yield* h.tick;
+			yield* TestClock.adjust('3 minutes');
+			yield* h.tick;
+			yield* h.restart;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			const [topic] = h.telegram.topics();
+
+			assert.deepStrictEqual(
+				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
+				[{ text: `⏸ Waiting for input:\n\n${question}\n\nWrite here to answer; it is typed into the agent.`, topicId: topic.topicId }],
+			);
+			assert.deepStrictEqual([h.linear.comments(epic.id), h.linear.labelNames(epic.id)], [[], []]);
+			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
+			assert.strictEqual(topic.title, '⏸ TEST-10 Plugin settings sync');
+		}),
+	);
+
+	it.effect('still asks the requesting session of a run that has a topic, then Linear, never the topic', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
+
+			h.telegram.write({ from: h.telegramUser, text: 'hi' });
+
+			const { epic } = yield* askedByMessage(h);
+
+			yield* h.tick;
+			yield* TestClock.adjust('599 seconds');
+			yield* h.tick;
+			assert.deepStrictEqual([h.linear.comments(epic.id), yield* statuses(h)], [[], ['running']]);
+
+			yield* TestClock.adjust('1 second');
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
+			assert.strictEqual(h.telegram.topics().length, 1);
+			assert.deepStrictEqual(h.telegram.sent, []);
+		}),
+	);
+
 	it.effect('nudges an agent whose pane stopped changing once, then flags it as stale, keeping its tab', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ staleAfterSeconds: 600, nudgeGraceSeconds: 600 });

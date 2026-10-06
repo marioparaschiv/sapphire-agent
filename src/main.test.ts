@@ -4,6 +4,7 @@ import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, FileSystem, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
+import { transcriptionModel, transcriptionModelFiles } from './config.ts';
 
 const appPem = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey;
 
@@ -14,11 +15,14 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'app.pem'), appPem, { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), 'lin_wh_test', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'telegram-bot-token'), '123456:telegram-secret', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'telegram-api-id'), '1234567', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'telegram-api-hash'), 'telegram-api-hash', { mode: 0o600 });
 
 			const handle = yield* spawner.spawn(
 				ChildProcess.make(process.execPath, [join(import.meta.dirname, 'main.ts')], {
@@ -49,11 +53,16 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'app.pem'), appPem, { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), 'lin_wh_test', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'telegram-bot-token'), '123456:telegram-secret', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'telegram-api-id'), '1234567', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'telegram-api-hash'), 'telegram-api-hash', { mode: 0o600 });
+			yield* fs.makeDirectory(join(directory, 'models', transcriptionModel), { recursive: true });
+			yield* Effect.forEach(Object.values(transcriptionModelFiles), (file) => fs.writeFileString(join(directory, 'models', transcriptionModel, file), ''));
 			yield* fs.writeFileString(join(directory, 'claims.json'), JSON.stringify({ claims: [{ epicId: 'b1c2d3', identifier: 'UNB-12', status: 'running' }] }));
 
 			const handle = yield* spawner.spawn(

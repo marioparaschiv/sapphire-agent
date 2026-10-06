@@ -1,7 +1,7 @@
 import { Effect, Option, Schema } from 'effect';
 import { type AgentAdapter, type AgentEvent, SessionSource } from './agent-event.ts';
 
-const keys = { hookEventName: 'hook_event_name', sessionId: 'session_id', agentId: 'agent_id' } as const;
+const keys = { hookEventName: 'hook_event_name', sessionId: 'session_id', agentId: 'agent_id', toolName: 'tool_name', toolInput: 'tool_input' } as const;
 
 // Every hook payload has these; `agent_id` only when a subagent fires it.
 const hook = <Name extends string, Fields extends Schema.Struct.Fields>(name: Name, fields: Fields) =>
@@ -14,6 +14,8 @@ const ClaudeHook = Schema.Union([
 	hook('Stop', {}),
 	hook('Notification', { message: Schema.String }),
 	hook('SessionEnd', { reason: Schema.String }),
+	// Only with the `Skill` matcher.
+	hook('PostToolUse', { toolName: Schema.Literal('Skill'), toolInput: Schema.Struct({ skill: Schema.String }) }),
 ]);
 
 type ClaudeHook = typeof ClaudeHook.Type;
@@ -30,6 +32,9 @@ const toEvent = (payload: ClaudeHook): AgentEvent => {
 			return { _tag: 'Notified', sessionId: payload.sessionId, message: payload.message };
 		case 'SessionEnd':
 			return { _tag: 'SessionEnded', sessionId: payload.sessionId, reason: payload.reason };
+		case 'PostToolUse':
+			// A plugin's skill is reported as `<plugin>:<skill>`.
+			return { _tag: 'SkillInvoked', sessionId: payload.sessionId, skill: payload.toolInput.skill.slice(payload.toolInput.skill.lastIndexOf(':') + 1) };
 	}
 };
 

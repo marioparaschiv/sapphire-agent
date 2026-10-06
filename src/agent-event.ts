@@ -12,6 +12,8 @@ export const AgentEvent = Schema.TaggedUnion({
 	TurnEnded: { sessionId: Schema.String },
 	Notified: { sessionId: Schema.String, message: Schema.String },
 	SessionEnded: { sessionId: Schema.String, reason: Schema.String },
+	// The agent ran a skill, by its own name (`sreview`), without any plugin's prefix.
+	SkillInvoked: { sessionId: Schema.String, skill: Schema.String },
 });
 
 export type AgentEvent = typeof AgentEvent.Type;

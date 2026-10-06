@@ -131,7 +131,7 @@ describe('ctl', () => {
 
 			yield* fs.writeFileString(
 				join(directory, 'config.json'),
-				JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] } }),
+				JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }),
 			);
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'app.pem'), generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey, { mode: 0o600 });

@@ -2,16 +2,19 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeServices } from '@effect/platform-node';
-import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
+import { NodeFileSystem, NodeServices } from '@effect/platform-node';
+import { Console, Context, Effect, Exit, Layer, Option, Scope, Stream, SubscriptionRef } from 'effect';
 import { TestConsole } from 'effect/testing';
 import { AgentEventServer } from './agent-event-server.ts';
 import type { CallError } from './call-policy.ts';
+import { ClaudeChat } from './claude-chat.ts';
+import { fakeClaude } from './claude-chat-fake.ts';
 import { writeTranscript } from './claude-transcript-fixture.ts';
 import { ClaudeTranscript, type TranscriptSession } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
+import { answerChatMessages } from './conversations.ts';
 import { runCtl } from './ctl.ts';
 import { GitHubAppFixture, type GitHubAppFixtureShape, postDelivery, type WebhookDelivery } from './github-app-fixture.ts';
 import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
@@ -29,6 +32,9 @@ import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { telegramChat } from './telegram.ts';
+import { FakeTelegram, type FakeTelegramControls } from './telegram-fake.ts';
+import { Transcriber } from './transcription.ts';
 import { WebhookServer } from './webhook-server.ts';
 
 // `<purpose>:<key>` of each marked body, in order; unmarked bodies are left out.
@@ -118,6 +124,10 @@ export type Harness = {
 	readonly app: GitHubAppFixtureShape;
 	readonly github: FakeGitHubControls;
 	readonly herdr: FakeHerdrControls;
+	// The user's private chat with the bot.
+	readonly telegram: FakeTelegramControls;
+	// The Telegram id of the user, the first of telegram.allowedUserIds.
+	readonly telegramUser: number;
 	// Sends the delivery to the current webhook server, as postDelivery does with the configured secret; returns the HTTP
 	// status.
 	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
@@ -142,6 +152,8 @@ export type Harness = {
 	readonly crashed: () => boolean;
 	// Journal writes of the reconciler so far, the crashed one included.
 	readonly journalWrites: () => number;
+	// Completes once journalWrites reached n, e.g. once the chat recorded what a message asked for.
+	readonly awaitJournalWrites: (n: number) => Effect.Effect<void>;
 	readonly runs: Effect.Effect<ReadonlyArray<Run>>;
 	readonly commands: Effect.Effect<ReadonlyArray<Command>>;
 	// markerKeys of the issue's comments.
@@ -198,9 +210,15 @@ const makeRepos = (dir: string) => {
 	return { origin, repo };
 };
 
+export type HarnessOptions = {
+	// Answers the chat's messages as the service does, again after every restart; main-chat turns go to a fake `claude`
+	// that answers `OK.`.
+	readonly answerChat?: boolean;
+};
+
 // Real temp git repos, the Linear and GitHub App fixture servers, the GitHub and herdr fakes and a temp-file SQLite
 // journal, wired to the production rules and the webhook server. Needs a Scope; everything is removed when it closes.
-export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
+export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}, { answerChat = false }: HarnessOptions = {}) =>
 	Effect.gen(function* () {
 		const dir = yield* Effect.acquireRelease(
 			Effect.sync(() => mkdtempSync(join(tmpdir(), 'sapphire-agent-harness-'))),
@@ -212,11 +230,12 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 		const config = AppConfig.layerTest(dir, settings);
 		const fixtures = yield* Layer.build(
-			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakeHerdr.layer).pipe(Layer.provideMerge(config)),
+			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakeHerdr.layer, FakeTelegram.layer).pipe(Layer.provideMerge(config)),
 		);
 		let journalWrites = 0;
 		let crashAt = Option.none<number>();
 		let crashed = false;
+		const writesSeen = yield* SubscriptionRef.make(0);
 
 		const crashPoint = Effect.suspend(() => {
 			journalWrites += 1;
@@ -224,10 +243,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			if (Option.contains(crashAt, journalWrites)) {
 				crashed = true;
 
-				return Effect.die(new Error(`injected crash before journal write ${journalWrites}`));
+				return SubscriptionRef.set(writesSeen, journalWrites).pipe(Effect.andThen(Effect.die(new Error(`injected crash before journal write ${journalWrites}`))));
 			}
 
-			return Effect.void;
+			return SubscriptionRef.set(writesSeen, journalWrites);
 		});
 
 		const CrashingJournal = Layer.effect(
@@ -245,6 +264,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
 					claimRun: (run, requestIds) => crashPoint.pipe(Effect.andThen(journal.claimRun(run, requestIds))),
 					setDeliveryMark: (deliveredAt) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveredAt))),
+					putTopic: (topic) => crashPoint.pipe(Effect.andThen(journal.putTopic(topic))),
+					deleteTopic: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteTopic(epicId))),
+					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
+					addChatSession: (messageRefs, sessionId) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, sessionId))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -252,17 +275,26 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		const stack = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
 			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
 			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
-			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer)),
+			Layer.provideMerge(
+				Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer, telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest))),
+			),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
 			Layer.provide(NodeServices.layer),
 		);
+
+		const claude = yield* fakeClaude(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, () => ({ text: ['OK.'] }));
+		const claudeChat = ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer, NodeFileSystem.layer]), Layer.provide(Layer.succeedContext(fixtures)));
 
 		const build = Effect.gen(function* () {
 			const scope = yield* Scope.make();
 			const context = yield* Layer.buildWithScope(stack, scope);
 
 			Context.get(fixtures, GitHubAppFixture).setWebhookUrl(Context.get(context, WebhookServer).url);
+
+			if (answerChat) {
+				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.forkIn(scope));
+			}
 
 			return { scope, context };
 		}).pipe(Effect.orDie);
@@ -335,6 +367,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			app: Context.get(fixtures, GitHubAppFixture),
 			github: Context.get(fixtures, FakeGitHub),
 			herdr,
+			telegram: Context.get(fixtures, FakeTelegram),
+			telegramUser: Context.get(fixtures, AppConfig).telegram.allowedUserIds[0],
 			deliver: (delivery: WebhookDelivery, signature?: string | null) => services.pipe(Effect.flatMap((context) => postDelivery(Context.get(context, WebhookServer).url, webhookSecret, delivery, signature))),
 			scanDeliveries: services.pipe(Effect.flatMap((context) => Context.get(context, MissedDeliveries).scan)),
 			tick: tick(false),
@@ -347,6 +381,11 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			},
 			crashed: () => crashed,
 			journalWrites: () => journalWrites,
+			awaitJournalWrites: (n) =>
+				SubscriptionRef.changes(writesSeen).pipe(
+					Stream.takeUntil((count) => count >= n),
+					Stream.runDrain,
+				),
 			renameTab: (tabId, label) => Context.get(fixtures, Herdr).renameTab(tabId, label).pipe(Effect.orDie),
 			moveEpic: (epicId, state) => {
 				const issue = linear.issue(epicId);
