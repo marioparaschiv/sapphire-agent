@@ -55,22 +55,46 @@ const imageOf = (media: Message['media']): TelegramImage | null => {
 	return null;
 };
 
-const toTelegramMessage = (message: Message): TelegramMessage => {
-	const topicId = message.isTopicMessage ? (message.replyToMessage?.threadId ?? null) : null;
-	const replyToMessageId = message.replyToMessage?.id ?? null;
+// In a bot's private chat, a message in a topic that replies to nothing else points at the topic's service message,
+// whose id is in the bot's id space rather than the topic's; telling it from a reply takes fetching it.
+const repliesToTopic = (client: TelegramClient, message: Message, topicId: number | null) =>
+	Effect.gen(function* () {
+		const replyToMessageId = message.replyToMessage?.id ?? null;
 
-	return {
-		messageId: message.id,
-		chatId: message.chat.id,
-		chatType: message.chat.type === 'user' ? 'private' : message.chat.chatType,
-		senderId: message.sender.id,
-		text: message.text,
-		topicId,
-		replyToMessageId: replyToMessageId === topicId ? null : replyToMessageId,
-		voiceFileId: message.media?.type === 'voice' ? message.media.fileId : null,
-		image: imageOf(message.media),
-	};
-};
+		if (replyToMessageId === topicId) {
+			return true;
+		}
+
+		if (topicId === null || replyToMessageId === null || message.chat.type !== 'user') {
+			return false;
+		}
+
+		const replied = yield* Effect.tryPromise({ try: () => client.getReplyTo(message), catch: callFailure('look up the message it replies to') }).pipe(
+			withCallPolicy(callTimeouts.telegram),
+		);
+
+		return replied?.action?.type === 'topic_created';
+	}).pipe(
+		Effect.catch((error) => Effect.logError('cannot tell whether a message replies to its topic or to a message, so takes it as a reply', error).pipe(Effect.as(false))),
+	);
+
+const toTelegramMessage = (client: TelegramClient, message: Message) =>
+	Effect.gen(function* () {
+		const topicId = message.isTopicMessage ? (message.replyToMessage?.threadId ?? null) : null;
+		const replyToMessageId = (yield* repliesToTopic(client, message, topicId)) ? null : (message.replyToMessage?.id ?? null);
+
+		return {
+			messageId: message.id,
+			chatId: message.chat.id,
+			chatType: message.chat.type === 'user' ? 'private' : message.chat.chatType,
+			senderId: message.sender.id,
+			text: message.text,
+			topicId,
+			replyToMessageId,
+			voiceFileId: message.media?.type === 'voice' ? message.media.fileId : null,
+			image: imageOf(message.media),
+		} satisfies TelegramMessage;
+	});
 
 // A random_id Telegram has seen already for the same peer refuses the send, so a send keyed by what it is for is sent
 // once, also when a crash makes it run again.
@@ -191,7 +215,7 @@ export class TelegramBot extends Context.Service<
 		Effect.gen(function* () {
 			const { env } = yield* AppConfig;
 			const { botToken, apiId, apiHash } = yield* TelegramConfig;
-			const received = yield* Queue.unbounded<TelegramMessage>();
+			const received = yield* Queue.unbounded<Message>();
 			const stops = yield* PubSub.unbounded<DraftStop>();
 			const runFork = Effect.runForkWith(yield* Effect.context<never>());
 			const client = yield* Effect.acquireRelease(
@@ -210,7 +234,7 @@ export class TelegramBot extends Context.Service<
 
 			client.onError.add((error) => runFork(Effect.logError('Telegram client failed', Cause.fail(error))));
 			// Added before the login, which starts the updates loop and its catch-up.
-			client.onNewMessage.add((message) => Queue.offerUnsafe(received, toTelegramMessage(message)));
+			client.onNewMessage.add((message) => Queue.offerUnsafe(received, message));
 			// Telegram does not document how a draft's stop reaches the bot; a stop typing action from the user is the
 			// counterpart of the draft's own.
 			client.onRawUpdate.add(({ update }) => {
@@ -236,7 +260,7 @@ export class TelegramBot extends Context.Service<
 			const sendParams = ({ replyTo, topicId }: SendOptions = {}) => ({ replyTo, threadId: topicId });
 
 			return TelegramBot.of({
-				messages: Stream.fromQueue(received),
+				messages: Stream.fromQueue(received).pipe(Stream.mapEffect((message) => toTelegramMessage(client, message))),
 				draftStops: Stream.fromPubSub(stops),
 				sendText: (chatId, text, options) => write('send a message', () => client.sendText(chatId, text, sendParams(options))).pipe(Effect.map((message) => message.id)),
 				sendOnce: (chatId, text, key, options) =>
