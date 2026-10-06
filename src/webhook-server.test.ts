@@ -5,15 +5,34 @@ import { TestClock } from 'effect/testing';
 import { AppConfig } from './config.ts';
 import { GitHubAppFixture, postDelivery, signDelivery } from './github-app-fixture.ts';
 import type { Command } from './journal.ts';
+import { postLinearDelivery, signLinearDelivery } from './linear-fixture.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Reconciler } from './reconciler.ts';
-import { deliveries, type Harness, makeHarness, plannerDependencies } from './test-harness.ts';
-import { WebhookServer } from './webhook-server.ts';
+import { deliveries, type Harness, linearIssueMoved, makeHarness, plannerDependencies } from './test-harness.ts';
+import { linearWebhookPath, WebhookServer } from './webhook-server.ts';
 
 const reviewedPullRequest = (h: Harness) => h.github.addPullRequest({ repo: h.githubRepo, branch: 'mario/test-10-plugin-settings-sync', author: 'marioparaschiv' });
 
 const described = (commands: ReadonlyArray<Command>) => commands.map(({ author, body, status }) => [author, body, status]);
+
+// The webhook server in front of a reconciler whose one rule reports the time of each tick.
+const probedServer = Effect.gen(function* () {
+	const fs = yield* FileSystem.FileSystem;
+	const directory = yield* fs.makeTempDirectoryScoped().pipe(Effect.orDie);
+	const ticks = yield* Queue.unbounded<number>();
+	const probe = { name: 'probe', pausable: false, plan: () => Clock.currentTimeMillis.pipe(Effect.flatMap((now) => Queue.offer(ticks, now)), Effect.as([])) };
+	const context = yield* Layer.build(
+		WebhookServer.layer.pipe(
+			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(Effect.succeed([probe]))), Layer.provide(Pause.layer))),
+			Layer.provideMerge(GitHubAppFixture.layer),
+			Layer.provideMerge(plannerDependencies(directory, { pollSeconds: 30 })),
+		),
+	);
+	const { url } = yield* WebhookServer.pipe(Effect.provide(context));
+
+	return { config: yield* AppConfig.pipe(Effect.provide(context)), reconciler: yield* Reconciler.pipe(Effect.provide(context)), url, ticks };
+});
 
 describe('WebhookServer', () => {
 	it.effect('starts exactly one command run for a mention by an allowed user in an issue comment, a review comment or a review body', () =>
@@ -147,27 +166,41 @@ describe('WebhookServer', () => {
 
 	it.effect('wakes the reconciler for a queued command, before the next poll', () =>
 		Effect.gen(function* () {
-			const fs = yield* FileSystem.FileSystem;
-			const directory = yield* fs.makeTempDirectoryScoped().pipe(Effect.orDie);
-			const ticks = yield* Queue.unbounded<number>();
-			const probe = { name: 'probe', pausable: false, plan: () => Clock.currentTimeMillis.pipe(Effect.flatMap((now) => Queue.offer(ticks, now)), Effect.as([])) };
-			const context = yield* Layer.build(
-				WebhookServer.layer.pipe(
-					Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(Effect.succeed([probe]))), Layer.provide(Pause.layer))),
-					Layer.provideMerge(GitHubAppFixture.layer),
-					Layer.provideMerge(plannerDependencies(directory, { pollSeconds: 30 })),
-				),
-			);
-			const reconciler = yield* Reconciler.pipe(Effect.provide(context));
-			const { url } = yield* WebhookServer.pipe(Effect.provide(context));
-			const { webhookSecret } = yield* AppConfig.pipe(Effect.provide(context));
+			const { config, reconciler, url, ticks } = yield* probedServer;
 			const comment = { id: 'IC_kwDO5', url: 'https://github.com/test/repo/pull/1#issuecomment-5', body: '@orchestratorbot status', author: 'marioparaschiv' };
 
 			yield* Effect.forkScoped(reconciler.run);
 			assert.strictEqual(yield* Queue.take(ticks), 0);
 
 			yield* TestClock.adjust('10 seconds');
-			assert.strictEqual(yield* postDelivery(url, webhookSecret, deliveries.issueComment('test/repo', 1, comment)), 204);
+			assert.strictEqual(yield* postDelivery(url, config.webhookSecret, deliveries.issueComment('test/repo', 1, comment)), 204);
+			assert.strictEqual(yield* Queue.take(ticks), 10_000);
+		}).pipe(Effect.provide(NodeServices.layer)),
+	);
+
+	it.effect('wakes the reconciler for a Linear delivery signed with its secret, and refuses one with a missing or wrong signature', () =>
+		Effect.gen(function* () {
+			const { config, reconciler, url, ticks } = yield* probedServer;
+			const linearUrl = new URL(linearWebhookPath, url).href;
+			const body = JSON.stringify(linearIssueMoved);
+
+			yield* Effect.forkScoped(reconciler.run);
+			assert.strictEqual(yield* Queue.take(ticks), 0);
+
+			yield* TestClock.adjust('5 seconds');
+			assert.deepStrictEqual(
+				[
+					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved, null),
+					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved, signLinearDelivery(Redacted.make('not-the-secret'), body)),
+					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved, signLinearDelivery(config.linearWebhookSecret, JSON.stringify({ ...linearIssueMoved, action: 'remove' }))),
+					yield* postLinearDelivery(linearUrl, config.webhookSecret, linearIssueMoved),
+					yield* postDelivery(linearUrl, config.webhookSecret, { event: 'issue_comment', payload: linearIssueMoved }),
+				],
+				[401, 401, 401, 401, 401],
+			);
+
+			yield* TestClock.adjust('5 seconds');
+			assert.strictEqual(yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved), 200);
 			assert.strictEqual(yield* Queue.take(ticks), 10_000);
 		}).pipe(Effect.provide(NodeServices.layer)),
 	);

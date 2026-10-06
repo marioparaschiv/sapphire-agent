@@ -1,11 +1,24 @@
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Context, Effect, Layer, Schema, Stream, SubscriptionRef } from 'effect';
+import { Context, Effect, Layer, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
-import { serveFixture } from './fixture-server.ts';
+import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
 import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
 // Linear-shaped payloads and applies mutations, so later reads see them.
+
+export const signLinearDelivery = hmacHex;
+
+// POSTs the payload as Linear sends a webhook delivery, signed with `secret` unless `signature` overrides the
+// Linear-Signature header (null leaves it out), and returns the HTTP status.
+export const postLinearDelivery = (url: string, secret: Redacted.Redacted<string>, payload: unknown, signature?: string | null) =>
+	Effect.promise(() => {
+		const body = JSON.stringify(payload);
+		const header = signature === undefined ? signLinearDelivery(secret, body) : signature;
+
+		return postJson(url, body, { 'linear-event': 'Issue', 'linear-delivery': randomUUID(), ...(header === null ? {} : { 'linear-signature': header }) });
+	});
 
 export type FixtureIssue = {
 	readonly id: string;

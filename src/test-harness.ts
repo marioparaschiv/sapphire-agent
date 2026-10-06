@@ -90,6 +90,18 @@ export const deliveries = {
 	}),
 };
 
+// An Issue update webhook payload, as Linear sends one when an issue moves to another state.
+export const linearIssueMoved = {
+	action: 'update',
+	type: 'Issue',
+	createdAt: '2026-10-06T07:00:00.000Z',
+	data: { id: 'issue-test-12', identifier: 'TEST-12', state: { name: 'Ready For Agent' } },
+	updatedFrom: { stateId: 'state-backlog' },
+	url: 'https://linear.app/test/issue/TEST-12',
+	webhookTimestamp: 1_791_270_000_000,
+	webhookId: 'webhook-1',
+};
+
 export type StartedRunSeed = EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string; readonly replyTo?: string | null };
 
 export type Harness = {
