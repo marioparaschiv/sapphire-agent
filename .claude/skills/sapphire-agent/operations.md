@@ -14,6 +14,7 @@ How the live service is installed, started, paused, drained, deployed, inspected
 - Apply config or code changes with `systemctl --user restart sapphire-agent` (only when the user asks). Nothing is lost: the next tick observes the world again and the journal carries the rest.
 - Unit `PATH` is `~/.local/bin:/usr/local/bin:/usr/bin:/bin`; `git`, `gh`, `ffmpeg` (voice notes) and `claude` (the main chat, `~/.local/bin/claude`) must be there; the chat's Claude runs `sapphire` (`~/.local/bin/sapphire`). After changing the unit, reinstall it (`sh scripts/install.sh`) so systemd picks it up.
 - The Telegram bot must be in Threaded mode with users not allowed to create threads (BotFather, Bot Settings, Threaded mode, "Disallow users to create new threads"), so General stays the main chat and only the service makes topics.
+- `~/.claude/settings.json` should set `promptCacheTtl: "1h"`: without it the main chat gets no keep-alive and project topics no cache reminder (a warning at startup). At startup the service checks that the chat's `claude -p` runs with the model, output style, permission mode, plugins and MCP servers of the user's settings, and says in the main chat what differs.
 - The transcription model lives in `$HERDR_PLUGIN_STATE_DIR/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (`config.md`); the service does not start without it. `gh` must be logged in as the user, for reads. Every comment is posted by the GitHub App (below), with no `gh` login.
 - The service listens for the App's and Linear's webhook deliveries on `127.0.0.1:<bot.app.webhookPort>` (default 3790) while it runs (Webhook and Linear webhook below).
 - A command agent runs `node` through `scripts/ctl.sh` in its tab's shell, so `node` (24) must be on the user's shell `PATH`.
@@ -41,13 +42,13 @@ Editing a file in `systemd/` does nothing until you rerun the install (or copy i
 
 ## GitHub App
 
-Mentions of the bot reach the service as the GitHub App's webhook deliveries, and every comment the service writes (summaries, flags reviews, thread replies and resolves, command replies, `ctl.sh reply`, failure notices) is posted by the App and shows as `<slug>[bot]`. It is created and installed by hand:
+Mentions of the bot reach the service as the GitHub App's webhook deliveries, and everything the service writes on GitHub (thread replies and resolves, `Addressed your concerns inline.`, thumbs-ups on mentions) is the App's and shows as `<slug>[bot]`. It is created and installed by hand:
 
 1. Create it under GitHub Settings, Developer settings, GitHub Apps. Permissions: Issues read and write, Pull requests read and write, Contents read, Metadata read. Events: Issue comment, Pull request review, Pull request review comment. Webhook URL `https://webhook.marioparaschiv.com/github`, with a webhook secret.
 2. Save the webhook secret as `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` and generate a private key in its settings and save it as `$HERDR_PLUGIN_CONFIG_DIR/app.pem`, both with `chmod 600`. Put the App ID and both paths in `bot.app` (`config.md`).
-3. Install it (its public page, Install) on every repo the bot should answer on. Only installed repos send deliveries, and a reply on a repo without the installation fails with `GitHub answered HTTP 404 to GET /repos/<owner>/<name>/installation: Not Found`.
+3. Install it (its public page, Install) on every repo the bot should answer on. Only installed repos send deliveries, and a write on a repo without the installation fails with `GitHub answered HTTP 404 to GET /repos/<owner>/<name>/installation: Not Found`.
 
-For each comment the service signs a JWT with the key (RS256, `iat` 60 s back, `exp` 10 min after that), looks up the repo's installation, and mints an installation token, which it reuses until 5 min before it expires (tokens last an hour); `gh` gets it as `GH_TOKEN`. Tokens live in memory only, so a restart mints new ones. Reads stay on the user's `gh` login.
+For each write the service signs a JWT with the key (RS256, `iat` 60 s back, `exp` 10 min after that), looks up the repo's installation, and mints an installation token, which it reuses until 5 min before it expires (tokens last an hour); `gh` gets it as `GH_TOKEN`. Tokens live in memory only, so a restart mints new ones. Reads stay on the user's `gh` login.
 
 ## Webhook
 
@@ -94,22 +95,26 @@ The command agent's tools, and the operator's:
 ```sh
 sh ~/sapphire-agent/scripts/ctl.sh pause                       # touch $STATE/paused
 sh ~/sapphire-agent/scripts/ctl.sh resume                      # rm $STATE/paused
-sh ~/sapphire-agent/scripts/ctl.sh status                      # paused?, service state, runs, commands, requests
+sh ~/sapphire-agent/scripts/ctl.sh status                      # paused?, service state, projects, runs, commands, requests
 sh ~/sapphire-agent/scripts/ctl.sh start HL-14                 # move the epic to its ready state
 sh ~/sapphire-agent/scripts/ctl.sh start HL-14 --reply-to main  # the same; its run asks Claude session main its questions
 sh ~/sapphire-agent/scripts/ctl.sh stop HL-12                  # end its run, close its tab
 sh ~/sapphire-agent/scripts/ctl.sh send HL-9 Use the existing helper.
 sh ~/sapphire-agent/scripts/ctl.sh follow-up HL-9 Rename it --threads PRRT_kwDO1 --threads PRRT_kwDO2
 sh ~/sapphire-agent/scripts/ctl.sh session HL-9               # the Claude session name of its run, e.g. hl-9
-sh ~/sapphire-agent/scripts/ctl.sh reply <comment-url> Done.   # as the App; only on a command's comment
+sh ~/sapphire-agent/scripts/ctl.sh reply <comment-url> Done.   # in the user's chat; only for a command's comment
 sh ~/sapphire-agent/scripts/ctl.sh done CMD-3                  # the command agent is done
+sh ~/sapphire-agent/scripts/ctl.sh project list                # the projects
+sh ~/sapphire-agent/scripts/ctl.sh project add Unbound ~/unbound --label-repos ~/unbound-app
+sh ~/sapphire-agent/scripts/ctl.sh project edit Unbound --repo ~/unbound
+sh ~/sapphire-agent/scripts/ctl.sh project remove Telecord     # refused while a run of the team is in flight
 sapphire hook claude < payload.json                           # what the Claude hooks run; any subcommand works as `sapphire`
 ```
 
 - Pause stops new runs only: no ready epic and no follow-up is claimed. Claimed runs still start, runs in flight are still watched, results are still posted, worktrees still cleaned up, and mentions still run commands (so `resume` can come in as one).
 - `pause`, `resume` and every recorded request write `$STATE/wake`, which makes the service tick at once; the log prints `dispatching paused` / `dispatching resumed`.
-- `status`, `start` to `done` run `node src/ctl.ts`, which reads `$HERDR_PLUGIN_CONFIG_DIR/config.json`, the Linear key, the App's private key and webhook secret, and the journal (env defaults as in the unit). `stop`, `send`, `follow-up`, `reply` and `done` only record a request the service acts on (`rules.md`); `start` records a `start` request (with `--reply-to` the session its run asks, otherwise none), then moves the epic in Linear itself. `session` prints the run's session name, which `SendMessage` from any Claude session on the machine reaches. A refusal (no such run, a `start` for an epic whose run is not over, not a command's comment) goes to stderr with exit code 1.
-- `status` prints one line per run (identifier, status, job, the epic's Linear state, claim time, tab, session, the session it replies to if any, worktree, or `no runs`), then the commands queued or in flight (or `no commands`), then the requests waiting.
+- `status`, `start` to `done` and `project` run `node src/ctl.ts`, which reads `$HERDR_PLUGIN_CONFIG_DIR/config.json`, the Linear key, the App's private key and webhook secret, and the journal (env defaults as in the unit). `stop`, `send`, `follow-up`, `reply`, `done` and `project add`, `edit` and `remove` only record a request the service acts on (`rules.md`); `project add` and `edit` first check the team in Linear, that the repo is a git repo with a GitHub `origin` and that the label repos directory exists; `start` records a `start` request (with `--reply-to` the session its run asks, otherwise none), then moves the epic in Linear itself. `session` prints the run's session name, which `SendMessage` from any Claude session on the machine reaches. `start` refuses an epic whose team is not a project. A refusal (no such run, a `start` for an epic whose run is not over, not a command's comment, a project that exists already or has a run in flight) goes to stderr with exit code 1.
+- `status` prints one line per project (team, repo, label repos directory, or `no projects`), one line per run (identifier, status, job, the epic's Linear state, claim time, tab, session, the session it replies to if any, worktree, or `no runs`), then the commands queued or in flight (or `no commands`), then the requests waiting.
 - `pause`, `resume` and `status` are also herdr plugin actions.
 
 ## Drain
@@ -128,7 +133,7 @@ The old dispatcher kept its runs in `$STATE/claims.json`; the reconciler does no
 
 1. Pause the old dispatcher: `sh scripts/ctl.sh pause`.
 2. Wait until nothing is in flight: `claims.json` holds no claim in `claimed`, `running`, `awaitingInput` or `stale` (the old `ctl.sh status` prints it).
-3. Deploy: add `"allowedUsers": ["marioparaschiv"]` to `bot` in the config (`config.md`), update `~/sapphire-agent` to the new code and restart the service (only when the user asks).
+3. Deploy: add `"allowedUsers": ["marioparaschiv"]` to `bot` in the config (`config.md`), update `~/sapphire-agent` to the new code and restart the service (only when the user asks). The first start imports config `teams` as projects; delete `teams` from the config afterwards.
 4. Delete `$STATE/claims.json`. The next restart starts the reconciler.
 5. `sh scripts/ctl.sh resume`.
 
@@ -136,11 +141,12 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 
 ## Logs and state
 
-- Logs: `journalctl --user -u sapphire-agent -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations.
-- Logs of a command carry `task=CMD-<n>`. Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`. The delivery scan logs `redelivered webhook delivery <id> (<guid>), which failed with HTTP <status>`, `cannot redeliver webhook delivery ...` and `cannot scan for failed webhook deliveries; trying again next scan`.
+- Logs: `journalctl --user -u sapphire-agent -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations. At startup: `imported the projects <names> from config.json's teams` once, and a warning while `teams` is still in the config.
+- Logs of a command carry `task=CMD-<n>`, of the notices rule `task=notices` (`cannot post notice <key> in <thread>; posting it in the main chat`, `cannot post notice <key>; trying again next tick`). Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`. The delivery scan logs `redelivered webhook delivery <id> (<guid>), which failed with HTTP <status>`, `cannot redeliver webhook delivery ...` and `cannot scan for failed webhook deliveries; trying again next scan`.
 - State dir: `~/.local/state/herdr/plugins/sapphire-agent/` holds `journal.db`, `paused`, `wake` and `events.sock` (agent events, while the service runs).
-- Run tabs: herdr workspace `<team name>`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>` in their repo's team workspace, or `agents` for a repo of no team.
-- Worktrees: `~/.herdr/worktrees/<repo>/<branch-slug>`. Removed with the local branch once the epic is Shipped or its PR is merged or closed, unless they hold unpushed work (then the epic gets a comment with the path).
+- Run tabs: herdr workspace `<team name>`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>` in their repo's project workspace, or `agents` for a repo of no project.
+- Worktrees: `~/.herdr/worktrees/<repo>/<branch-slug>`. Removed with the local branch once the epic is Shipped or its PR is merged or closed, unless they hold unpushed work (then a `keptWorktree` notice names the path).
+- Handoff docs: `$TMPDIR/sapphire-agent-handoff-<IDENTIFIER>-<session or agent id>.md` (`/tmp` by default).
 
 ## Troubleshooting
 
@@ -151,21 +157,22 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 | Service crash-loops with `... still holds N claims of the old dispatcher` | Finish the cutover (above). |
 | Service crash-loops with a `ServeError` | Another process holds `bot.app.webhookPort` (`ss -ltnp 'sport = :3790'`). |
 | `team X has no workflow state "..."; skipping it until it does` | Add the named states to that team in Linear (or change `states` in config). Picked up on the next tick, but the log line is printed only once per process and nothing is logged when it recovers. |
-| `team X not found in Linear` | The config key must equal the team's exact name. |
-| Epic in Ready never picked up | Paused? No sub-issues (logged once)? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` run or one whose agent is still working? Team skipped? |
+| `team X not found in Linear` | The project's team must be the team's exact name (`sapphire project list`; remove it and add it again under the right name). |
+| Epic in Ready never picked up | Paused? Created less than `dispatchSettleSeconds` ago? Has `agent-stuck`? `maxInFlight` used up, maybe by an `awaitingInput` run or one whose agent is still working? Its team not a project (`sapphire project list`), or skipped? |
 | A mention of the bot does nothing | `ctl.sh status`: is the command `queued` behind another? Is its author in `bot.allowedUsers` (an `ignored` command shows only in the journal)? Is `@<bot.login>` a whole word? Is the App installed on the repo? Its Recent Deliveries show each delivery's response: 401 means the webhook secret differs from `bot.app.webhookSecretFile`, 502 that nginx could not reach the service, 500 a journal error (`cannot handle the delivery` in the log). The service redelivers failed deliveries itself within `deliveryScanSeconds` once fixed, for up to 3 days. |
 | A follow-up was asked for but does not start | `ctl.sh status` shows the request waiting: paused? `maxInFlight` used up? Epic has `agent-stuck`, or is not in To Review? Its run must be `ended`; it waits while one is in flight. A request whose epic has no run is dropped. |
-| A command failed | The App replied on the issue or PR with the reason and the pane tail. Mention the bot again. |
-| A command's reply never shows up | Look for `cannot reply on` or `GitHub answered HTTP` in the log. A 404 for `/installation` means the App is not installed on that repo (GitHub App above). |
-| Epic has `agent-stuck` | Read the epic comment. Retry rules: `rules.md`. |
+| A command failed | A `commandFailed` notice in the chat says why, with the pane tail. Mention the bot again. |
+| A command's reply or any notice never shows up | Look for `cannot post notice` in the log. A notice goes to the epic's topic, else the project's, else the main chat (`rules.md`, Notices). |
+| A project has no topic | The project topics rule opens it on the next tick, also after the user deleted it; look for `opened the chat thread of project <team>` or the rule's failures in the log. |
+| Epic has `agent-stuck` | Read its notice in the epic's topic (or the project's topic, or the main chat). Retry rules: `rules.md`. |
 | PR is up but the epic stays in Implementing | The agent wrote no result file yet. It is flagged `awaitingInput` once quiet. |
-| `failed; retrying next tick` repeating for an epic | A Transient failure (network, timeout, rate limit, git lock). It retries every tick without double-posting, and comments once after `flagTransientAfterSeconds`. |
-| `permanentFailure` comment mentioning HTTP 422 from a review | A flag's `line` is outside the diff. Post the findings by hand and move the epic to To Review, which ends the run. |
+| `failed; retrying next tick` repeating for an epic | A Transient failure (network, timeout, rate limit, git lock). It retries every tick without double-posting, and sends a notice once after `flagTransientAfterSeconds`. |
+| A `handoffMissing` notice | The agent did not write the handoff doc after `/handoff`; its session is not cleared. Look at the tab; `/handoff` again by hand, or let it go on. |
 
 Retry quick reference:
 
 - `startFailed`: fix the cause, remove `agent-stuck`.
-- `awaitingInput`: reply to the question comment on the epic (typed into the pane), or answer in its tab. To start over (also for `error` and `stale`): move the epic to Ready and remove the label.
+- `awaitingInput`: answer in the epic's topic (typed into the agent), or in its tab. To start over (also for `error` and `stale`): move the epic to Ready and remove the label.
 
 ## Don't
 

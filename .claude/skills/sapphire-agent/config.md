@@ -1,6 +1,6 @@
 # Config
 
-Where configuration lives, every field with its default (`src/config.ts`), the team-to-repo mapping, the API key, the Linear webhook secret, the GitHub App key and webhook secret files, the Telegram bot token, api_id and api_hash files, the env vars, and how startup reports problems.
+Where configuration lives, every field with its default (`src/config.ts`), the projects (team-to-repo mapping), the API key, the Linear webhook secret, the GitHub App key and webhook secret files, the Telegram bot token, api_id and api_hash files, the env vars, and how startup reports problems.
 
 ## Files
 
@@ -15,6 +15,8 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 | Telegram session (mtcute) | `$HERDR_PLUGIN_STATE_DIR/telegram.session` |
 | Claude config (trust) | `~/.claude.json` (override `CLAUDE_CONFIG_PATH`) |
 | Claude session transcripts | `~/.claude/projects` (override the directory holding `projects` with `CLAUDE_CONFIG_DIR`) |
+| Claude settings | `~/.claude/settings.json` (same override): the chat settings check and `promptCacheTtl` (`architecture.md`, The chat) |
+| Projects | The journal's `projects` table, managed with `sapphire project` (below) |
 | Journal | `$HERDR_PLUGIN_STATE_DIR/journal.db` |
 | Pause file | `$HERDR_PLUGIN_STATE_DIR/paused` |
 
@@ -28,36 +30,51 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | --- | --- | --- |
 | `pollSeconds` | `600` | int, min 5. The backstop poll: the tick interval when nothing else wakes the reconciler. Linear webhook deliveries, herdr events and `ctl.sh` requests trigger extra ticks in between. Monitoring timers (`awaitingInputAfterSeconds`, `staleAfterSeconds` and the others) are checked only on ticks, so they can fire up to this long late, and an epic's transient failure is retried only on the next tick. |
 | `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` runs, follow-ups included. Command runs do not count (`rules.md`). |
-| `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle`, `done`, `blocked`) time without a result file before the epic is flagged `awaitingInput`. The old name `stuckAfterSeconds` is still read as this key. |
+| `dispatchSettleSeconds` | `60` | int, min 0. How old a ready epic must be (from its `createdAt`) before it is claimed, since an epic is often created before its sub-issues. |
+| `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle`, `done`, `blocked`) time without a result file before the pane tail is asked in the epic's topic, or the epic is flagged `awaitingInput` when it has none. The old name `stuckAfterSeconds` is still read as this key. |
 | `startTimeoutSeconds` | `300` | int, min 60. Time from the claim (or the process start, if later) for Claude to be confirmed started before the start fails. Covers waiting behind other starts, the fetch and herdr's 30 s start wait. |
-| `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane output has not changed for this long: nudge once. Also how long a run waits quietly for a reply to its message before its question is asked on Linear. |
+| `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane output has not changed for this long: nudge once. Also how long a run waits quietly for a reply to its message before its question is asked in its epic's topic. |
 | `nudgeGraceSeconds` | `600` | int, min 60. Output still unchanged this long after the nudge: run `stale`, epic flagged. |
 | `maxRunSeconds` | `5400` | int, min 600. Wall-clock cap from the claim; the epic is flagged once, in any in-flight state. The run keeps going. |
-| `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` comment is posted once (see `failure-policy.md`). |
+| `handoffAtTokens` | `250000` | int, min 10000. Context (input, cache read and cache creation tokens of the latest assistant entry) at which a run's agent, or one of its subagents, hands its work to a fresh session (`rules.md`, Handoff). |
+| `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` notice is sent once (see `failure-policy.md`). |
 | `deliveryScanSeconds` | `300` | int, min 60. How often the App's failed webhook deliveries are looked for and redelivered, besides once at startup (`rules.md`, Missed deliveries). |
 | `worktreesDirectory` | `~/.herdr/worktrees` | `~` expanded. |
-| `workspaceLabel` | `agents` | herdr workspace for command tabs whose repo belongs to no team. Run tabs go in a workspace named after their team. |
+| `workspaceLabel` | `agents` | herdr workspace for command tabs whose repo belongs to no project. Run tabs go in a workspace named after their project's team. |
 | `states.*` | see below | Exact Linear workflow state names. |
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; the label group name is this without the trailing `:`. |
 | `linearWebhookSecretFile` | required | `~` expanded. The signing secret of the Linear webhook, see below. |
-| `teams` | required | At least one team. |
+| `teams` | optional | Imported into the journal's projects once, at a start when it has none; a warning is logged at every start while the key stays. Delete it after the import and use `sapphire project` (below). |
 | `bot.login` | required | The mention handle. A comment mentioning `@<login>` starts a command run (`rules.md`). |
-| `bot.app.id` | required | int, above 0. The GitHub App's ID, from its settings page. The App posts every comment of the bot: command replies and failure notices. |
+| `bot.app.id` | required | int, above 0. The GitHub App's ID, from its settings page. The App makes every GitHub write: thread replies and resolves, `Addressed your concerns inline.`, thumbs-ups on mentions. |
 | `bot.app.privateKeyFile` | required | `~` expanded. The App's private key (`.pem`, as GitHub downloads it), see below. |
 | `bot.app.webhookSecretFile` | required | `~` expanded. The App's webhook secret, see below. |
 | `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://webhook.marioparaschiv.com/github` to it, and Tailscale Funnel forwards `/linear` (`operations.md`). 0 picks a free port (tests). |
 | `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
 | `telegram.botTokenFile` | required | `~` expanded. The Telegram bot's token, see below. |
 | `telegram.apiIdFile`, `telegram.apiHashFile` | required | `~` expanded. The `api_id` and `api_hash` of a Telegram app (my.telegram.org), which the bot logs in over MTProto with, see below. |
-| `telegram.allowedUserIds` | required | Non-empty array of numeric Telegram user ids. Only their messages in their private chat with the bot reach the service; anyone else's are dropped and logged (`architecture.md`, The chat). Epic topics and notifications go to the private chat of the first id. |
+| `telegram.allowedUserIds` | required | Non-empty array of numeric Telegram user ids. Only their messages in their private chat with the bot reach the service; anyone else's are dropped and logged (`architecture.md`, The chat). Epic and project topics and notices go to the private chat of the first id. |
 | `telegram.transcriptionModelDirectory` | `$HERDR_PLUGIN_STATE_DIR/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | `~` expanded. The sherpa-onnx Parakeet TDT 0.6B v3 int8 model voice notes are transcribed with: `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`. Transcription also needs `ffmpeg` on `PATH`. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
-## Teams
+## Projects
 
-Keyed by exact Linear team name:
+A project is a Linear team sapphire-agent watches, by its exact name, and the local clone its epics run in. Projects live in the journal (`projects`), not the config; the CLI checks each change (the team exists in Linear, the repo is a directory with a GitHub `origin`, the label repos directory exists) and records a request the service applies on its next tick (`rules.md`, Requests):
+
+```sh
+sapphire project list
+sapphire project add Unbound ~/unbound --label-repos ~/unbound-app
+sapphire project edit Unbound --repo ~/unbound
+sapphire project remove Telecord   # refused while a run of the team is in flight; deletes its topic
+```
+
+- `repo`: local clone used by default. Must have a GitHub `origin`.
+- `--label-repos` (`labelReposDirectory`): parent dir for repo-labelled epics. `repo:loader-ios` runs in `<dir>/loader-ios`.
+- Paths accept `~` and are stored absolute. Repo label rules: `linear-api.md`.
+
+While the table is empty, the service imports config `teams` at startup (`imported the projects <names> from config.json's teams`), keyed by exact Linear team name:
 
 ```json
 "teams": {
@@ -66,11 +83,7 @@ Keyed by exact Linear team name:
 }
 ```
 
-- `repo`: local clone used by default. Must have a GitHub `origin`.
-- `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
-- Paths accept `~`. Repo label rules: `linear-api.md`.
-
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Sapphire Agent (this repo, `~/sapphire-agent`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
+Live config today: `teams` Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Sapphire Agent (this repo, `~/sapphire-agent`, so the plugin works on itself), imported as projects on the first start that has none, then to be deleted; `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
 
 ```json
 "bot": {
@@ -142,7 +155,7 @@ Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl
 
 ## Startup errors
 
-Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero. The CLI (`ctl.ts`) checks the same minus the Telegram files and the model, which only the service uses:
+Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero. The CLI (`ctl.ts`) checks the same minus the Telegram files and the model, which only the service uses. The chat settings check and `promptCacheTtl` are read after startup and only warn (`architecture.md`, The chat):
 
 ```
 StartupError: cannot start, fix these and restart:

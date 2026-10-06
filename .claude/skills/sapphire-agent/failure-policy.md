@@ -4,7 +4,7 @@ How every external call is bounded and classified, how a failure is retried, and
 
 ## Two kinds of failure
 
-Every call to herdr, git, gh and Linear fails with one of two tagged errors (`call-policy.ts`):
+Every call to herdr, git, gh, Linear, the GitHub App API and Telegram fails with one of two tagged errors (`call-policy.ts`):
 
 | Error | Means | Examples |
 | --- | --- | --- |
@@ -22,29 +22,29 @@ Per service:
 
 `withCallPolicy(timeout)` wraps every external call:
 
-- A timeout per attempt: herdr and git 30 s, gh and Linear 20 s. A timeout is a Transient.
+- A timeout per attempt: herdr and git 30 s, gh, the GitHub App API, Linear and Telegram 20 s. A timeout is a Transient.
 - Up to 3 retries of a Transient, after 1 s, 2 s and 4 s, each jittered, or after exactly `retryAfter` when the error has one.
 - A Permanent is not retried. Once the retries are used up, the Transient fails the call and the epic's work for this tick; the next tick tries again.
 
 Each method is one unit under the policy, so a retried write repeats its marker or state check before writing again.
 
-herdr writes that have nothing to check first (creating a workspace or tab, starting Claude, typing into a pane) use the write policy instead: the timeout covers all attempts together and a timeout is never retried, because the timed-out attempt may still have landed. Transient failures before the timeout (herdr's server not running) are still retried. The next tick observes what actually happened.
+herdr writes that have nothing to check first (creating a workspace or tab, starting Claude, typing into a pane) use the write policy instead: the timeout covers all attempts together and a timeout is never retried, because the timed-out attempt may still have landed. Transient failures before the timeout (herdr's server not running) are still retried. The next tick observes what actually happened. Telegram writes (sends, drafts, topics) use it too; a send that matters is keyed, so a repeat is ignored.
 
 ## At the epic level
 
 The planner runs every rule's work per epic in its own fiber, so one bad epic never blocks the others, and handles what the work fails with:
 
 - Success clears the epic's transient streak.
-- Transient: logged as `failed; retrying next tick`. The journal records when the epic's streak started. Once the streak is older than `flagTransientAfterSeconds` (default 600), a `transientFailure` comment is posted once per streak (no label: it keeps retrying by itself). No Linear comment before that.
+- Transient: logged as `failed; retrying next tick`. The journal records when the epic's streak started. Once the streak is older than `flagTransientAfterSeconds` (default 600), a `transientFailure` notice is sent once per streak (no label: it keeps retrying by itself). No notice before that.
 - Transient with `retryAfter` (a rate limit): the rest of the tick is skipped (`rate limited; skipping <rule> and the rules after it until the next tick`). The call policy already waited Retry-After between its attempts.
-- Permanent: logged as `failed`, and the epic is flagged once with `permanentFailure` and `agent-stuck`, keyed by the run's claim time (or, without a run, by the streak start).
+- Permanent: logged as `failed`, and the epic is flagged once with `agent-stuck` and a `permanentFailure` notice, keyed by the run's claim time (or, without a run, by the streak start).
 - Anything else (a defect, a journal error) is logged with the rule and epic and dropped; the next tick tries again. Interruption (shutdown) still stops the tick.
 
-Work that is not about an epic (`TaskWork`: a command, a request whose epic has no run) has nothing to flag, so the planner only logs its failures with its `task`. A command handles its own: a Transient failure is logged and tried again next tick, a Permanent one while starting fails the command with a reply on GitHub (`rules.md`). A webhook delivery whose command cannot be recorded is answered 500 and logged, so it stays failed in the App's delivery log until the delivery scan redelivers it. The scan's own GitHub calls go through the call policy; a scan that still fails, or a redelivery GitHub refuses, is logged and tried again on the next scan, without moving the delivery mark (`rules.md`, Missed deliveries).
+Work that is not about an epic (`TaskWork`: a command, a request whose epic has no run, the project requests, a chat thread, the notices) has nothing to flag, so the planner only logs its failures with its `task`, and the next tick tries again. A command handles its own: a Transient failure is logged and tried again next tick, a Permanent one while starting fails the command with a `commandFailed` notice (`rules.md`). The notices rule sends a notice its thread refuses to the main chat instead (`rules.md`, Notices). A webhook delivery whose command cannot be recorded is answered 500 and logged, so it stays failed in the App's delivery log until the delivery scan redelivers it. The scan's own GitHub calls go through the call policy; a scan that still fails, or a redelivery GitHub refuses, is logged and tried again on the next scan, without moving the delivery mark (`rules.md`, Missed deliveries).
 
 A failure while observing or planning skips that tick or that rule and is logged; nothing is written.
 
-Rule code may handle a failure itself where that is the behaviour: a Permanent while starting becomes `startFailed`, a refused reply becomes a `replyFailed` notice, a failed nudge is only logged (the stale flag follows anyway), and a repo whose worktrees cannot be listed only skips its orphan worktrees.
+Rule code may handle a failure itself where that is the behaviour: a Permanent while starting becomes `startFailed`, a `send` or handoff prompt herdr refuses is only logged, a failed nudge is only logged (the stale flag follows anyway), and a repo whose worktrees cannot be listed only skips its orphan worktrees.
 
 ## Concurrency
 
