@@ -42,6 +42,8 @@ export type FakeGitHubControls = {
 	readonly botComments: (repo: string, number: number) => ReadonlyArray<string>;
 	readonly reviews: (repo: string, number: number) => ReadonlyArray<FakeReview>;
 	readonly thread: (threadId: string) => FakeThread;
+	// Whether the GitHub App gave the comment with this node id a thumbs-up.
+	readonly hasThumbsUp: (commentId: string) => boolean;
 	// Counted from this call: the nth write after it is applied, then fails, as if the process died before recording it.
 	readonly crashAfterWrite: (nth: number, error: CallError) => void;
 	// Writes received so far, failed ones included.
@@ -62,6 +64,7 @@ const makeFake = (appLogin: string) => {
 	const pullRequests: Array<PullRequestRecord> = [];
 	const threads = new Map<string, ThreadRecord>();
 	const crashes = new Map<number, CallError>();
+	const thumbsUps = new Set<string>();
 	let writes = 0;
 	let ids = 0;
 
@@ -175,6 +178,19 @@ const makeFake = (appLogin: string) => {
 					),
 				),
 			),
+
+		addThumbsUp: (repo, subjectId) =>
+			Effect.suspend(() => {
+				const comments = pullRequests
+					.filter((candidate) => candidate.repo === repo)
+					.flatMap((candidate) => [...candidate.comments, ...candidate.threadIds.flatMap((id) => threads.get(id)?.comments ?? [])]);
+
+				if (!comments.some(({ id }) => id === subjectId)) {
+					return Effect.fail(new Permanent({ message: `GraphQL: Could not resolve to a node with the global id of '${subjectId}'. (addReaction)` }));
+				}
+
+				return thumbsUps.has(subjectId) ? Effect.void : write(() => thumbsUps.add(subjectId));
+			}),
 	});
 
 	const controls: FakeGitHubControls = {
@@ -227,6 +243,8 @@ const makeFake = (appLogin: string) => {
 
 			return { id: threadId, isResolved: found.isResolved, comments: [...found.comments] };
 		},
+
+		hasThumbsUp: (commentId) => thumbsUps.has(commentId),
 
 		crashAfterWrite: (nth, error) => {
 			crashes.set(writes + nth, error);

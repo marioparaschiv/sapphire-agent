@@ -69,6 +69,8 @@ export class GitHub extends Context.Service<
 		readonly resolveThread: (repo: string, threadId: string) => Effect.Effect<void, CallError>;
 		// A conversation comment on the issue or PR.
 		readonly postComment: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
+		// A thumbs-up on a comment or review, by its node id. Adding one it already has changes nothing.
+		readonly addThumbsUp: (repo: string, subjectId: string) => Effect.Effect<void, CallError>;
 	}
 >()('sapphire-agent/GitHub') {
 	static readonly layer = Layer.effect(
@@ -233,6 +235,18 @@ export class GitHub extends Context.Service<
 				postComment: (repo, number, { marker, body }) =>
 					Effect.flatMap(app.installationToken(repo), (token) =>
 						unlessMarked(conversationBodies(repo, number), marker, `${repo}#${number} comments`, post(`repos/${repo}/issues/${number}/comments`, { body }, token)),
+					),
+
+				addThumbsUp: (repo, subjectId) =>
+					Effect.flatMap(app.installationToken(repo), (token) =>
+						graphql(
+							Schema.Struct({ addReaction: Schema.Struct({ reaction: Schema.Struct({ content: Schema.Literal('THUMBS_UP') }) }) }),
+							`mutation AddThumbsUp($subjectId: ID!) {
+								addReaction(input: { subjectId: $subjectId, content: THUMBS_UP }) { reaction { content } }
+							}`,
+							{ subjectId },
+							token,
+						).pipe(Effect.asVoid, withPolicy),
 					),
 			});
 		}),

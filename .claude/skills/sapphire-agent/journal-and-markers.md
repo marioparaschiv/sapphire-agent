@@ -24,7 +24,7 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 | `repo`, `branch` | The local clone and the epic's branch, so cleanup finds the worktree and PR even once the epic is gone from the ready list. |
 | `worktree_path` | Set once the worktree exists. |
 | `tab_id`, `pane_id` | Set once the tab exists. Both must match herdr for the tab to count as the run's. |
-| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded, or adopted from an untracked tab Claude already ran in, whose session is unknown. |
+| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded, or adopted from an untracked tab Claude already ran in, whose session is unknown. A session the agent starts in the run's pane later (resume, clear, fork) replaces the id (`rules.md`, Agent events). |
 | `reply_to` | The Claude session that asked for the run (`ctl.sh start --reply-to`), taken from the newest `start` request at the claim. The prompt names it and the agent asks it its questions. Null: the agent asks on Linear. |
 | `claimed_at` | Claim time. Keys most markers, starts the wall-clock cap and the start timeout. |
 | `started_at` | When Claude was confirmed started. Decides the run's states and whether it ever started. |
@@ -53,10 +53,11 @@ One row per comment that mentioned the bot, written by the webhook server before
 | `session` | As for runs, named `cmd-<id>`; made when its turn comes. |
 | `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
 | `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
+| `acknowledged_at` | When the comment got the App's thumbs-up; null until then, and for ignored commands. Adding a reaction twice changes nothing on GitHub, so a crash before this is written only repeats the call. |
 
 ### `requests`
 
-What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id). The CLI only appends rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
+What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id), plus the `session` changes the agent event server saw (by epic identifier). Both only append rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
 ### `delivery_mark`
 

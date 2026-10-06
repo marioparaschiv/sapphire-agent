@@ -9,7 +9,9 @@ export HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 state_dir="$HERDR_PLUGIN_STATE_DIR"
-cli="$(dirname "$0")/../src/ctl.ts"
+# Installed on PATH as `sapphire`, a symlink to this file.
+src="$(dirname "$(readlink -f "$0")")/../src"
+cli="$src/ctl.ts"
 
 case "${1:-}" in
 	pause)
@@ -29,8 +31,12 @@ case "${1:-}" in
 	start | stop | send | follow-up | session | reply | done)
 		exec node "$cli" "$@"
 		;;
+	hook)
+		shift
+		exec node "$src/agent-hook.ts" "$@"
+		;;
 	*)
-		echo "usage: ctl.sh pause|resume|status|start|stop|send|follow-up|session|reply|done" >&2
+		echo "usage: ctl.sh pause|resume|status|start|stop|send|follow-up|session|reply|done|hook" >&2
 		exit 2
 		;;
 esac

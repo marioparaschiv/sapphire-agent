@@ -30,7 +30,7 @@ Rules run in this order (`rules.ts`):
 
 | # | Rule | Pausable | Does |
 | --- | --- | --- | --- |
-| 1 | requests | no | Acts on `ctl.sh stop` (ends the run, closes its tab) and `ctl.sh send` (types into the agent); drops follow-up requests whose epic has no run. |
+| 1 | requests | no | Acts on `ctl.sh stop` (ends the run, closes its tab), `ctl.sh send` (types into the agent) and `session` (a run's agent started another session); drops follow-up requests whose epic has no run. |
 | 2 | cleanup | no | Ends what is left of finished runs (tab, worktree, branch, row), and resolves owned tabs and worktrees that no run tracks. |
 | 3 | results | no | Ends runs whose epic moved on; reads, stores and posts result files; moves the epic to To Review. |
 | 4 | monitoring | no | Tracks agent status and pane output; flags awaitingInput, stale, error and the wall-clock cap; nudges; asks on Linear what a run asked by message and got no reply to; relays replies. |
@@ -50,6 +50,10 @@ Each rule details: `rules.md`.
 Mentions are not a rule: they arrive as GitHub App webhook deliveries. `WebhookServer` (`webhook-server.ts`) is an Effect-managed `node:http` server (`NodeHttpServer`) on `127.0.0.1:<bot.app.webhookPort>`, built as a layer beside the reconciler, so it listens while the service runs and closes on shutdown. nginx terminates TLS at `https://webhook.marioparaschiv.com/github` and forwards to it (`operations.md`). Linear's deliveries come to the same server on `/linear`, exposed by Tailscale Funnel (`operations.md`); each one's `Linear-Signature` is checked against the Linear webhook secret, and a signed one only wakes the reconciler, which reads Linear itself, so a duplicate or out-of-order delivery is harmless. On every other path, each GitHub delivery's signature is checked against the webhook secret, its payload is decoded with `Schema`, and a comment that mentions the bot is recorded as a command by `makeRecordMention` (`mentions.ts`, which holds the mention and allowed-user decisions), before the delivery is answered. See `rules.md` (Mentions).
 
 GitHub does not redeliver a failed delivery by itself. `MissedDeliveries` (`missed-deliveries.ts`), forked by `main.ts` beside the reconciler, scans the App's delivery log at startup and every `deliveryScanSeconds` and asks GitHub to redeliver each event whose newest attempt failed, back to 10 minutes before the journal's delivery mark and at most 3 days. The redeliveries arrive at the webhook server like any other. A failed scan is logged and tried again on the next. See `rules.md` (Missed deliveries).
+
+## The agent event server
+
+`AgentEventServer` (`agent-event-server.ts`), a layer beside the webhook server, listens on `$STATE/events.sock` for the session events the coding agents' hooks send through `sapphire hook <agent>`. It decodes each with that agent's adapter, wakes the reconciler for a run's or command's pane, and records a `session` request when a run's agent started another session. See `rules.md` (Agent events).
 
 ## Services
 
@@ -73,6 +77,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Planner` | `planner.ts` | Runs the rules under the failure policy. | Real. |
 | `Reconciler` | `reconciler.ts` | The tick loop and `wake`. | Real. |
 | `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; Linear deliveries in, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
+| `AgentEventServer` | `agent-event-server.ts` | Agent session events in from `sapphire hook`, `session` requests recorded, the reconciler woken; exposes the socket `path`. | Real, on a socket in the harness's dir (`h.hook` runs the real `ctl.sh hook`). |
 | `MissedDeliveries` | `missed-deliveries.ts` | `scan` redelivers failed webhook deliveries back to 10 minutes before the delivery mark; `run` scans at once and every `deliveryScanSeconds`. | Real, against `GitHubAppFixture` (`makeHarness` builds it; `h.scanDeliveries` runs one scan). |
 
 Rules are not services: each rule module exports an Effect that builds its `Rule` (`name`, `pausable`, `plan`) from the services it needs, and `Planner.layer` takes them all. Shared run actions (flag an epic, close a run's tab, end a run, nudge an agent) live in `run-actions.ts`.
@@ -81,7 +86,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 
 1. `AppConfig.layer` reads env, the config file, the API key, the Linear webhook secret and the GitHub App's private key and webhook secret and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$HERDR_PLUGIN_STATE_DIR/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
-3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), and the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url> and Linear ones on <url>/linear`). A failure there, e.g. the port taken, stops startup.
+3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url> and Linear ones on <url>/linear`), and so does the agent event server (`listening for agent events on <path>`). A failure there, e.g. the port taken, stops startup.
 4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event, one that calls it whenever the state directory's `wake` file is written and one that runs the delivery scan, and runs the reconciler.
 
 `NodeRuntime.runMain` runs it; SIGTERM interrupts the tick cleanly. Logs go to stdout with `epic` and `rule` annotations.
@@ -102,9 +107,13 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/monitoring.ts` | Monitoring rule. |
 | `src/results.ts` | Results rule and posting a result to the PR. |
 | `src/follow-up.ts` | Follow-up rule. |
-| `src/requests.ts` | Requests rule (stop, send). |
+| `src/requests.ts` | Requests rule (stop, send, session). |
 | `src/mentions.ts` | Records a comment that mentions the bot as a command (`makeRecordMention`). |
 | `src/webhook-server.ts` | Webhook server: signature checks, payload schemas, recording mentions, waking the reconciler for mentions and Linear deliveries. |
+| `src/agent-hook.ts` | `sapphire hook <agent>`: sends a hook payload to the agent event server. |
+| `src/agent-event-server.ts` | Agent event server and the adapter per agent. |
+| `src/agent-event.ts` | `AgentEvent`, agent-neutral, and the adapter type. |
+| `src/claude-hooks.ts` | Claude Code's hook payloads to `AgentEvent`. |
 | `src/commands.ts` | Commands rule, the command agent's lockdown. |
 | `src/cleanup.ts` | Cleanup rule and orphans. |
 | `src/run-actions.ts` | Flag, close a run's tab, end a run, nudge. |

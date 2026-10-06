@@ -31,8 +31,10 @@ export const Session = Schema.Struct({ id: Schema.String, name: Schema.String })
 
 export type Session = typeof Session.Type;
 
+export const sessionName = (identifier: string) => identifier.toLowerCase();
+
 // Made when a run or command is claimed and kept from then on, so a start after a crash resumes into the same session.
-export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: identifier.toLowerCase() }));
+export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: sessionName(identifier) }));
 
 // Only what cannot be observed from Linear, herdr, git or GitHub. Times are epoch milliseconds.
 export const Run = Schema.Struct({
@@ -102,6 +104,8 @@ export const NewCommand = Schema.Struct({
 	agentStatusSince: Schema.NullOr(Millis),
 	nudgedAt: Schema.NullOr(Millis),
 	tailHash: Schema.NullOr(Schema.String),
+	// When the comment got the App's thumbs-up, which tells its author the bot has it before any reply.
+	acknowledgedAt: Schema.NullOr(Millis),
 });
 
 export type NewCommand = typeof NewCommand.Type;
@@ -113,8 +117,8 @@ export type Command = typeof Command.Type;
 
 export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${command.id}`;
 
-// What `scripts/ctl.sh` asks the reconciler to do on its next tick. The CLI only appends these, so it never races a
-// rule over a row; the rule that acts on one deletes it.
+// What `scripts/ctl.sh` and the agent event server ask the reconciler to do on its next tick. Both only append these,
+// so they never race a rule over a row; the rule that acts on one deletes it.
 export const Request = Schema.Union([
 	Schema.TaggedStruct('start', { identifier: Schema.String, replyTo: Schema.NullOr(Schema.String) }),
 	Schema.TaggedStruct('stop', { identifier: Schema.String }),
@@ -122,6 +126,8 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('follow-up', { identifier: Schema.String, instruction: Schema.NullOr(Schema.String), threadIds: Schema.Array(Schema.String) }),
 	Schema.TaggedStruct('reply', { commandId: Schema.Int, body: Schema.String }),
 	Schema.TaggedStruct('done', { commandId: Schema.Int }),
+	// Recorded by the agent event server when a run's agent starts another session in its pane.
+	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
 ]);
 
 export type Request = typeof Request.Type;
@@ -235,6 +241,11 @@ const migrations = SqliteMigrator.layer({
 			const sql = yield* SqlClient.SqlClient;
 
 			yield* sql`ALTER TABLE runs ADD COLUMN reply_to TEXT`;
+		}),
+		'0006_add_command_acknowledged_at': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE commands ADD COLUMN acknowledged_at INTEGER`;
 		}),
 	}),
 });
