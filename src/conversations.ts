@@ -90,8 +90,10 @@ export const answerChatMessages = Effect.scoped(
 
 				const sessionId = randomUUID();
 				const cwd = Option.match(parent, { onNone: () => topic?.project.repo ?? homedir(), onSome: (session) => session.cwd });
+				// A session continues in the directory it ran in, also once its project moved to another repo.
+				const project = topic === null ? null : { ...topic.project, repo: cwd };
 				const text = claude
-					.turn({ sessionId, parent: Option.map(parent, (session) => session.sessionId), prompt: message.text, cwd, project: topic?.project ?? null })
+					.turn({ sessionId, parent: Option.map(parent, (session) => session.sessionId), prompt: message.text, cwd, project })
 					.pipe(
 						Stream.orElseIfEmpty(() => Stream.make(emptyAnswer)),
 						Stream.catch((error) => Effect.logWarning('the chat turn failed', error).pipe(Effect.as(`\n\n${error.message}`), Stream.fromEffect)),

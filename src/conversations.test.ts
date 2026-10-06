@@ -332,8 +332,6 @@ describe('project topics', () => {
 			const chat = yield* makeChat((run) => ({ text: [`answer to ${run.prompt}`] }));
 			const { project, topicId } = yield* withProject(chat);
 			const first = yield* chat.start;
-
-
 			const question = chat.telegram.write({ from: chat.user, text: 'what is in this repo?', topicId });
 
 			yield* chat.awaitRecorded(1);
@@ -356,7 +354,7 @@ describe('project topics', () => {
 				{ text: answer.text, replyTo: answer.replyToMessageId, cwd: asked.cwd, parent: parentOf(asked), prompt: flagValue(asked.args, '--append-system-prompt') },
 				{ text: 'answer to what is in this repo?', replyTo: question, cwd: project.repo, parent: null, prompt: prompts.projectChat(project) },
 			);
-			assert.deepStrictEqual([followUp.cwd, parentOf(followUp)], [project.repo, sessionOf(asked)]);
+			assert.deepStrictEqual([followUp.cwd, parentOf(followUp), flagValue(followUp.args, '--append-system-prompt')], [project.repo, sessionOf(asked), prompts.projectChat(project)]);
 			assert.deepStrictEqual([fresh.cwd, parentOf(fresh)], [moved, null]);
 			assert.deepStrictEqual(
 				inTopic(chat, topicId).map(({ text }) => text),
