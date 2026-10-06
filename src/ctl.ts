@@ -27,6 +27,8 @@ const describeRun = (run: Run, epicState: string) =>
 const describeProject = ({ team, repo, labelReposDirectory }: Project) =>
 	`project ${team}: ${repo}${labelReposDirectory === null ? '' : `, label repos in ${labelReposDirectory}`}`;
 
+const describeProjects = (projects: ReadonlyArray<Project>) => (projects.length === 0 ? 'no projects' : projects.map(describeProject).join('\n'));
+
 const describeCommand = (command: CommandRow) => `${commandIdentifier(command)} ${command.status}, @${command.author} in ${command.url}`;
 
 const describeRequest = (request: Request) => {
@@ -72,6 +74,11 @@ const record = (request: Request, said: string) =>
 const runOf = (identifier: string) =>
 	Journal.use((journal) => journal.listRuns).pipe(Effect.map((runs) => Option.fromUndefinedOr(runs.find((run) => run.identifier === identifier.toUpperCase()))));
 
+const projectOf = (team: string) =>
+	Journal.use((journal) => journal.listProjects).pipe(Effect.map((projects) => Option.fromUndefinedOr(projects.find((project) => project.team === team))));
+
+const linearTeam = (name: string) => Linear.use((linear) => linear.teams([name])).pipe(Effect.map((teams) => Option.fromUndefinedOr(teams.find((team) => team.name === name))));
+
 const epicArgument = Argument.String('epic').pipe(
 	Argument.withDescription('An epic identifier, e.g. HL-12'),
 	Argument.map((identifier) => identifier.toUpperCase()),
@@ -92,9 +99,8 @@ const status = Command.make('status', {}, () =>
 				: Option.match(Option.fromUndefinedOr(epics.success.find((epic) => epic.id === run.epicId)), { onNone: () => 'epic gone', onSome: (epic) => `epic in ${epic.state.name}` });
 		const commands = (yield* journal.listCommands).filter((command) => command.status === 'queued' || command.status === 'claimed' || command.status === 'running');
 		const requests = yield* journal.listRequests;
-		const projects = yield* journal.listProjects;
 
-		yield* Console.log(projects.length === 0 ? 'no projects' : projects.map(describeProject).join('\n'));
+		yield* Console.log(describeProjects(yield* journal.listProjects));
 		yield* Console.log(runs.length === 0 ? 'no runs' : runs.map((run) => describeRun(run, stateOf(run))).join('\n'));
 
 		if (epics._tag === 'Failure') {
@@ -134,11 +140,11 @@ const start = Command.make(
 				return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
 			}
 
-			if (!(yield* Journal.use((journal) => journal.listProjects)).some((project) => project.team === epic.team.name)) {
+			if (Option.isNone(yield* projectOf(epic.team.name))) {
 				return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
 			}
 
-			const ready = Option.fromUndefinedOr((yield* linear.teams([epic.team.name]))[0]?.states.nodes.find((state) => state.name === config.states.ready));
+			const ready = Option.flatMap(yield* linearTeam(epic.team.name), (team) => Option.fromUndefinedOr(team.states.nodes.find((state) => state.name === config.states.ready)));
 
 			if (Option.isNone(ready)) {
 				return yield* new Refused({ message: `team ${epic.team.name} has no workflow state ${config.states.ready}` });
@@ -249,15 +255,10 @@ const done = Command.make('done', { command: Argument.String('command').pipe(Arg
 	}),
 ).pipe(Command.withDescription('Says the command is done, so its tab is closed'));
 
-const projectOf = (team: string) =>
-	Journal.use((journal) => journal.listProjects).pipe(Effect.map((projects) => Option.fromUndefinedOr(projects.find((project) => project.team === team))));
-
 const teamArgument = Argument.String('team').pipe(Argument.withDescription('The exact name of a Linear team, e.g. Unbound'));
 
 // `~` expanded, relative to where the CLI runs.
 const absolutePath = (path: string) => resolve(toPath(path));
-
-const linearTeam = (name: string) => Linear.use((linear) => linear.teams([name])).pipe(Effect.map((teams) => Option.fromUndefinedOr(teams.find((team) => team.name === name))));
 
 const checkDirectory = (path: string) =>
 	Effect.gen(function* () {
@@ -283,9 +284,7 @@ const checkProject = ({ repo, labelReposDirectory }: ProjectSettings) =>
 
 const projectList = Command.make('list', {}, () =>
 	Effect.gen(function* () {
-		const projects = yield* Journal.use((journal) => journal.listProjects);
-
-		yield* Console.log(projects.length === 0 ? 'no projects' : projects.map(describeProject).join('\n'));
+		yield* Console.log(describeProjects(yield* Journal.use((journal) => journal.listProjects)));
 	}),
 ).pipe(Command.withDescription('The projects: each Linear team sapphire-agent watches and the local clone its epics run in'));
 
