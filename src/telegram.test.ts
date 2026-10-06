@@ -129,7 +129,7 @@ describe('telegramChat', () => {
 
 			telegram.write({ from: allowed, voice: new Uint8Array() });
 			yield* telegram.awaitTypings(1);
-			// Typing again at 4.5 s; the transcription fails at 5 s.
+			// Typing again at 4 s; the transcription fails at 5 s.
 			yield* ticks(4);
 			yield* telegram.awaitSent(1);
 

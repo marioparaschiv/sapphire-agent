@@ -142,7 +142,7 @@ export const telegramChat = Layer.effect(
 
 			return Effect.raceFirst(
 				bot.download(voiceFileId).pipe(Effect.flatMap((audio) => transcriber.transcribe(audio))),
-				keepShowing(Effect.succeed(''), () => showTyping(message.chatId, message.topicId)),
+				Effect.forever(showTyping(message.chatId, message.topicId).pipe(Effect.andThen(Effect.sleep(refreshAfter)))),
 			).pipe(
 				Effect.matchEffect({
 					onFailure: (error) =>
