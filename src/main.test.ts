@@ -14,10 +14,11 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ pollSeconds: 2, maxInflight: 3, teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'app.pem'), appPem, { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), 'lin_wh_test', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-bot-token'), '123456:telegram-secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-api-id'), '1234567', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-api-hash'), 'telegram-api-hash', { mode: 0o600 });
@@ -51,10 +52,11 @@ describe('main', () => {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const directory = yield* fs.makeTempDirectoryScoped();
 
-			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }));
+			yield* fs.writeFileString(join(directory, 'config.json'), JSON.stringify({ teams: { Unbound: { repo: join(directory, 'unbound') } }, linearWebhookSecretFile: join(directory, 'linear-webhook-secret'), bot: { login: 'orchestratorbot', app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') }, allowedUsers: ['marioparaschiv'] }, telegram: { botTokenFile: join(directory, 'telegram-bot-token'), apiIdFile: join(directory, 'telegram-api-id'), apiHashFile: join(directory, 'telegram-api-hash'), allowedUserIds: [7_100_200_300] } }));
 			yield* fs.writeFileString(join(directory, 'linear-key'), 'lin_api_secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'app.pem'), appPem, { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
+			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), 'lin_wh_test', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-bot-token'), '123456:telegram-secret', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-api-id'), '1234567', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'telegram-api-hash'), 'telegram-api-hash', { mode: 0o600 });

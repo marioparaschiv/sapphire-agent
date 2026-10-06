@@ -120,6 +120,7 @@ describe('Journal', () => {
 				agentStatusSince: null,
 				nudgedAt: null,
 				tailHash: null,
+				acknowledgedAt: null,
 			};
 
 			yield* journal.addCommand(mention);

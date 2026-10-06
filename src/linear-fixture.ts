@@ -1,11 +1,24 @@
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Context, Effect, Layer, Schema, Stream, SubscriptionRef } from 'effect';
+import { Context, Effect, Layer, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
-import { serveFixture } from './fixture-server.ts';
+import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
 import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
 // Linear-shaped payloads and applies mutations, so later reads see them.
+
+export const signLinearDelivery = hmacHex;
+
+// POSTs the payload as Linear sends a webhook delivery, signed with `secret` unless `signature` overrides the
+// Linear-Signature header (null leaves it out), and returns the HTTP status.
+export const postLinearDelivery = (url: string, secret: Redacted.Redacted<string>, payload: unknown, signature?: string | null) =>
+	Effect.promise(() => {
+		const body = JSON.stringify(payload);
+		const header = signature === undefined ? signLinearDelivery(secret, body) : signature;
+
+		return postJson(url, body, { 'linear-event': 'Issue', 'linear-delivery': randomUUID(), ...(header === null ? {} : { 'linear-signature': header }) });
+	});
 
 export type FixtureIssue = {
 	readonly id: string;
@@ -16,6 +29,7 @@ export type FixtureIssue = {
 	readonly parentId: string | null;
 	labelIds: ReadonlyArray<string>;
 	readonly sortOrder: number;
+	readonly createdAt: string;
 };
 
 // A label without teamId is a workspace label; parentName is its label group.
@@ -39,6 +53,8 @@ export type EpicSeed = {
 	readonly state?: string;
 	readonly labelIds?: ReadonlyArray<string>;
 	readonly sortOrder?: number;
+	// Defaults to a day before TestClock's epoch, so the epic is past any dispatch settle time.
+	readonly createdAt?: string;
 	// Sub-issues to create in the team's first state; defaults to 2.
 	readonly subIssues?: number;
 };
@@ -220,6 +236,7 @@ const make = Effect.gen(function* () {
 			url: `https://linear.app/marioparaschiv/issue/${found.identifier}/${slug}`,
 			branchName: `mario/${found.identifier.toLowerCase()}-${slug}`,
 			sortOrder: found.sortOrder,
+			createdAt: found.createdAt,
 			team: { id: owner.id, name: owner.name },
 			state: { id: state.id, name: state.name },
 			labels: {
@@ -423,7 +440,7 @@ const make = Effect.gen(function* () {
 
 	const fixture: LinearFixtureShape = {
 		url: `${url}/graphql`,
-		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, subIssues = 2 }) => {
+		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, createdAt = new Date(-86_400_000).toISOString(), subIssues = 2 }) => {
 			const owner = team(teamId);
 			const epic: FixtureIssue = {
 				id: `issue-${identifier.toLowerCase()}`,
@@ -434,6 +451,7 @@ const make = Effect.gen(function* () {
 				parentId: null,
 				labelIds,
 				sortOrder,
+				createdAt,
 			};
 
 			issues.set(epic.id, epic);
@@ -448,6 +466,7 @@ const make = Effect.gen(function* () {
 					parentId: epic.id,
 					labelIds: [],
 					sortOrder: index,
+					createdAt,
 				};
 
 				issues.set(child.id, child);

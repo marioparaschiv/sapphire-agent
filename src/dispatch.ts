@@ -96,7 +96,7 @@ const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identi
 	);
 
 // Claims ready epics up to maxInFlight, in Linear's order: a top-level epic in the ready state of a resolved team,
-// without the stuck label, and with no run or only one that is over.
+// without the stuck label, created at least dispatchSettleSeconds ago, and with no run or only one that is over.
 export const dispatchRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
@@ -118,11 +118,13 @@ export const dispatchRule = Effect.gen(function* () {
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
 			const requests = yield* journal.listRequests;
+			const now = yield* Clock.currentTimeMillis;
 			const candidates = observation.ready
 				.filter((epic) => {
 					const run = runs.find((candidate) => candidate.epicId === epic.id);
+					const settled = now - Date.parse(epic.createdAt) >= config.dispatchSettleSeconds * 1000;
 
-					return observation.teams.has(epic.team.id) && Option.isNone(stuckLabelOf(config, epic)) && (!run || isOver(run));
+					return observation.teams.has(epic.team.id) && Option.isNone(stuckLabelOf(config, epic)) && settled && (!run || isOver(run));
 				})
 				.toSorted((a, b) => a.sortOrder - b.sortOrder);
 			let inFlight = runs.filter(isInFlight).length;

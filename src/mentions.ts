@@ -41,6 +41,7 @@ export const makeRecordMention = Effect.gen(function* () {
 				agentStatusSince: null,
 				nudgedAt: null,
 				tailHash: null,
+				acknowledgedAt: null,
 			});
 			yield* Effect.log(allowed ? `queued the mention by @${comment.author} in ${comment.url}` : `ignored the mention by @${comment.author} in ${comment.url}: not an allowed user`);
 

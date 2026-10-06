@@ -16,6 +16,7 @@ const load = (
 		key?: SecretFile;
 		appKey?: SecretFile;
 		webhookSecret?: SecretFile;
+		linearWebhookSecret?: SecretFile;
 		telegramToken?: SecretFile | null;
 		telegramApiId?: SecretFile | null;
 		telegramApiHash?: SecretFile | null;
@@ -41,6 +42,10 @@ const load = (
 
 		if (files.webhookSecret) {
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), files.webhookSecret.text, { mode: files.webhookSecret.mode }).pipe(Effect.orDie);
+		}
+
+		if (files.linearWebhookSecret) {
+			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), files.linearWebhookSecret.text, { mode: files.linearWebhookSecret.mode }).pipe(Effect.orDie);
 		}
 
 		const telegramFiles = {
@@ -69,6 +74,8 @@ const key = { text: 'lin_api_secret\n', mode: 0o600 };
 const appPem = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey;
 const appKey = { text: appPem, mode: 0o600 };
 const webhookSecret = { text: 'whsec_test\n', mode: 0o600 };
+const linearWebhookSecret = { text: 'lin_wh_test\n', mode: 0o600 };
+const linearWebhookSecretFile = (directory: string) => join(directory, 'linear-webhook-secret');
 const bot = (directory: string) => ({
 	login: 'orchestratorbot',
 	app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') },
@@ -80,14 +87,14 @@ const telegram = (directory: string) => ({
 	apiHashFile: join(directory, 'telegram-api-hash'),
 	allowedUserIds: [7_100_200_300],
 });
-const unbound = (directory: string) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: bot(directory), telegram: telegram(directory) });
+const unbound = (directory: string) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) });
 
 describe('loadAppConfig', () => {
 	it.effect('fills defaults, expands ~ and reads the old stuckAfterSeconds key', () =>
 		Effect.gen(function* () {
-			const config = yield* load(fullEnv, { config: (directory) => ({ stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret });
+			const config = yield* load(fullEnv, { config: (directory) => ({ stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret });
 
-			assert.strictEqual(config.pollSeconds, 30);
+			assert.strictEqual(config.pollSeconds, 600);
 			assert.strictEqual(config.maxInFlight, 1);
 			assert.strictEqual(config.awaitingInputAfterSeconds, 240);
 			assert.strictEqual(config.flagTransientAfterSeconds, 600);
@@ -107,6 +114,7 @@ describe('loadAppConfig', () => {
 			assert.strictEqual(Redacted.value(config.linearApiKey), 'lin_api_secret');
 			assert.strictEqual(config.appPrivateKey.export({ type: 'pkcs8', format: 'pem' }), appPem);
 			assert.strictEqual(Redacted.value(config.webhookSecret), 'whsec_test');
+			assert.strictEqual(Redacted.value(config.linearWebhookSecret), 'lin_wh_test');
 			assert.deepStrictEqual(config.telegram.allowedUserIds, [7_100_200_300]);
 			assert.strictEqual(Redacted.value(config.telegramBotToken), '123456:telegram-secret');
 			assert.strictEqual(config.telegramApiId, 1_234_567);
@@ -117,7 +125,7 @@ describe('loadAppConfig', () => {
 	it.effect('reports an env error and two config file errors together in one message', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const error = yield* load(env, { config: (directory) => ({ pollSeconds: 2, maxInflight: 3, ...unbound(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
+			const error = yield* load(env, { config: (directory) => ({ pollSeconds: 2, maxInflight: 3, ...unbound(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.lengthOf(error.problems, 3);
 			assert.match(error.message, /HERDR_BIN_PATH/);
@@ -138,24 +146,25 @@ describe('loadAppConfig', () => {
 
 	it.effect('rejects an empty team map, an unknown team key, a missing or incomplete bot, no allowed users and invalid JSON', () =>
 		Effect.gen(function* () {
-			const noTeams = yield* load(fullEnv, { config: (directory) => ({ teams: {}, bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const unknownKey = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const noBot = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, telegram: telegram(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const noBotLogin = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: { ...bot(directory), login: '' }, telegram: telegram(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
+			const noTeams = yield* load(fullEnv, { config: (directory) => ({ teams: {}, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const unknownKey = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const noBot = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const noBotLogin = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), login: '' }, telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 			const noAllowedUsers = yield* load(fullEnv, {
 				config: (directory) => {
 					const { allowedUsers: _, ...withoutAllowedUsers } = bot(directory);
 
-					return { teams: { Unbound: { repo: '~/unbound' } }, bot: withoutAllowedUsers, telegram: telegram(directory) };
+					return { teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: withoutAllowedUsers, telegram: telegram(directory) };
 				},
 				key,
 				appKey,
 				webhookSecret,
+				linearWebhookSecret,
 			}).pipe(Effect.flip);
-			const emptyAllowedUsers = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: { ...bot(directory), allowedUsers: [] }, telegram: telegram(directory) }), key, appKey, webhookSecret }).pipe(
+			const emptyAllowedUsers = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), allowedUsers: [] }, telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
 				Effect.flip,
 			);
-			const badJson = yield* load(fullEnv, { config: () => '{ "teams": ', key, appKey, webhookSecret }).pipe(Effect.flip);
+			const badJson = yield* load(fullEnv, { config: () => '{ "teams": ', key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.match(noTeams.message, /no teams configured/);
 			assert.match(unknownKey.message, /repos/);
@@ -169,7 +178,7 @@ describe('loadAppConfig', () => {
 
 	it.effect('reports a missing API key file', () =>
 		Effect.gen(function* () {
-			const error = yield* load(fullEnv, { config: unbound, appKey, webhookSecret }).pipe(Effect.flip);
+			const error = yield* load(fullEnv, { config: unbound, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.lengthOf(error.problems, 1);
 			assert.match(error.problems[0], /no Linear API key: create .*linear-key with mode 600/);
@@ -179,12 +188,12 @@ describe('loadAppConfig', () => {
 	it.effect('reports a missing bot.app field and a missing, loose or unparsable App key file together with the other problems', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const noAppId = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), bot: { ...bot(directory), app: { privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') } } }), key, appKey, webhookSecret }).pipe(
+			const noAppId = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), bot: { ...bot(directory), app: { privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret') } } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
 				Effect.flip,
 			);
-			const noKeyFile = yield* load(env, { config: unbound, key, webhookSecret }).pipe(Effect.flip);
-			const looseKeyFile = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o640 }, appKey: { text: appPem, mode: 0o640 }, webhookSecret }).pipe(Effect.flip);
-			const notAKey = yield* load(fullEnv, { config: unbound, key, appKey: { text: 'not a key', mode: 0o600 }, webhookSecret }).pipe(Effect.flip);
+			const noKeyFile = yield* load(env, { config: unbound, key, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const looseKeyFile = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o640 }, appKey: { text: appPem, mode: 0o640 }, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const notAKey = yield* load(fullEnv, { config: unbound, key, appKey: { text: 'not a key', mode: 0o600 }, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.deepStrictEqual(noAppId.problems.map((problem) => problem.replace(/^\S+config\.json /, '')), ['bot.app.id: Missing key']);
 			assert.lengthOf(noKeyFile.problems, 2);
@@ -199,9 +208,9 @@ describe('loadAppConfig', () => {
 
 	it.effect('reports a missing or loose webhook secret file together with the other problems', () =>
 		Effect.gen(function* () {
-			const missing = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o644 }, appKey }).pipe(Effect.flip);
-			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: 'whsec_test', mode: 0o604 } }).pipe(Effect.flip);
-			const empty = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: '\n', mode: 0o600 } }).pipe(Effect.flip);
+			const missing = yield* load(fullEnv, { config: unbound, key: { text: 'secret', mode: 0o644 }, appKey, linearWebhookSecret }).pipe(Effect.flip);
+			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: 'whsec_test', mode: 0o604 }, linearWebhookSecret }).pipe(Effect.flip);
+			const empty = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret: { text: '\n', mode: 0o600 }, linearWebhookSecret }).pipe(Effect.flip);
 
 			assert.lengthOf(missing.problems, 2);
 			assert.match(missing.problems[0], /linear-key is readable by other users/);
@@ -212,16 +221,29 @@ describe('loadAppConfig', () => {
 		}),
 	);
 
+	it.effect('reports a missing linearWebhookSecretFile, and a missing or loose Linear webhook secret file', () =>
+		Effect.gen(function* () {
+			const noField = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret }).pipe(Effect.flip);
+			const missing = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret }).pipe(Effect.flip);
+			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret: { text: 'lin_wh_test', mode: 0o640 } }).pipe(Effect.flip);
+
+			assert.deepStrictEqual(noField.problems.map((problem) => problem.replace(/^\S+config\.json /, '')), ['linearWebhookSecretFile: Missing key']);
+			assert.deepStrictEqual(missing.problems.map((problem) => problem.replace(/ \S+\//, ' ')), ['no Linear webhook secret: create linear-webhook-secret with mode 600']);
+			assert.lengthOf(loose.problems, 1);
+			assert.match(loose.problems[0], /linear-webhook-secret is readable by other users; run chmod 600 \S+\/linear-webhook-secret$/);
+		}),
+	);
+
 	it.effect('reports a missing, loose or unparsable Telegram bot token, api_id or api_hash file and an empty or missing allowlist together with the other problems', () =>
 		Effect.gen(function* () {
 			const { HERDR_BIN_PATH: _, ...env } = fullEnv;
-			const emptyAllowlist = yield* load(env, { config: (directory) => ({ ...unbound(directory), telegram: { ...telegram(directory), allowedUserIds: [] } }), key, appKey, webhookSecret }).pipe(
+			const emptyAllowlist = yield* load(env, { config: (directory) => ({ ...unbound(directory), telegram: { ...telegram(directory), allowedUserIds: [] } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(
 				Effect.flip,
 			);
-			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret, telegramToken: { text: '123456:telegram-secret', mode: 0o644 } }).pipe(Effect.flip);
-			const noAllowlist = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), telegram: { botTokenFile: join(directory, 'telegram-bot-token') } }), key, appKey, webhookSecret }).pipe(Effect.flip);
-			const missingFiles = yield* load(env, { config: unbound, key, appKey, webhookSecret, telegramToken: null, telegramApiId: null, telegramApiHash: null }).pipe(Effect.flip);
-			const badApiId = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret, telegramApiId: { text: 'abc', mode: 0o600 }, telegramApiHash: { text: 'hash', mode: 0o640 } }).pipe(Effect.flip);
+			const loose = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret, telegramToken: { text: '123456:telegram-secret', mode: 0o644 } }).pipe(Effect.flip);
+			const noAllowlist = yield* load(fullEnv, { config: (directory) => ({ ...unbound(directory), telegram: { botTokenFile: join(directory, 'telegram-bot-token') } }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const missingFiles = yield* load(env, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret, telegramToken: null, telegramApiId: null, telegramApiHash: null }).pipe(Effect.flip);
+			const badApiId = yield* load(fullEnv, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret, telegramApiId: { text: 'abc', mode: 0o600 }, telegramApiHash: { text: 'hash', mode: 0o640 } }).pipe(Effect.flip);
 
 			assert.lengthOf(emptyAllowlist.problems, 2);
 			assert.match(emptyAllowlist.problems[0], /HERDR_BIN_PATH/);

@@ -23,8 +23,12 @@ const Team = Schema.Struct({
 });
 
 const Settings = Schema.Struct({
-	pollSeconds: IntAtLeast(5, 30),
+	// The backstop poll. Linear webhook deliveries and herdr events trigger the ticks that matter in between.
+	pollSeconds: IntAtLeast(5, 600),
 	maxInFlight: IntAtLeast(1, 1),
+	// How old an epic must be before it is claimed. An epic is often created before its sub-issues, and a claim in
+	// between starts it inline.
+	dispatchSettleSeconds: IntAtLeast(0, 60),
 	// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
 	awaitingInputAfterSeconds: IntAtLeast(30, 180),
 	// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
@@ -53,6 +57,8 @@ const Settings = Schema.Struct({
 		stuck: Name('agent-stuck'),
 		repoPrefix: Name('repo:'),
 	}).pipe(withDefault({})),
+	// The secret Linear signs its webhook deliveries with. They reach the server on 127.0.0.1:bot.app.webhookPort at /linear.
+	linearWebhookSecretFile: Path,
 	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
 	// The handle whose @mention by one of `allowedUsers` starts a command run. The GitHub App answers, and its webhook
 	// deliveries bring the mentions to a server on 127.0.0.1:webhookPort.
@@ -115,6 +121,7 @@ export type AppConfigShape = Settings & {
 	readonly linearApiKey: Redacted.Redacted<string>;
 	readonly appPrivateKey: KeyObject;
 	readonly webhookSecret: Redacted.Redacted<string>;
+	readonly linearWebhookSecret: Redacted.Redacted<string>;
 	readonly telegramBotToken: Redacted.Redacted<string>;
 	readonly telegramApiId: number;
 	readonly telegramApiHash: Redacted.Redacted<string>;
@@ -176,6 +183,8 @@ const readApiKey = (path: string) => readSecretFile(path, 'Linear API key').pipe
 
 const readWebhookSecret = (path: string) => readSecretFile(path, 'GitHub App webhook secret').pipe(Effect.map(Redacted.make));
 
+const readLinearWebhookSecret = (path: string) => readSecretFile(path, 'Linear webhook secret').pipe(Effect.map(Redacted.make));
+
 const readTelegramBotToken = (path: string) => readSecretFile(path, 'Telegram bot token').pipe(Effect.map(Redacted.make));
 
 const readTelegramApiId = (path: string) =>
@@ -198,14 +207,15 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
-// Reads env, the config file, the Linear API key, the GitHub App's private key and webhook secret and the Telegram bot
-// token, api_id and api_hash, and reports every problem in one StartupError.
+// Reads env, the config file, the Linear API key and webhook secret, the GitHub App's private key and webhook secret
+// and the Telegram bot token, api_id and api_hash, and reports every problem in one StartupError.
 export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
 	const linearApiKey = yield* readWhen(envResults.linearKeyFile, readApiKey);
 	const appPrivateKey = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.privateKeyFile), readPrivateKey);
 	const webhookSecret = yield* readWhen(Result.map(settings, ({ bot }) => bot.app.webhookSecretFile), readWebhookSecret);
+	const linearWebhookSecret = yield* readWhen(Result.map(settings, ({ linearWebhookSecretFile }) => linearWebhookSecretFile), readLinearWebhookSecret);
 	const telegramBotToken = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.botTokenFile), readTelegramBotToken);
 	const telegramApiId = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiIdFile), readTelegramApiId);
 	const telegramApiHash = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiHashFile), readTelegramApiHash);
@@ -215,11 +225,12 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		...problemsOf(linearApiKey),
 		...problemsOf(appPrivateKey),
 		...problemsOf(webhookSecret),
+		...problemsOf(linearWebhookSecret),
 		...problemsOf(telegramBotToken),
 		...problemsOf(telegramApiId),
 		...problemsOf(telegramApiHash),
 	];
-	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret, telegramBotToken, telegramApiId, telegramApiHash });
+	const loaded = Result.all({ env: Result.all(envResults), settings, linearApiKey, appPrivateKey, webhookSecret, linearWebhookSecret, telegramBotToken, telegramApiId, telegramApiHash });
 
 	if (problems.length > 0 || Result.isFailure(loaded)) {
 		return yield* new StartupError({ problems });
@@ -231,6 +242,7 @@ export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSyst
 		linearApiKey: loaded.success.linearApiKey,
 		appPrivateKey: loaded.success.appPrivateKey,
 		webhookSecret: loaded.success.webhookSecret,
+		linearWebhookSecret: loaded.success.linearWebhookSecret,
 		telegramBotToken: loaded.success.telegramBotToken,
 		telegramApiId: loaded.success.telegramApiId,
 		telegramApiHash: loaded.success.telegramApiHash,
@@ -247,6 +259,7 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 			...Schema.decodeUnknownSync(Settings)({
 				teams: { Test: { repo: join(directory, 'repo') } },
 				worktreesDirectory: join(directory, 'worktrees'),
+				linearWebhookSecretFile: join(directory, 'linear-webhook-secret'),
 				bot: {
 					login: 'orchestratorbot',
 					app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
@@ -272,6 +285,7 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 			linearApiKey: Redacted.make('lin_api_test'),
 			appPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
 			webhookSecret: Redacted.make('test-webhook-secret'),
+			linearWebhookSecret: Redacted.make('test-linear-webhook-secret'),
 			telegramBotToken: Redacted.make('123456:test-bot-token'),
 			telegramApiId: 1_234_567,
 			telegramApiHash: Redacted.make('test-api-hash'),

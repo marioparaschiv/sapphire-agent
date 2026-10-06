@@ -39,6 +39,8 @@ const describeRequest = (request: Request) => {
 			return `reply for CMD-${request.commandId}`;
 		case 'done':
 			return `done CMD-${request.commandId}`;
+		case 'session':
+			return `session ${request.identifier}: ${request.sessionId}`;
 	}
 };
 

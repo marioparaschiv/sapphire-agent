@@ -127,7 +127,7 @@ describe('commands', () => {
 			const { number } = h.github.addPullRequest({ repo: h.githubRepo, branch, author: 'marioparaschiv' });
 
 			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, h.github.addComment(h.githubRepo, number, '@orchestratorbot what is running?')));
-			h.crashAtJournalWrite(2);
+			h.crashAtJournalWrite(3);
 			yield* h.tick;
 
 			const [claimed] = yield* h.commands;
@@ -143,6 +143,53 @@ describe('commands', () => {
 
 			assert.deepStrictEqual([command.status, command.session], ['running', claimed.session]);
 			assert.deepStrictEqual(h.herdr.starts().map(({ args }) => args.slice(-4)), [['--session-id', claimed.session.id, '--name', 'cmd-1']]);
+		}),
+	);
+
+	it.effect("gives each allowed user's mention a thumbs-up as soon as it is seen, while it still waits for its turn, and none to an ignored one", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { number, comment: first } = yield* mention(h, '@orchestratorbot what is running?');
+			const second = h.github.addComment(h.githubRepo, number, '@orchestratorbot pause everything');
+			const stranger = h.github.addComment(h.githubRepo, number, '@orchestratorbot merge this', 'stranger');
+
+			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, second));
+			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, stranger));
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* statuses(h), ['running', 'queued', 'ignored']);
+			assert.deepStrictEqual([first, second, stranger].map(({ id }) => h.github.hasThumbsUp(id)), [true, true, false]);
+			assert.deepStrictEqual(
+				(yield* h.commands).map(({ acknowledgedAt }) => acknowledgedAt !== null),
+				[true, true, false],
+			);
+
+			const writes = h.github.writes();
+
+			yield* h.tick;
+			assert.strictEqual(h.github.writes(), writes);
+		}),
+	);
+
+	it.effect('starts a command whose thumbs-up failed for now, and gives it one on a later tick', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { number } = h.github.addPullRequest({ repo: h.githubRepo, branch, author: 'marioparaschiv' });
+			const comment = h.github.addComment(h.githubRepo, number, '@orchestratorbot what is running?');
+
+			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, comment));
+			h.github.crashAfterWrite(1, new Transient({ message: 'HTTP 502: Bad Gateway' }));
+			yield* h.tick;
+
+			const [started] = yield* h.commands;
+
+			assert.deepStrictEqual([started.status, started.acknowledgedAt], ['running', null]);
+
+			yield* h.tick;
+
+			const [acknowledged] = yield* h.commands;
+
+			assert.deepStrictEqual([acknowledged.status, acknowledged.acknowledgedAt !== null, h.github.hasThumbsUp(comment.id)], ['running', true, true]);
 		}),
 	);
 

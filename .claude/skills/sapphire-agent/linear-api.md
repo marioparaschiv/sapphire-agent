@@ -74,6 +74,7 @@ Writes (only the reconciler writes to GitHub, always as the GitHub App; the agen
 | Method | Call |
 | --- | --- |
 | `postComment` | On an issue or PR (the summary, a command reply or failure): `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. The marker is looked for among its newest 100 comments (`issueOrPullRequest`). |
+| `addThumbsUp` | A `THUMBS_UP` reaction on a mention's comment or review, by node id: GraphQL `addReaction`. No marker is needed, as GitHub keeps one reaction of each kind per user. |
 | `postFlagsReview` | `gh api --method POST repos/<repo>/pulls/<n>/reviews --input -` with `{ event: "COMMENT", body, comments: [{ path, line, side: "RIGHT", body }] }`. The caller skips it when there are no flags. |
 | `replyToThread` | `gh api graphql`, mutation `addPullRequestReviewThreadReply`. |
 | `resolveThread` | `gh api graphql`, mutation `resolveReviewThread`; skipped when already resolved. |

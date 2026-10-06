@@ -223,6 +223,23 @@ describe('dispatch', () => {
 		}),
 	);
 
+	it.effect('waits dispatchSettleSeconds after an epic is created before claiming it, so its sub-issues are attached first', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ dispatchSettleSeconds: 60 });
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync', createdAt: new Date(0).toISOString() });
+
+			yield* TestClock.adjust('59 seconds');
+			yield* h.tick;
+			assert.deepStrictEqual(yield* h.runs, []);
+			assert.strictEqual(h.linear.stateName(epic.id), 'Ready For Agent');
+
+			yield* TestClock.adjust('1 second');
+			yield* h.tick;
+			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
+			assert.strictEqual(h.herdr.starts()[0].prompt, '/orchestrate Linear epic TEST-10 autonomously');
+		}),
+	);
+
 	it.effect('claims nothing while paused', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();

@@ -1,6 +1,6 @@
 # Config
 
-Where configuration lives, every field with its default (`src/config.ts`), the team-to-repo mapping, the API key, the GitHub App key and webhook secret files, the Telegram bot token, api_id and api_hash files, the env vars, and how startup reports problems.
+Where configuration lives, every field with its default (`src/config.ts`), the team-to-repo mapping, the API key, the Linear webhook secret, the GitHub App key and webhook secret files, the Telegram bot token, api_id and api_hash files, the env vars, and how startup reports problems.
 
 ## Files
 
@@ -10,6 +10,7 @@ Where configuration lives, every field with its default (`src/config.ts`), the t
 | Linear API key | `~/.config/sapphire-agent/linear-key` (override `SAPPHIRE_AGENT_LINEAR_KEY_FILE`) |
 | GitHub App private key | `bot.app.privateKeyFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/app.pem` |
 | GitHub App webhook secret | `bot.app.webhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` |
+| Linear webhook secret | `linearWebhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/linear-webhook-secret` |
 | Telegram bot token, api_id, api_hash | `telegram.botTokenFile`, `telegram.apiIdFile`, `telegram.apiHashFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/telegram-bot-token`, `telegram-api-id`, `telegram-api-hash` |
 | Telegram session (mtcute) | `$HERDR_PLUGIN_STATE_DIR/telegram.session` |
 | Claude config (trust) | `~/.claude.json` (override `CLAUDE_CONFIG_PATH`) |
@@ -25,7 +26,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `pollSeconds` | `30` | int, min 5. Tick interval; herdr events trigger extra ticks in between. |
+| `pollSeconds` | `600` | int, min 5. The backstop poll: the tick interval when nothing else wakes the reconciler. Linear webhook deliveries, herdr events and `ctl.sh` requests trigger extra ticks in between. Monitoring timers (`awaitingInputAfterSeconds`, `staleAfterSeconds` and the others) are checked only on ticks, so they can fire up to this long late, and an epic's transient failure is retried only on the next tick. |
 | `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` runs, follow-ups included. Command runs do not count (`rules.md`). |
 | `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle`, `done`, `blocked`) time without a result file before the epic is flagged `awaitingInput`. The old name `stuckAfterSeconds` is still read as this key. |
 | `startTimeoutSeconds` | `300` | int, min 60. Time from the claim (or the process start, if later) for Claude to be confirmed started before the start fails. Covers waiting behind other starts, the fetch and herdr's 30 s start wait. |
@@ -39,12 +40,13 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `states.*` | see below | Exact Linear workflow state names. |
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; the label group name is this without the trailing `:`. |
+| `linearWebhookSecretFile` | required | `~` expanded. The signing secret of the Linear webhook, see below. |
 | `teams` | required | At least one team. |
 | `bot.login` | required | The mention handle. A comment mentioning `@<login>` starts a command run (`rules.md`). |
 | `bot.app.id` | required | int, above 0. The GitHub App's ID, from its settings page. The App posts every comment of the bot: command replies and failure notices. |
 | `bot.app.privateKeyFile` | required | `~` expanded. The App's private key (`.pem`, as GitHub downloads it), see below. |
 | `bot.app.webhookSecretFile` | required | `~` expanded. The App's webhook secret, see below. |
-| `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://webhook.marioparaschiv.com/github` to it (`operations.md`). 0 picks a free port (tests). |
+| `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://webhook.marioparaschiv.com/github` to it, and Tailscale Funnel forwards `/linear` (`operations.md`). 0 picks a free port (tests). |
 | `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
 | `telegram.botTokenFile` | required | `~` expanded. The Telegram bot's token, see below. |
 | `telegram.apiIdFile`, `telegram.apiHashFile` | required | `~` expanded. The `api_id` and `api_hash` of a Telegram app (my.telegram.org), which the bot logs in over MTProto with, see below. |
@@ -67,7 +69,7 @@ Keyed by exact Linear team name:
 - `labelReposDirectory` (optional): parent dir for repo-labelled epics. `repo:loader-ios` runs in `~/unbound-app/loader-ios`.
 - Paths accept `~`. Repo label rules: `linear-api.md`.
 
-Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/sapphire-agent`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs this `bot` entry before this version starts:
+Live config today: teams Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Herdr Linear (this repo, `~/sapphire-agent`, so the plugin works on itself); `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
 
 ```json
 "bot": {
@@ -111,6 +113,11 @@ It also needs a `telegram` entry, with the bot's files and the user's numeric Te
 - The secret set in the App's settings (Webhook secret), as plain text; whitespace trimmed. Every delivery's `X-Hub-Signature-256` is checked against it.
 - Same rules as the API key: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no GitHub App webhook secret: create <path> with mode 600`; empty fails.
 
+## Linear webhook secret
+
+- The signing secret Linear shows on the webhook's page (Settings, API, Webhooks), as plain text; whitespace trimmed. Every Linear delivery's `Linear-Signature` is checked against it.
+- Same rules as the API key: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no Linear webhook secret: create <path> with mode 600`; empty fails.
+
 ## Telegram bot token, api_id and api_hash
 
 - The token BotFather gives the bot (`123456:ABC...`), as plain text; whitespace trimmed.
@@ -134,7 +141,7 @@ Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl
 
 ## Startup errors
 
-Env, the config file, the API key, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero:
+Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero:
 
 ```
 StartupError: cannot start, fix these and restart:

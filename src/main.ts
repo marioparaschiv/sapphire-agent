@@ -2,6 +2,7 @@ import { basename, join } from 'node:path';
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Effect, FileSystem, Layer, Stream } from 'effect';
 import { FetchHttpClient } from 'effect/http';
+import { AgentEventServer } from './agent-event-server.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
@@ -29,7 +30,7 @@ const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(jo
 
 const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, Prompts.layer).pipe(Layer.provideMerge(GitHubApp.layer()));
 
-const MainLive = Layer.mergeAll(WebhookServer.layer, MissedDeliveries.layer, telegramChat.pipe(Layer.provide(TelegramBot.layer))).pipe(
+const MainLive = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer, telegramChat.pipe(Layer.provide(TelegramBot.layer))).pipe(
 	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
 	Layer.provideMerge(ServicesLive),
 	Layer.provideMerge(JournalLive),
