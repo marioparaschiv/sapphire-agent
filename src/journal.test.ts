@@ -247,9 +247,7 @@ describe('Journal', () => {
 			const stale = { marker: { identifier: 'HL-9', purpose: 'stale' as const, key: '1000-4000' }, text: '🔴 **HL-9 looks stuck**' };
 			const summary = { marker: { identifier: 'HL-9', purpose: 'summary' as const, key: '1000' }, text: '✅ **HL-9 is ready for review**' };
 
-			yield* journal.addNotice(stale);
-			yield* journal.addNotice(summary);
-			yield* journal.addNotice({ ...stale, text: 'written again' });
+			assert.deepStrictEqual([yield* journal.addNotice(stale), yield* journal.addNotice(summary), yield* journal.addNotice({ ...stale, text: 'written again' })], [true, true, false]);
 
 			const unsent = yield* journal.unsentNotices;
 
@@ -259,7 +257,7 @@ describe('Journal', () => {
 			);
 
 			yield* journal.markNoticeSent(unsent[0].id);
-			yield* journal.addNotice(stale);
+			assert.isFalse(yield* journal.addNotice(stale));
 
 			assert.deepStrictEqual((yield* journal.unsentNotices).map(({ purpose }) => purpose), ['summary']);
 			assert.isTrue(yield* journal.hasNotice(stale.marker));

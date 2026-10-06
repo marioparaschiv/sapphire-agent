@@ -474,8 +474,8 @@ export class Journal extends Context.Service<
 		// Inserts each project or replaces the one of the same team, all in one transaction.
 		readonly putProjects: (projects: ReadonlyArray<Project>) => Effect.Effect<void, JournalError>;
 		readonly deleteProject: (team: string) => Effect.Effect<void, JournalError>;
-		// Puts the notice in the outbox, unless one with the same marker was put there already.
-		readonly addNotice: (notice: Notice) => Effect.Effect<void, JournalError>;
+		// Puts the notice in the outbox; false when one with the same marker was put there already.
+		readonly addNotice: (notice: Notice) => Effect.Effect<boolean, JournalError>;
 		readonly hasNotice: (marker: Marker) => Effect.Effect<boolean, JournalError>;
 		// Oldest first.
 		readonly unsentNotices: Effect.Effect<ReadonlyArray<UnsentNotice>, JournalError>;
@@ -664,12 +664,17 @@ export class Journal extends Context.Service<
 					execute: (team) => sql`DELETE FROM projects WHERE team = ${team}`,
 				});
 
-				const insertNotice = SqlSchema.void({
+				const insertNotice = SqlSchema.findOneOption({
 					Request: Schema.Struct({ ...Marker.fields, text: Schema.String, createdAt: Millis }),
-					execute: (row) => sql`INSERT INTO notices ${sql.insert(row)} ON CONFLICT (identifier, purpose, key) DO NOTHING`,
+					Result: Schema.Struct({ id: Schema.Int }),
+					execute: (row) => sql`INSERT INTO notices ${sql.insert(row)} ON CONFLICT (identifier, purpose, key) DO NOTHING RETURNING id`,
 				});
 
-				const addNotice = ({ marker, text }: Notice) => Clock.currentTimeMillis.pipe(Effect.flatMap((createdAt) => insertNotice({ ...marker, text, createdAt })));
+				const addNotice = ({ marker, text }: Notice) =>
+					Clock.currentTimeMillis.pipe(
+						Effect.flatMap((createdAt) => insertNotice({ ...marker, text, createdAt })),
+						Effect.map(Option.isSome),
+					);
 
 				const findNotice = SqlSchema.findOneOption({
 					Request: Marker,

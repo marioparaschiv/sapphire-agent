@@ -70,8 +70,7 @@ export const makeContextCheck = Effect.gen(function* () {
 
 			const notice = comments.subagentOverContext({ identifier: run.identifier, agentId, tokens });
 
-			if (tokens >= config.handoffAtTokens * subagentOverRatio && !(yield* journal.hasNotice(notice.marker))) {
-				yield* journal.addNotice(notice);
+			if (tokens >= config.handoffAtTokens * subagentOverRatio && (yield* journal.addNotice(notice))) {
 				yield* Effect.log(`${run.identifier}'s subagent ${agentId} did not hand off at ${tokens} tokens`);
 				yield* reconciler.wake;
 			}
@@ -141,8 +140,7 @@ export const handoffRule = Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
 			const notice = comments.handoffMissing({ identifier: run.identifier, sessionId: handoff.sessionId, path });
 
-			if (now - (run.agentStatusSince ?? now) >= config.startTimeoutSeconds * 1000 && !(yield* journal.hasNotice(notice.marker))) {
-				yield* journal.addNotice(notice);
+			if (now - (run.agentStatusSince ?? now) >= config.startTimeoutSeconds * 1000 && (yield* journal.addNotice(notice))) {
 				yield* Effect.log(`no handoff doc at ${path}; the session stays`);
 			}
 		});
