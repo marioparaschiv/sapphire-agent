@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
-import { EpicState, Phase } from './chat.ts';
+import { EpicState, MessageRef, Phase, ThreadRef } from './chat.ts';
 import { ResultFile } from './result-file.ts';
 
 // claimed: recorded before the run is started. running: Claude is confirmed started. awaitingInput: the agent sat
@@ -143,8 +143,7 @@ export type RequestRow = typeof RequestRow.Type;
 export const Topic = Schema.Struct({
 	epicId: Schema.String,
 	identifier: Schema.String,
-	// The chat platform's ref of the thread.
-	thread: Schema.String,
+	thread: ThreadRef,
 	// What the thread shows now.
 	state: EpicState,
 	// The PR whose link was posted, so it is posted once.
@@ -333,16 +332,16 @@ export class Journal extends Context.Service<
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
 		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
 		// Records that the main chat's bot messages were written in the Claude session.
-		readonly addChatSession: (messageRefs: ReadonlyArray<string>, sessionId: string) => Effect.Effect<void, JournalError>;
-		readonly chatSession: (messageRef: string) => Effect.Effect<Option.Option<string>, JournalError>;
+		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) => Effect.Effect<void, JournalError>;
+		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<string>, JournalError>;
 		// The session of the newest bot message.
 		readonly latestChatSession: Effect.Effect<Option.Option<string>, JournalError>;
 		readonly listTopics: Effect.Effect<ReadonlyArray<Topic>, JournalError>;
 		// Inserts the topic or replaces the one of the same epic.
 		readonly putTopic: (topic: Topic) => Effect.Effect<void, JournalError>;
 		readonly deleteTopic: (epicId: string) => Effect.Effect<void, JournalError>;
-		readonly archiveThread: Effect.Effect<Option.Option<string>, JournalError>;
-		readonly setArchiveThread: (thread: string) => Effect.Effect<void, JournalError>;
+		readonly archiveThread: Effect.Effect<Option.Option<ThreadRef>, JournalError>;
+		readonly setArchiveThread: (thread: ThreadRef) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -451,20 +450,20 @@ export class Journal extends Context.Service<
 				});
 
 				const insertChatSession = SqlSchema.void({
-					Request: Schema.Struct({ messageRef: Schema.String, sessionId: Schema.String, createdAt: Millis }),
+					Request: Schema.Struct({ messageRef: MessageRef, sessionId: Schema.String, createdAt: Millis }),
 					execute: (row) => sql`INSERT OR REPLACE INTO chat_sessions ${sql.insert(row)}`,
 				});
 
-				const addChatSession = (messageRefs: ReadonlyArray<string>, sessionId: string) =>
+				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) =>
 					Clock.currentTimeMillis.pipe(
 						Effect.flatMap((createdAt) =>
 							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, sessionId, createdAt }), { discard: true })),
 						),
 					);
 
-				const chatSession = (messageRef: string) =>
+				const chatSession = (messageRef: MessageRef) =>
 					SqlSchema.findOneOption({
-						Request: Schema.String,
+						Request: MessageRef,
 						Result: Schema.Struct({ sessionId: Schema.String }),
 						execute: (ref) => sql`SELECT session_id FROM chat_sessions WHERE message_ref = ${ref}`,
 					})(messageRef).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
@@ -493,12 +492,12 @@ export class Journal extends Context.Service<
 
 				const archiveThread = SqlSchema.findOneOption({
 					Request: Schema.Void,
-					Result: Schema.Struct({ thread: Schema.String }),
+					Result: Schema.Struct({ thread: ThreadRef }),
 					execute: () => sql`SELECT thread FROM archive_thread`,
 				})(undefined).pipe(Effect.map(Option.map(({ thread }) => thread)));
 
 				const setArchiveThread = SqlSchema.void({
-					Request: Schema.String,
+					Request: ThreadRef,
 					execute: (thread) => sql`INSERT OR REPLACE INTO archive_thread (id, thread) VALUES (1, ${thread})`,
 				});
 
