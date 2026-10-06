@@ -7,11 +7,25 @@ import { telegramChat } from './telegram.ts';
 import { FakeTelegram } from './telegram-fake.ts';
 import { Transcriber } from './transcription.ts';
 
-const layer = telegramChat.pipe(
-	Layer.provide(FakeTelegram.bot),
-	Layer.provide(Transcriber.layerTest),
-	Layer.provideMerge(FakeTelegram.layer),
-	Layer.provideMerge(AppConfig.layerTest('/tmp/sapphire-agent-test')),
+const chatWith = (config: Layer.Layer<AppConfig>) =>
+	telegramChat.pipe(
+		Layer.provide(FakeTelegram.bot),
+		Layer.provide(Transcriber.layerTest),
+		Layer.provideMerge(FakeTelegram.layer),
+		Layer.provideMerge(config),
+	);
+
+const layer = chatWith(AppConfig.layerTest('/tmp/sapphire-agent-test'));
+
+const twoUsersLayer = chatWith(
+	AppConfig.layerTest('/tmp/sapphire-agent-test', {
+		telegram: {
+			botTokenFile: '/tmp/sapphire-agent-test/telegram-bot-token',
+			apiIdFile: '/tmp/sapphire-agent-test/telegram-api-id',
+			apiHashFile: '/tmp/sapphire-agent-test/telegram-api-hash',
+			allowedUserIds: [7_100_200_300, 7_100_200_301],
+		},
+	}),
 );
 
 const stranger = 6_200_300_400;
@@ -110,16 +124,16 @@ describe('telegramChat', () => {
 		Effect.gen(function* () {
 			const telegram = yield* FakeTelegram;
 			const chat = yield* Chat;
-			const allowed = yield* allowedUser;
-			const message = telegram.write({ from: allowed, text: 'hello' });
+			const second = yield* AppConfig.useSync((config) => config.telegram.allowedUserIds[1]);
+			const message = telegram.write({ from: second, text: 'hello' });
 
-			yield* chat.send({ _tag: 'reply', to: `${allowed}:${message}`, text: 'Got it.' });
+			yield* chat.send({ _tag: 'reply', to: `${second}:${message}`, text: 'Got it.' });
 
 			assert.deepStrictEqual(
 				telegram.sent.map(({ chatId, text, replyToMessageId }) => ({ chatId, text, replyToMessageId })),
-				[{ chatId: allowed, text: 'Got it.', replyToMessageId: message }],
+				[{ chatId: second, text: 'Got it.', replyToMessageId: message }],
 			);
-		}).pipe(Effect.provide(layer)),
+		}).pipe(Effect.provide(twoUsersLayer)),
 	);
 
 	it.effect('shows an epic as a topic named by its state, posts its PR there and in the main chat once, sums it up in the archive and deletes the topic', () =>

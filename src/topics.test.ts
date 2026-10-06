@@ -63,6 +63,16 @@ describe('topics', () => {
 			yield* h.pausedTick;
 
 			assert.deepStrictEqual(titles(h), []);
+
+			const exited = yield* makeHarness();
+			const { run } = yield* exited.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
+
+			exited.herdr.setAgent(run.paneId, null);
+			yield* exited.tick;
+			greet(exited);
+			yield* exited.tick;
+
+			assert.deepStrictEqual(titles(exited), []);
 		}),
 	);
 
@@ -179,6 +189,10 @@ describe('topics', () => {
 			yield* h.restart;
 			yield* h.tick;
 
+			const writes = h.telegram.writes();
+
+			yield* h.tick;
+			assert.strictEqual(h.telegram.writes(), writes);
 			assert.deepStrictEqual(inTopic(h), ['▶️ TEST-101 Slice 1 started', '✔️ TEST-101 Slice 1 done', '▶️ TEST-102 Slice 2 started']);
 		}),
 	);

@@ -189,31 +189,35 @@ describe('answerChatMessages', () => {
 
 	it.effect('stops a turn when the user presses stop, keeping what Claude wrote, while another turn goes on beside it', () =>
 		Effect.gen(function* () {
-			const chat = yield* makeChat((run) => (run.prompt === 'write an essay' ? { text: ['Once upon', ' a time'], hang: true } : { text: ['Four.'] }));
+			const chat = yield* makeChat((run) => ({ text: run.prompt === 'write an essay' ? ['Once upon', ' a time'] : ['Four.'], hang: true }));
+			const advanceUntilDrafts = (n: number) =>
+				Effect.gen(function* () {
+					for (let adjusted = 0; adjusted < 10 && chat.telegram.drafts.length < n; adjusted += 1) {
+						yield* TestClock.adjust('1500 millis');
+					}
+				});
 
 			yield* chat.start;
 			chat.telegram.write({ from: chat.user, text: 'write an essay' });
-
-			for (let adjusted = 0; adjusted < 10 && chat.telegram.drafts.length === 0; adjusted += 1) {
-				yield* TestClock.adjust('1500 millis');
-			}
+			yield* advanceUntilDrafts(1);
 
 			const sum = chat.telegram.write({ from: chat.user, text: 'what is 2 + 2?' });
 
-			yield* chat.telegram.awaitSent(1);
-			assert.deepStrictEqual([chat.telegram.sent[0].text, chat.telegram.sent[0].replyToMessageId], ['Four.', sum]);
-
+			yield* advanceUntilDrafts(2);
 			yield* chat.telegram.stopDraft;
-			yield* chat.awaitRecorded(2);
+			yield* chat.awaitRecorded(1);
 
-			const [essay] = chat.claude.runs;
+			const [essay, sumRun] = chat.claude.runs;
 			const database = new DatabaseSync(chat.journalFile, { readOnly: true });
 			const sessions = database.prepare('SELECT session_id FROM chat_sessions').all().map(({ session_id }) => session_id);
 
 			database.close();
-			assert.isTrue(essay.killed);
-			assert.strictEqual(chat.telegram.sent[1].text, 'Once upon a time');
-			assert.include(sessions, sessionOf(essay));
+			assert.deepStrictEqual([essay.killed, sumRun.killed], [false, true]);
+			assert.deepStrictEqual(
+				chat.telegram.sent.map(({ text, replyToMessageId }) => ({ text, replyToMessageId })),
+				[{ text: 'Four.', replyToMessageId: sum }],
+			);
+			assert.deepStrictEqual(sessions, [sessionOf(sumRun)]);
 		}).pipe(Effect.scoped),
 	);
 
