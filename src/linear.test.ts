@@ -62,6 +62,7 @@ describe('Linear reads', () => {
 				url: 'https://linear.app/marioparaschiv/issue/TEST-10/linear-service-on-httpclient',
 				branchName: 'mario/test-10-linear-service-on-httpclient',
 				sortOrder: 0,
+				createdAt: '1969-12-31T00:00:00.000Z',
 				team: { id: testTeam.id, name: 'Test' },
 				state: { id: stateId('Ready For Agent'), name: 'Ready For Agent' },
 				labels: { nodes: [{ id: repoLabel.id, name: 'loader-ios', parent: { name: 'repo' } }] },
