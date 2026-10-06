@@ -101,7 +101,7 @@ const pullRequestServer = () => {
 		const { query, variables } = graphqlRequest(call);
 
 		if (query.includes('query ConversationBodies')) {
-			return data({ repository: { issueOrPullRequest: { comments: page(state.comments) } } });
+			return data({ repository: { pullRequest: { comments: page(state.comments) } } });
 		}
 
 		if (query.includes('query ReviewThread')) {
@@ -158,7 +158,7 @@ describe('GitHub live layer', () => {
 		}),
 	);
 
-	it.effect("posts a comment once on an issue or PR, as the GitHub App with its installation's token", () =>
+	it.effect("posts a comment once on a PR, as the GitHub App with its installation's token", () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
 			const { calls, layer } = liveWithGh(server.respond);
@@ -184,7 +184,7 @@ describe('GitHub live layer', () => {
 					['api graphql --input -', undefined, undefined],
 				],
 			);
-			assert.match(graphqlRequest(calls[0]).query, /issueOrPullRequest\(number: \$number\)/);
+			assert.match(graphqlRequest(calls[0]).query, /pullRequest\(number: \$number\)/);
 		}),
 	);
 
@@ -260,7 +260,7 @@ describe('GitHub live layer', () => {
 	it.effect('refuses to look for a marker past the 100 newest comments', () =>
 		Effect.gen(function* () {
 			const { calls, layer } = liveWithGh(() =>
-				data({ repository: { issueOrPullRequest: { comments: { totalCount: 140, nodes: Array.from({ length: 100 }, (_, n) => ({ body: `LGTM ${n}` })) } } } }),
+				data({ repository: { pullRequest: { comments: { totalCount: 140, nodes: Array.from({ length: 100 }, (_, n) => ({ body: `LGTM ${n}` })) } } } }),
 			);
 			const exit = yield* Effect.gen(function* () {
 				(yield* GitHubAppFixture).install(repo);

@@ -78,7 +78,7 @@ const makeFake = (appLogin: string) => {
 		Effect.suspend(() => {
 			const found = findRecord(repo, number);
 
-			return found ? Effect.succeed(found) : Effect.fail(new Permanent({ message: `GraphQL: Could not resolve to an issue or pull request with the number of ${number}. (repository.issueOrPullRequest)` }));
+			return found ? Effect.succeed(found) : Effect.fail(new Permanent({ message: `GraphQL: Could not resolve to a PullRequest with the number of ${number}. (repository.pullRequest)` }));
 		});
 
 	const threadRecord = (repo: string, threadId: string) =>
