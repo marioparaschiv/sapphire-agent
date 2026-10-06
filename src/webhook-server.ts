@@ -73,6 +73,14 @@ export const linearWebhookPath = '/linear';
 
 const respond = (status: number) => HttpServerResponse.empty({ status });
 
+const answerFailures =
+	(message: string, delivery: string | undefined) =>
+	<E, R>(handler: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
+		handler.pipe(
+			Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.logError(message, cause).pipe(Effect.as(respond(500))))),
+			Effect.annotateLogs({ delivery: delivery ?? 'unknown' }),
+		);
+
 // GitHub App and Linear webhook deliveries, on 127.0.0.1:bot.app.webhookPort while the service runs. A Linear delivery
 // only wakes the reconciler, which observes Linear itself, so a duplicate or out-of-order one does no harm. A GitHub
 // delivery that brings a new comment mentioning the bot is recorded as a command (see makeRecordMention) and wakes the
@@ -106,12 +114,7 @@ export class WebhookServer extends Context.Service<
 					yield* reconciler.wake;
 
 					return respond(200);
-				}).pipe(
-					Effect.catchCause((cause) =>
-						Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.logError('cannot handle the Linear delivery', cause).pipe(Effect.as(respond(500))),
-					),
-					Effect.annotateLogs({ delivery: request.headers['linear-delivery'] ?? 'unknown' }),
-				);
+				}).pipe(answerFailures('cannot handle the Linear delivery', request.headers['linear-delivery']));
 
 			const handle = (request: HttpServerRequest.HttpServerRequest) =>
 				Effect.gen(function* () {
@@ -137,10 +140,7 @@ export class WebhookServer extends Context.Service<
 					return respond(204);
 				}).pipe(
 					Effect.catchTag('SchemaError', (error) => Effect.logWarning('refused a delivery that does not match its event', error).pipe(Effect.as(respond(400)))),
-					Effect.catchCause((cause) =>
-						Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.logError('cannot handle the delivery', cause).pipe(Effect.as(respond(500))),
-					),
-					Effect.annotateLogs({ delivery: request.headers['x-github-delivery'] ?? 'unknown' }),
+					answerFailures('cannot handle the delivery', request.headers['x-github-delivery']),
 				);
 
 			const server = yield* NodeHttpServer.make(createServer, { host: '127.0.0.1', port: bot.app.webhookPort });
