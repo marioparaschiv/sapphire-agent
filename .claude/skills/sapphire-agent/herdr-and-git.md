@@ -18,7 +18,7 @@ How a run is started (worktree, trust, tab, `herdr agent start`), and how the He
 - Result file: `herdr-result.json` in the worktree's git dir (`git rev-parse --absolute-git-dir`). `readResultFile` decodes it with the `ResultFile` schema and fails `InvalidResultFile` otherwise; `removeResultFile` deletes a leftover one when a run starts in a reused worktree.
 - git calls in one repo share a semaphore, since git takes lock files in the main repo for all of its worktrees.
 
-Done in git directly rather than `herdr worktree create`, which creates and opens its own workspace; sapphire-agent needs a tab in the shared `agents` workspace plus the reuse and no-track rules above.
+Done in git directly rather than `herdr worktree create`, which creates and opens its own workspace; sapphire-agent needs a tab in its project's workspace plus the reuse and no-track rules above.
 
 ## Trust pre-accept (`ClaudeTrust` service)
 
@@ -37,10 +37,10 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 
 ### Tabs
 
-- `openTab` looks for the workspace labelled `workspaceLabel` (default `agents`). Found: `herdr tab create --workspace <id> --label <label> --cwd <worktree> --env HERDR_BLANK=1 --no-focus`. Missing: `herdr workspace create --label agents` with the same flags, then `tab rename` of its first tab to the run's label.
+- `openTab` looks for the workspace with the given label: the epic's team (its project) for a run; for a command, the project whose repo it runs in, else `workspaceLabel` (default `agents`). Found: `herdr tab create --workspace <id> --label <label> --cwd <worktree> --env HERDR_BLANK=1 --no-focus`. Missing: `herdr workspace create --label <workspace>` with the same flags, then `tab rename` of its first tab to the tab's label.
 - `HERDR_BLANK=1` makes the pane's shell skip its automatic Claude launch, so `agent start` gets a plain prompt; `--no-focus` keeps the user where they are. A caller can set more variables, each another `--env KEY=VALUE`: a command's tab gets the service's `HERDR_*`, `SAPPHIRE_AGENT_LINEAR_KEY_FILE` and `CLAUDE_CONFIG_PATH`.
 - Tab label (`Prompts.tabLabel`): `<IDENTIFIER> <title, cut to 40 chars with an ellipsis>`. Starting with the identifier is how sapphire-agent recognises the tabs it owns (`rules.md`). A command's tab is `@bot CMD-<n>` (`Prompts.commandTabLabel`), which no epic rule takes for an epic's.
-- `workspaceTabs` lists every tab in that workspace with its root pane, agent and status; `identifier` is none for a tab whose label does not start with one. herdr's `agent_status` for a tab sums up the agents in all of its panes.
+- `workspaceTabs(labels)` lists every tab in the agent workspaces (`agentWorkspaceLabels`: each project's team, plus `workspaceLabel`) with its root pane, agent and status; `identifier` is none for a tab whose label does not start with one. herdr's `agent_status` for a tab sums up the agents in all of its panes.
 - `closeTab`: `herdr tab close <tabId>`. The rules only close a tab whose tab id and pane id both match the run.
 
 ### Starting Claude
@@ -54,11 +54,11 @@ Done in git directly rather than `herdr worktree create`, which creates and open
 
 ### Events
 
-- `events` is a `Stream` over the raw socket at `$HERDR_SOCKET_PATH` (`events.subscribe`): session-wide `pane.agent_detected`, `pane.exited`, `pane.closed`, `tab.closed`, and `pane.agent_status_changed` per owned pane (herdr needs a pane id for status subscriptions and takes one subscription request per connection).
+- `events(labels)` is a `Stream` over the raw socket at `$HERDR_SOCKET_PATH` (`events.subscribe`), its agent workspace labels read again on each connection, so a project added later is watched after the next reconnect: session-wide `pane.agent_detected`, `pane.exited`, `pane.closed`, `tab.closed`, and `pane.agent_status_changed` per owned pane (herdr needs a pane id for status subscriptions and takes one subscription request per connection).
 - Only events of owned panes and tabs pass. An agent detected in a pane of the workspace that is not subscribed yet (a new run) ends the connection, and the next connection subscribes to it too.
 - The stream never fails: it reconnects at once when a connection ends, and after 1 s, 2 s, 4 s ... up to 30 s when one fails.
 - Events are not durable and closing a pane may emit nothing, so they only make a tick come sooner (`wake`); every tick reads herdr again, and that poll always wins.
 
 ## Known limits
 
-- A crash right after `workspace create`, before the first tab is renamed, leaves that tab in the `agents` workspace under herdr's default label. It is not owned, so it is never touched; the next tick opens a new tab for the run. Close the stray one by hand.
+- A crash right after `workspace create`, before the first tab is renamed, leaves that tab in the new workspace under herdr's default label. It is not owned, so it is never touched; the next tick opens a new tab for the run. Close the stray one by hand.

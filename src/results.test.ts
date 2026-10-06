@@ -4,7 +4,7 @@ import { Effect, Option } from 'effect';
 import { Transient } from './call-policy.ts';
 import type { Epic } from './linear.ts';
 import type { StartedRun } from './observation.ts';
-import { type Harness, makeHarness, markerKeys } from './test-harness.ts';
+import { type Harness, makeHarness } from './test-harness.ts';
 
 const resultFile = {
 	summary: 'Plugin settings now sync across devices; conflicts keep the newest change.',
@@ -29,8 +29,9 @@ const outcome = (h: Harness, epic: Epic, run: StartedRun, number: number) =>
 		const [stored] = yield* h.runs;
 
 		return {
-			summaries: markerKeys(h.github.comments(h.githubRepo, number)),
-			reviews: markerKeys(h.github.reviews(h.githubRepo, number).map((review) => review.body)),
+			epicComments: h.epicMarkers(epic.id),
+			pullRequestComments: h.github.comments(h.githubRepo, number),
+			notices: h.notices(epic.identifier).map(({ marker }) => marker),
 			state: h.linear.stateName(epic.id),
 			tabOpen: Option.isSome(h.herdr.tab(run.tabId)),
 			run: stored ? [stored.status, stored.result?.summary] : null,
@@ -38,10 +39,18 @@ const outcome = (h: Harness, epic: Epic, run: StartedRun, number: number) =>
 		};
 	});
 
-const finished = { summaries: ['summary:0'], reviews: ['flags:0'], state: 'To Review', tabOpen: false, run: ['ended', resultFile.summary], worktree: true };
+const finished = {
+	epicComments: ['pullRequestOpened:https://github.com/test/repo/pull/1'],
+	pullRequestComments: [],
+	notices: ['summary:0', 'flags:0'],
+	state: 'To Review',
+	tabOpen: false,
+	run: ['ended', resultFile.summary],
+	worktree: true,
+};
 
 describe('results', () => {
-	it.effect('posts the summary and the flags review, moves the epic to To Review and closes the tab, leaving the worktree', () =>
+	it.effect('links the PR on the epic, sums up the run and its flags in notices, moves the epic to To Review and closes the tab, leaving the worktree', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { epic, run, pullRequest } = yield* finishedRun(h);
@@ -51,19 +60,18 @@ describe('results', () => {
 
 			assert.deepStrictEqual(yield* outcome(h, epic, run, pullRequest.number), finished);
 
-			const [summary] = h.github.botComments(h.githubRepo, pullRequest.number);
-			const [review] = h.github.reviews(h.githubRepo, pullRequest.number);
-
-			assert.isTrue(summary.startsWith(`${resultFile.summary}\n\nReady for review, @marioparaschiv.\n\n`));
 			assert.deepStrictEqual(
-				review.comments.map(({ path, line, side }) => [path, line, side]),
-				[['src/sync/merge.ts', 12, 'RIGHT']],
+				h.notices(epic.identifier).map(({ text }) => text),
+				[
+					`✅ **TEST-10 is ready for review**: ${pullRequest.url}\n${resultFile.summary}\nNext: Review the PR.`,
+					'🔎 **TEST-10 left 1 self-review finding unfixed**\n- `src/sync/merge.ts:12` A tie keeps the local value; confirm that is wanted.\nNext: Ask for a follow-up to fix any of them.',
+				],
 			);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+			assert.match(h.linear.comments(epic.id)[0].body, new RegExp(`^PR opened: ${RegExp.escape(pullRequest.url)}\n\n<!-- `));
 		}),
 	);
 
-	it.effect('skips the flags review when there are no flags and takes the stuck label off', () =>
+	it.effect('writes no flags notice when there are no flags and takes the stuck label off', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { epic, run, pullRequest } = yield* finishedRun(h, { ...resultFile, flags: [] });
@@ -72,21 +80,21 @@ describe('results', () => {
 			h.linear.issue(epic.id).labelIds = [stuck.id];
 			yield* h.tick;
 
-			assert.deepStrictEqual(yield* outcome(h, epic, run, pullRequest.number), { ...finished, reviews: [] });
+			assert.deepStrictEqual(yield* outcome(h, epic, run, pullRequest.number), { ...finished, notices: ['summary:0'] });
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), []);
 		}),
 	);
 
-	it.effect('posts each part once when a crash follows a post, the tab close or a journal write', () =>
+	it.effect('posts each part once when a crash follows the tab close or a journal write', () =>
 		Effect.gen(function* () {
 			const crash = new Transient({ message: 'the process died' });
-			// GitHub writes: the summary, then the review. herdr: the tab close. Journal: the stored result, then the ended run.
+			// herdr: the tab close. Journal: the stored result, the summary and flags notices, then the ended run.
 			const injections: ReadonlyArray<[string, (h: Harness) => void]> = [
-				['after the summary', (h) => h.github.crashAfterWrite(1, crash)],
-				['after the review', (h) => h.github.crashAfterWrite(2, crash)],
 				['after closing the tab', (h) => h.herdr.crashAfterWrite(1, crash)],
 				['before storing the result', (h) => h.crashAtJournalWrite(1)],
-				['before ending the run', (h) => h.crashAtJournalWrite(2)],
+				['before writing the summary notice', (h) => h.crashAtJournalWrite(2)],
+				['before writing the flags notice', (h) => h.crashAtJournalWrite(3)],
+				['before ending the run', (h) => h.crashAtJournalWrite(4)],
 			];
 
 			for (const [where, inject] of injections) {
@@ -163,8 +171,9 @@ describe('results', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['invalidResult:0']);
-			assert.match(h.linear.comments(epic.id)[0].body, /the agent's result file is invalid/);
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['invalidResult:0']);
+			assert.match(h.notices(epic.identifier)[0].text, /^🔴 \*\*TEST-10 wrote an invalid result file\*\*/);
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((found) => found.status),
@@ -183,7 +192,7 @@ describe('results', () => {
 			yield* h.tick;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['noPullRequest:0']);
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['noPullRequest:0']);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((found) => found.status),
 				['error'],
@@ -194,7 +203,7 @@ describe('results', () => {
 
 			yield* h.tick;
 
-			assert.deepStrictEqual(yield* outcome(h, epic, run, pullRequest.number), finished);
+			assert.deepStrictEqual(yield* outcome(h, epic, run, pullRequest.number), { ...finished, notices: ['noPullRequest:0', 'summary:0', 'flags:0'] });
 		}),
 	);
 });

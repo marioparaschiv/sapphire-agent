@@ -4,7 +4,10 @@ import { TestClock } from 'effect/testing';
 import { notRunning } from './conversations.ts';
 import { type Harness, makeHarness } from './test-harness.ts';
 
-const titles = (h: Harness) => h.telegram.topics().map(({ title }) => title);
+// The harness's project Test has a topic of its own.
+const epicTopics = (h: Harness) => h.telegram.topics().filter(({ title }) => title !== '📁 Test');
+
+const titles = (h: Harness) => epicTopics(h).map(({ title }) => title);
 
 const sentTexts = (h: Harness) => h.telegram.sent.map(({ text }) => text);
 
@@ -13,7 +16,7 @@ const greet = (h: Harness) => h.telegram.write({ from: h.telegramUser, text: 'hi
 
 // What the bot wrote in the epic's topic.
 const inTopic = (h: Harness) => {
-	const [topic] = h.telegram.topics();
+	const [topic] = epicTopics(h);
 
 	return h.telegram.sent.filter(({ topicId }) => topicId === topic.topicId).map(({ text }) => text);
 };
@@ -44,9 +47,9 @@ describe('topics', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual(titles(h), ['🟢 TEST-10 Plugin settings sync']);
-			assert.strictEqual(h.telegram.topicsCreated(), 1);
+			assert.strictEqual(h.telegram.topicsCreated(), 2);
 			assert.deepStrictEqual(
-				h.telegram.topics().map(({ chatId }) => chatId),
+				epicTopics(h).map(({ chatId }) => chatId),
 				[h.telegramUser],
 			);
 		}),
@@ -99,14 +102,14 @@ describe('topics', () => {
 			h.herdr.setAgent(run.paneId, null);
 			yield* h.tick;
 			assert.deepStrictEqual(titles(h), ['🔴 TEST-10 Plugin settings sync']);
-			assert.strictEqual(h.telegram.topicsCreated(), 1);
+			assert.strictEqual(h.telegram.topicsCreated(), 2);
 		}),
 	);
 
-	it.effect('posts an opened PR once in the topic and once in the main chat', () =>
+	it.effect('posts an opened PR once in the topic, once in the main chat and once on the Linear epic', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
+			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
 
 			greet(h);
 			yield* h.tick;
@@ -117,7 +120,7 @@ describe('topics', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			const [topic] = h.telegram.topics();
+			const [topic] = epicTopics(h);
 
 			assert.deepStrictEqual(
 				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
@@ -125,6 +128,10 @@ describe('topics', () => {
 					{ text: `PR opened: ${pullRequest.url}`, topicId: topic.topicId },
 					{ text: `TEST-10 Plugin settings sync: PR opened ${pullRequest.url}`, topicId: null },
 				],
+			);
+			assert.deepStrictEqual(
+				h.linear.comments(epic.id).map(({ body }) => body.split('\n\n')[0]),
+				[`PR opened: ${pullRequest.url}`],
 			);
 		}),
 	);
@@ -148,7 +155,7 @@ describe('topics', () => {
 
 			assert.deepStrictEqual(titles(h), ['✅ Done']);
 			assert.deepStrictEqual(sentTexts(h).slice(2), [`TEST-10 Plugin settings sync · ${pullRequest.url} · 3 slices`]);
-			assert.strictEqual(h.telegram.sent[2].topicId, h.telegram.topics()[0].topicId);
+			assert.strictEqual(h.telegram.sent[2].topicId, epicTopics(h)[0].topicId);
 		}),
 	);
 
@@ -213,15 +220,15 @@ describe('topics', () => {
 				skillHook(run.session.id, 'review-verify'),
 				skillHook(run.session.id, 'sapphire-tools:pr'),
 			]) {
-				assert.deepStrictEqual(yield* h.hook('claude', payload, run.paneId), { code: 0, stderr: '' });
+				assert.deepStrictEqual(yield* h.hook('claude', payload, run.paneId), { code: 0, stdout: '', stderr: '' });
 			}
 
-			assert.deepStrictEqual(yield* h.hook('claude', skillHook(other.run.session.id, 'tdd'), other.run.paneId), { code: 0, stderr: '' });
+			assert.deepStrictEqual(yield* h.hook('claude', skillHook(other.run.session.id, 'tdd'), other.run.paneId), { code: 0, stdout: '', stderr: '' });
 			yield* h.tick;
 			yield* h.restart;
 			yield* h.tick;
 
-			const topic = h.telegram.topics().find(({ title }) => title.includes('TEST-10'));
+			const topic = epicTopics(h).find(({ title }) => title.includes('TEST-10'));
 
 			assert.isDefined(topic);
 			assert.deepStrictEqual(
@@ -241,7 +248,7 @@ describe('topics', () => {
 			yield* TestClock.adjust('3 minutes');
 			yield* h.tick;
 
-			const [topic] = h.telegram.topics();
+			const [topic] = epicTopics(h);
 			const before = h.journalWrites();
 
 			h.telegram.write({ from: h.telegramUser, text: 'Remote wins.\nKeep a backup of local.', topicId: topic.topicId });
@@ -266,7 +273,7 @@ describe('topics', () => {
 			yield* h.tick;
 
 			const before = h.journalWrites();
-			const voice = h.telegram.write({ from: h.telegramUser, voice: new TextEncoder().encode('Use the remote copy.'), topicId: h.telegram.topics()[0].topicId });
+			const voice = h.telegram.write({ from: h.telegramUser, voice: new TextEncoder().encode('Use the remote copy.'), topicId: epicTopics(h)[0].topicId });
 
 			yield* h.awaitJournalWrites(before + 1);
 			yield* h.tick;
@@ -290,7 +297,7 @@ describe('topics', () => {
 			h.writeResultFile(run, JSON.stringify({ summary: 'Settings sync.', replies: [], flags: [] }));
 			yield* h.tick;
 
-			const [topic] = h.telegram.topics();
+			const [topic] = epicTopics(h);
 			const sent = h.telegram.sent.length;
 			const message = h.telegram.write({ from: h.telegramUser, text: 'Also add a test.', topicId: topic.topicId });
 

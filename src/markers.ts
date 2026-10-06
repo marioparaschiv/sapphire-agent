@@ -1,25 +1,27 @@
 import { Option, Schema } from 'effect';
 
-// What a comment is for. Together with the epic's identifier (or a command's, `CMD-<id>`) and a key it names one comment, so a write first looks
-// for its marker and skips if it is there: a retry or a restart never posts twice, while a later occurrence (a new
-// question in the same run, a new summary from a follow-up run) has a new key and is posted. The Comments service
-// builds every key; `claimedAt` is the run's claim time in epoch ms.
+// What a marked write is for. Together with the epic's identifier (or a command's, `CMD-<id>`) and a key it names one
+// write, so a write first looks for its marker and skips if it is there: a retry or a restart never posts twice, while
+// a later occurrence (a new question in the same run, a new summary from a follow-up run) has a new key and is posted.
+// The Comments service builds every key; `claimedAt` is the run's claim time in epoch ms.
 //
 // On the Linear epic:
-// - awaitingInput: `<claimedAt>-<agentStatusSince>`, one per quiet episode of a run (the flag, or the question it asked by
-//   message and got no reply to).
+// - pullRequestOpened: `<url>`, once per PR, whatever run saw it first.
+// On the GitHub PR, as the bot:
+// - reply: `<threadId>.<claimedAt>`, once per thread per run; found among the thread's comments.
+// - addressed: `<claimedAt>`, once per run that replied to a thread.
+// Notices, in the journal's outbox, once per marker:
+// - awaitingInput: `<claimedAt>-<agentStatusSince>`, one per quiet episode of a run.
 // - stale: `<claimedAt>-<nudgedAt>`, one per nudged episode of a run.
-// - error, startFailed, invalidResult, noPullRequest, threadMismatch, overCap, permanentFailure: `<claimedAt>`, once per run.
+// - error, startFailed, invalidResult, noPullRequest, threadMismatch, overCap, permanentFailure, summary, flags:
+//   `<claimedAt>`, once per run (permanentFailure without a run: once per failure streak).
 // - keptWorktree: `<claimedAt>`, once per run; `<worktreePath>` for an orphan worktree that no run tracks.
-// - replyFailed: `<replyCommentId>`, the user's reply that could not be typed; posted under the question.
 // - transientFailure: `<streakStartedAt>` from `Journal.recordTransient`, once per streak of transient failures.
 // - workingOrphan: `<tabId>`, once per untracked tab whose agent is working.
-// On the GitHub PR, as the bot:
-// - summary, flags: `<claimedAt>`, once per run (flags is the review holding every flag).
-// - reply: `<threadId>.<claimedAt>`, once per thread per run; found among the thread's comments.
-// On the issue or PR a command came from, as the bot:
-// - commandReply: `<requestId>`, once per reply the command's agent asked for.
-// - commandFailed: `<claimedAt>`, once per command that failed.
+// - commandReply: `<requestId>`, once per reply a command's agent asked for.
+// - commandFailed: `<claimedAt>` of the command, once per command that failed.
+// - handoffMissing: `<sessionId>`, once per orchestrator session that wrote no handoff doc.
+// - subagentOverContext: `<agentId>`, once per subagent that went on past its handoff.
 export const MarkerPurpose = Schema.Literals([
 	'awaitingInput',
 	'stale',
@@ -31,23 +33,24 @@ export const MarkerPurpose = Schema.Literals([
 	'overCap',
 	'permanentFailure',
 	'keptWorktree',
-	'replyFailed',
 	'transientFailure',
 	'workingOrphan',
 	'summary',
 	'flags',
 	'reply',
+	'addressed',
+	'pullRequestOpened',
 	'commandReply',
 	'commandFailed',
+	'handoffMissing',
+	'subagentOverContext',
 ]);
 
 export type MarkerPurpose = typeof MarkerPurpose.Type;
 
-export type Marker = {
-	readonly identifier: string;
-	readonly purpose: MarkerPurpose;
-	readonly key: string;
-};
+export const Marker = Schema.Struct({ identifier: Schema.String, purpose: MarkerPurpose, key: Schema.String });
+
+export type Marker = typeof Marker.Type;
 
 // A comment body that already ends with its rendered marker.
 export type MarkedComment = {
@@ -57,6 +60,12 @@ export type MarkedComment = {
 
 // The key is URI-encoded so a path or id never breaks the HTML comment or the parser.
 export const renderMarker = ({ identifier, purpose, key }: Marker) => `<!-- sapphire-agent:${identifier}:${purpose}:${encodeURIComponent(key)} -->`;
+
+// A short markdown message for the user in the chat, sent once per marker (`Journal.addNotice`).
+export type Notice = {
+	readonly marker: Marker;
+	readonly text: string;
+};
 
 export const withMarker = (body: string, marker: Marker): MarkedComment => ({ marker, body: `${body}\n\n${renderMarker(marker)}` });
 

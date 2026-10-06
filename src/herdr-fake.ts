@@ -1,8 +1,7 @@
 import { Context, Effect, Layer, Option, PubSub, Stream, SubscriptionRef } from 'effect';
 import { type CallError, Permanent, Transient } from './call-policy.ts';
-import { AppConfig, type AppConfigShape } from './config.ts';
+import { AppConfig } from './config.ts';
 import {
-	agentWorkspaceLabels,
 	defaultTailLines,
 	Herdr,
 	type HerdrAgentStatus,
@@ -90,7 +89,7 @@ const notFound = (what: string, id: string) => new Permanent({ message: `herdr: 
 
 // In-memory herdr: workspaces holding one-pane tabs. Writes are createWorkspace, createTab, renameTab, closeTab,
 // sendKeys, prompt and startClaude.
-const makeFake = (config: Pick<AppConfigShape, 'teams' | 'workspaceLabel'>, signals: PubSub.PubSub<Signal>, connections: SubscriptionRef.SubscriptionRef<number>) => {
+const makeFake = (workspaceLabel: string, signals: PubSub.PubSub<Signal>, connections: SubscriptionRef.SubscriptionRef<number>) => {
 	const workspaces: Array<Workspace> = [];
 	const tabs: Array<FakeTab> = [];
 	const sentKeys: Array<{ readonly paneId: string; readonly keys: ReadonlyArray<string> }> = [];
@@ -256,24 +255,25 @@ const makeFake = (config: Pick<AppConfigShape, 'teams' | 'workspaceLabel'>, sign
 				return Effect.succeed<StartOutcome>('starting');
 			}),
 		openTab: openTabWith(commands),
-		workspaceTabs: workspaceTabsOf(commands, agentWorkspaceLabels(config)),
-		events: reconnecting(
-			Stream.unwrap(
-				Effect.gen(function* () {
-					const subscription = yield* PubSub.subscribe(signals);
+		workspaceTabs: (workspaceLabels) => workspaceTabsOf(commands, workspaceLabels),
+		events: () =>
+			reconnecting(
+				Stream.unwrap(
+					Effect.gen(function* () {
+						const subscription = yield* PubSub.subscribe(signals);
 
-					yield* SubscriptionRef.update(connections, (count) => count + 1);
+						yield* SubscriptionRef.update(connections, (count) => count + 1);
 
-					return Stream.fromSubscription(subscription).pipe(
-						Stream.mapEffect((signal) => (signal._tag === 'Event' ? Effect.succeed(signal.event) : Effect.fail(new Transient({ message: 'herdr socket closed' })))),
-					);
-				}),
+						return Stream.fromSubscription(subscription).pipe(
+							Stream.mapEffect((signal) => (signal._tag === 'Event' ? Effect.succeed(signal.event) : Effect.fail(new Transient({ message: 'herdr socket closed' })))),
+						);
+					}),
+				),
 			),
-		),
 	});
 
 	const controls: FakeHerdrControls = {
-		addTab: ({ label, workspace = config.workspaceLabel, agent = 'claude', agentStatus = 'working', tail = '' }) => {
+		addTab: ({ label, workspace = workspaceLabel, agent = 'claude', agentStatus = 'working', tail = '' }) => {
 			const { workspaceId } = workspaces.find((candidate) => candidate.label === workspace) ?? addWorkspace(workspace);
 			const { tabId, paneId } = addTabTo(workspaceId, label, Option.fromNullishOr(agent), agentStatus, tail);
 
@@ -322,7 +322,7 @@ export class FakeHerdr extends Context.Service<FakeHerdr, FakeHerdrControls>()('
 			const config = yield* AppConfig;
 			const signals = yield* PubSub.unbounded<Signal>();
 			const connections = yield* SubscriptionRef.make(0);
-			const { herdr, controls } = makeFake(config, signals, connections);
+			const { herdr, controls } = makeFake(config.workspaceLabel, signals, connections);
 
 			return Context.make(Herdr, herdr).pipe(Context.add(FakeHerdr, controls));
 		}),

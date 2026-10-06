@@ -15,20 +15,18 @@ The `Linear` service (`src/linear.ts`), how team states and labels are resolved,
 | `teams(names)` | Teams by exact name with all workflow states. Every tick. |
 | `readyEpics(stateIds)` | Top-level issues (`parent: null`) in the ready states, first 50. Every tick. More than 50 are cut off. |
 | `epics(ids)` | The journal's epics wherever they are now. Every tick. More than 250 fails Permanently, because a truncated page would make epics that still exist look gone. |
-| `epicsByIdentifier(identifiers)` | Epics named by owned tabs and worktree branches that are not known otherwise (matched by team key and number). |
-| `replies(questionIds)` | Replies in the threads of the current awaitingInput questions, at most 250, in one request. |
-| `comments(issueId)` | Every comment on the epic, replies included, oldest first (paged). Used to look for a marker. |
-| `moveIssue(issueId, stateId)` | Move the epic to Implementing or To Review. |
-| `comment(issueId, comment, parentId?)` | Post a marked comment unless one with the same marker exists; returns its id either way. |
-| `react(commentId, emoji)` | Mark a reply as delivered (`white_check_mark`), unless it already has that emoji. |
+| `epicsByIdentifier(identifiers)` | Epics named by owned tabs and worktree branches that are not known otherwise (matched by team key and number), and by `ctl.sh start`. |
+| `subIssues(parentIds)` | The sub-issues of the epics with chat threads, in one paged request, for the topics rule's slices and shipped summary. |
+| `moveIssue(issueId, stateId)` | Move the epic to Implementing or To Review (or to Ready, by `ctl.sh start`). |
+| `comment(issueId, comment)` | Post `PR opened: <url>` unless a comment on the epic (every one, paged) carries its marker already. |
 | `addLabel(issueId, teamId, name)` | Add `agent-stuck`. |
 | `removeLabel(issueId, labelId)` | Remove `agent-stuck` once the result is posted. |
 
-Epic fields: id, identifier, title, url, `branchName`, `sortOrder`, team, state, labels (with their parent group name), and `children(first: 1)`, only to know whether it has sub-issues.
+Epic fields: id, identifier, title, url, `branchName`, `sortOrder`, `createdAt` (for `dispatchSettleSeconds`), team, state, labels (with their parent group name), and `children(first: 1)`, only to know whether it has sub-issues.
 
 ## State resolution
 
-- Each tick the `Observer` reads `teams(Object.keys(config.teams))`, matched by exact team name.
+- Each tick the `Observer` reads `teams(<the projects' team names>)`, matched by exact team name. `sapphire project add` checks the team exists the same way.
 - Each role in `config.states` is matched by exact state name in that team.
 - Team not found, or any state missing: the team is skipped and logged once per process, e.g. `team Unbound has no workflow state "To Review"; skipping it until it does`.
 - Skipped teams: nothing is claimed, and their runs, tabs and worktrees are left untouched.
@@ -45,8 +43,8 @@ Epic fields: id, identifier, title, url, `branchName`, `sortOrder`, team, state,
 Repo labels (`resolveRepo`), read from the epic's labels:
 
 - `repo:<name>` (prefix `labels.repoPrefix`), or a label `<name>` inside a label group named `repo` (the prefix without its trailing `:`; Linear shows it as `repo/<name>`).
-- None: the team's `repo`. One: `<labelReposDirectory>/<name>`.
-- Errors (a Permanent failure, so the epic is flagged): more than one repo label, the team has no `labelReposDirectory`, or a name not matching `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
+- None: the project's `repo`. One: `<labelReposDirectory>/<name>`.
+- Errors (a Permanent failure, so the epic is flagged): the team is not a project, more than one repo label, the project has no label repos directory, or a name not matching `^[A-Za-z0-9][A-Za-z0-9._-]*$`.
 
 ## GitHub (`GitHub` service)
 
@@ -69,18 +67,16 @@ PR detection (`findPullRequest`):
 
 Mentions are not read through `gh`: they arrive as the App's webhook deliveries (`rules.md`, Mentions). Linear's review UI syncs threads both ways, so a mention of the bot written there lands on GitHub and is delivered like any other.
 
-Writes (only the reconciler writes to GitHub, always as the GitHub App; the agents never do). Each first looks for its marker and skips when present:
+Writes (only the reconciler writes to GitHub, always as the GitHub App; the agents never do). Each comment first looks for its marker and skips when present:
 
 | Method | Call |
 | --- | --- |
-| `postComment` | On an issue or PR (the summary, a command reply or failure): `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. The marker is looked for among its newest 100 comments (`issueOrPullRequest`). |
+| `postComment` | On the PR (`Addressed your concerns inline.`): `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. The marker is looked for among its newest 100 conversation comments. |
 | `addThumbsUp` | A `THUMBS_UP` reaction on a mention's comment or review, by node id: GraphQL `addReaction`. No marker is needed, as GitHub keeps one reaction of each kind per user. |
-| `postFlagsReview` | `gh api --method POST repos/<repo>/pulls/<n>/reviews --input -` with `{ event: "COMMENT", body, comments: [{ path, line, side: "RIGHT", body }] }`. The caller skips it when there are no flags. |
 | `replyToThread` | `gh api graphql`, mutation `addPullRequestReviewThreadReply`. |
 | `resolveThread` | `gh api graphql`, mutation `resolveReviewThread`; skipped when already resolved. |
 
-- The summary ends with `Ready for review, @<PR author>.`, which notifies the user.
-- A flag whose `line` is outside the diff makes GitHub reject the review (HTTP 422, Permanent): the epic is flagged with `permanentFailure`.
+- The summary and the self-review flags are not posted on GitHub: they are notices in the chat (`rules.md`, Results).
 
 ## Branch name
 

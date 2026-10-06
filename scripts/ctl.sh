@@ -28,7 +28,7 @@ case "${1:-}" in
 		echo "service: $(systemctl --user is-active sapphire-agent.service)"
 		node "$cli" status
 		;;
-	start | stop | send | follow-up | session | reply | done)
+	start | stop | send | follow-up | session | reply | done | project)
 		exec node "$cli" "$@"
 		;;
 	hook)
@@ -36,7 +36,7 @@ case "${1:-}" in
 		exec node "$src/agent-hook.ts" "$@"
 		;;
 	*)
-		echo "usage: ctl.sh pause|resume|status|start|stop|send|follow-up|session|reply|done|hook" >&2
+		echo "usage: ctl.sh pause|resume|status|start|stop|send|follow-up|session|reply|done|project|hook" >&2
 		exit 2
 		;;
 esac

@@ -4,25 +4,24 @@ import { AppConfig } from './config.ts';
 import { Herdr } from './herdr.ts';
 import { Journal, type JournalError, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { hasMarker, type MarkedComment } from './markers.ts';
+import type { Notice } from './markers.ts';
 import { type Observation, stuckLabelOf, tabOf } from './observation.ts';
 
 // The epic a flag goes on.
 export type FlagTarget = { readonly epicId: string; readonly teamId: string };
 
-// Flag = the stuck label plus a marked comment, once. The label goes on first: a crash between the two leaves no
-// marker, so the next tick finishes the flag, while a marker found means the flag is complete and a label the user
-// removed since then stays removed. Returns the comment's id.
+// Flag = the stuck label plus a notice, once. The label goes on first: a crash between the two leaves no notice, so the
+// next tick finishes the flag, while a notice found means the flag is complete and a label the user removed since then
+// stays removed.
 export const makeFlag = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const linear = yield* Linear;
+	const journal = yield* Journal;
 
-	return (observation: Observation, { epicId, teamId }: FlagTarget, comment: MarkedComment): Effect.Effect<string, CallError> =>
+	return (observation: Observation, { epicId, teamId }: FlagTarget, notice: Notice): Effect.Effect<void, CallError | JournalError> =>
 		Effect.gen(function* () {
-			const existing = (yield* linear.comments(epicId)).find((candidate) => hasMarker(candidate.body, comment.marker));
-
-			if (existing) {
-				return existing.id;
+			if (yield* journal.hasNotice(notice.marker)) {
+				return;
 			}
 
 			const epic = Option.fromUndefinedOr(observation.epics.get(epicId));
@@ -31,7 +30,7 @@ export const makeFlag = Effect.gen(function* () {
 				yield* linear.addLabel(epicId, teamId, config.labels.stuck);
 			}
 
-			return yield* linear.comment(epicId, comment);
+			yield* journal.addNotice(notice);
 		});
 });
 

@@ -154,6 +154,11 @@ const makeDriver = (h: Harness, crash: Option.Option<CrashPoint>) => {
 	return { tickUntil, deliver, hook, writeInTopic, crashed: () => Option.isSome(crash) && Option.isNone(pending), retypes: () => retypes };
 };
 
+type Outcome = Effect.Success<ReturnType<typeof lifecycle>>['outcome'];
+
+// A crash can hold one Telegram message back until after others; each is still sent once.
+const inAnyOrder = (outcome: Outcome): Outcome => ({ ...outcome, telegram: { ...outcome.telegram, sent: outcome.telegram.sent.toSorted() } });
+
 const runOf = (runs: ReadonlyArray<Run>) => Option.fromUndefinedOr(runs[0]);
 
 const isRun = (runs: ReadonlyArray<Run>, predicate: (run: Run) => boolean) => Option.exists(runOf(runs), predicate);
@@ -305,15 +310,10 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 				linear: {
 					state: h.linear.stateName(epic.id),
 					labels: h.linear.labelNames(epic.id),
-					comments: comments.map((comment) => [
-						markerOrFirstLine(comment.body),
-						Option.getOrNull(Option.map(Option.fromUndefinedOr(comments.find((parent) => parent.id === comment.parentId)), (parent) => markerOrFirstLine(parent.body))),
-						comment.reactions,
-					]),
+					comments: comments.map((comment) => markerOrFirstLine(comment.body)),
 				},
 				github: {
 					comments: h.github.comments(h.githubRepo, pullRequest.number).map(markerOrFirstLine),
-					reviews: h.github.reviews(h.githubRepo, pullRequest.number).map((review) => [markerOrFirstLine(review.body), review.comments.map((comment) => `${comment.path}:${comment.line}`)]),
 					thread: [thread.isResolved, thread.comments.map((comment) => markerOrFirstLine(comment.body))],
 				},
 				herdr: {
@@ -344,10 +344,9 @@ describe('lifecycle', () => {
 				const pullRequestUrl = 'https://github.com/test/repo/pull/1';
 
 				assert.deepStrictEqual(uncrashed.outcome, {
-					linear: { state: 'Shipped', labels: [], comments: [] },
+					linear: { state: 'Shipped', labels: [], comments: [`pullRequestOpened:${pullRequestUrl}`] },
 					github: {
-						comments: ['summary:0', 'commandReply:3', `summary:${followUpAt}`],
-						reviews: [['flags:0', ['src/sync/merge.ts:3']]],
+						comments: [`addressed:${followUpAt}`],
 						thread: [true, ['Rename this to syncSettings. @orchestratorbot', `reply:PRRT_1.${followUpAt}`]],
 					},
 					herdr: { ownedTabs: 0, openTabs: 0, starts: ['/orchestrate', 'You', '/follow-up'], prompts: ['Remote wins. Keep a backup of local.'] },
@@ -355,15 +354,19 @@ describe('lifecycle', () => {
 					git: { worktrees: [], branch: false },
 					runs: 0,
 					telegram: {
-						topics: ['✅ Done'],
+						topics: ['✅ Done', '📁 Test'],
 						sent: [
 							'OK.',
 							'▶️ TEST-101 Slice 1 started',
 							'✔️ TEST-101 Slice 1 done',
 							'🔎 /sreview started',
-							`⏸ Waiting for input:\n\n${question}\n\nWrite here to answer; it is typed into the agent.`,
+							`⏸ The agent waits for input\n${question}\nWrite here to answer; it is typed into the agent.`,
 							`PR opened: ${pullRequestUrl}`,
 							`TEST-10 Plugin settings sync: PR opened ${pullRequestUrl}`,
+							`✅ TEST-10 is ready for review: ${pullRequestUrl}\nPlugin settings now sync across devices.\nNext: Review the PR.`,
+							'🔎 TEST-10 left 1 self-review finding unfixed\n- src/sync/merge.ts:3 Remote wins without a merge.\nNext: Ask for a follow-up to fix any of them.',
+							`💬 CMD-1 on ${pullRequestUrl}#discussion_r1\nOn it: a follow-up renames it.`,
+							`✅ TEST-10 is ready for review: ${pullRequestUrl}\nRenamed the sync function.\nNext: Review the PR.`,
 							`TEST-10 Plugin settings sync · ${pullRequestUrl} · 2 slices`,
 						],
 					},
@@ -380,7 +383,11 @@ describe('lifecycle', () => {
 					const expected = retypes ? { ...uncrashed.outcome, herdr: { ...uncrashed.outcome.herdr, prompts: [...prompts, ...prompts] } } : uncrashed.outcome;
 
 					assert.isTrue(crashed, `${describePoint(point)} never happened`);
-					assert.deepStrictEqual(outcome, strays.length === 0 ? expected : { ...expected, telegram: { ...expected.telegram, topics: [...expected.telegram.topics, ...strays].toSorted() } }, describePoint(point));
+					assert.deepStrictEqual(
+						inAnyOrder(outcome),
+						inAnyOrder(strays.length === 0 ? expected : { ...expected, telegram: { ...expected.telegram, topics: [...expected.telegram.topics, ...strays].toSorted() } }),
+						describePoint(point),
+					);
 
 					if (retypes) {
 						retyped.push(point.kind);
@@ -393,9 +400,9 @@ describe('lifecycle', () => {
 				// prompt, or at the journal write that records it, types it again.
 				assert.deepStrictEqual(retyped.toSorted(), ['herdr', 'journal']);
 				// Nor can making a topic and recording it (Telegram does not let a bot list topics): a crash right after making
-				// the epic's or the Done topic, or at the journal write that records it, leaves that topic behind and makes
-				// another.
-				assert.deepStrictEqual(strayTopics.toSorted(), ['journal ✅ Done', 'journal 🟢 TEST-10 Plugin settings sync', 'telegram ✅ Done', 'telegram 🟢 TEST-10 Plugin settings sync']);
+				// the epic's, the project's or the Done topic, or at the journal write that records it, leaves that topic behind
+				// and makes another.
+				assert.deepStrictEqual(strayTopics.toSorted(), ['journal ✅ Done', 'journal 🟢 TEST-10 Plugin settings sync', 'telegram ✅ Done', 'telegram 📁 Test', 'telegram 🟢 TEST-10 Plugin settings sync']);
 			}),
 		{ timeout: 120_000 },
 	);

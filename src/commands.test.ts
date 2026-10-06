@@ -6,7 +6,7 @@ import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import { commandClaudeArgs, ctlPath } from './commands.ts';
 import { Refused } from './ctl.ts';
-import { deliveries, type Harness, makeHarness, markerKeys } from './test-harness.ts';
+import { deliveries, type Harness, makeHarness } from './test-harness.ts';
 
 const branch = 'mario/test-10-plugin-settings-sync';
 
@@ -38,6 +38,9 @@ describe('commands', () => {
 	it.effect("runs one command at a time in the repo's clone, in a Claude locked down to the CLI and reading, with the service's environment", () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
+
+			h.telegram.write({ from: h.telegramUser, text: 'Hi' });
+
 			const { number, comment } = yield* mention(h, '@orchestratorbot stop TEST-12 and start TEST-14');
 
 			yield* h.deliver(deliveries.issueComment(h.githubRepo, number, h.github.addComment(h.githubRepo, number, '@orchestratorbot pause everything')));
@@ -73,11 +76,18 @@ describe('commands', () => {
 				},
 			});
 
-			assert.deepStrictEqual(yield* h.ctl('reply', comment.url, 'Stopped TEST-12; TEST-14 is next in line.'), [`the bot replies on ${comment.url} on the next tick`]);
+			assert.deepStrictEqual(yield* h.ctl('reply', comment.url, 'Stopped TEST-12; TEST-14 is next in line.'), [`the bot answers ${comment.url} in the chat on the next tick`]);
 			assert.deepStrictEqual(yield* h.ctl('done', 'cmd-1'), ['CMD-1 ends once its agent stops']);
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.github.botComments(h.githubRepo, number), ['Stopped TEST-12; TEST-14 is next in line.\n\n<!-- sapphire-agent:CMD-1:commandReply:1 -->']);
+			const [projectTopic] = h.telegram.topics();
+
+			assert.deepStrictEqual(h.github.botComments(h.githubRepo, number), []);
+			assert.strictEqual(projectTopic.title, '📁 Test');
+			assert.deepStrictEqual(
+				h.telegram.sent.map(({ text, topicId }) => [text, topicId]),
+				[[`💬 CMD-1 on ${comment.url}\nStopped TEST-12; TEST-14 is next in line.`, projectTopic.topicId]],
+			);
 			assert.deepStrictEqual(yield* statuses(h), ['running', 'queued']);
 
 			h.herdr.setAgentStatus(tab.paneId, 'done');
@@ -196,23 +206,34 @@ describe('commands', () => {
 	it.effect('posts a reply once when the process dies right after posting it', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
+
+			h.telegram.write({ from: h.telegramUser, text: 'Hi' });
+
 			const { number, comment } = yield* mention(h, '@orchestratorbot what is running?');
 
 			yield* h.ctl('reply', comment.url, 'Nothing is running.');
-			h.github.crashAfterWrite(1, new Transient({ message: 'the process died' }));
+			h.telegram.crashAfterWrite(1, new Transient({ message: 'the process died' }));
 			yield* h.tick;
+
+			assert.deepStrictEqual(h.notices('CMD-1').map(({ marker, sent }) => [marker, sent]), [['commandReply:1', false]]);
+
 			yield* h.restart;
 			yield* h.tick;
 			yield* h.tick;
 
-			assert.deepStrictEqual(markerKeys(h.github.botComments(h.githubRepo, number)), ['commandReply:1']);
+			assert.deepStrictEqual(h.notices('CMD-1').map(({ marker, sent }) => [marker, sent]), [['commandReply:1', true]]);
+			assert.deepStrictEqual(
+				h.telegram.sent.map(({ text }) => text),
+				[`💬 CMD-1 on ${comment.url}\nNothing is running.`],
+			);
+			assert.deepStrictEqual(h.github.botComments(h.githubRepo, number), []);
 		}),
 	);
 
 	it.effect('fails a command whose agent exits, goes quiet without saying it is done, stays stale after a nudge or runs over the cap, once, with its tab closed', () =>
 		Effect.gen(function* () {
 			const cases: ReadonlyArray<readonly [string, (h: Harness, paneId: string) => Effect.Effect<void>, string]> = [
-				['exited', (h, paneId) => Effect.sync(() => h.herdr.setAgent(paneId, null)), 'CMD-1 exited, so I stopped it.'],
+				['exited', (h, paneId) => Effect.sync(() => h.herdr.setAgent(paneId, null)), 'exited'],
 				[
 					'quiet',
 					(h, paneId) =>
@@ -221,7 +242,7 @@ describe('commands', () => {
 							yield* h.tick;
 							yield* TestClock.adjust('3 minutes');
 						}),
-					'CMD-1 stopped 3 min ago without saying it was done, so I stopped it.',
+					'stopped 3 min ago without saying it was done',
 				],
 				[
 					'stale',
@@ -235,7 +256,7 @@ describe('commands', () => {
 							assert.deepStrictEqual(h.herdr.prompts(), [{ paneId, text: 'continue' }]);
 							yield* TestClock.adjust('10 minutes');
 						}),
-					'CMD-1 showed no new output for 20 min, even after a nudge, so I stopped it.',
+					'showed no new output for 20 min, even after a nudge',
 				],
 				[
 					'over the cap',
@@ -247,11 +268,11 @@ describe('commands', () => {
 								yield* TestClock.adjust('7 minutes');
 							}
 						}),
-					'CMD-1 ran for 91 min, over the 90 min cap, so I stopped it.',
+					'ran for 91 min, over the 90 min cap',
 				],
 			];
 
-			for (const [name, happen, notice] of cases) {
+			for (const [name, happen, reason] of cases) {
 				const h = yield* makeHarness();
 				const { number } = yield* mention(h, '@orchestratorbot what is running?');
 				const tab = commandTab(h, 'CMD-1');
@@ -261,12 +282,13 @@ describe('commands', () => {
 				yield* h.restart;
 				yield* h.tick;
 
-				const [failed, ...others] = h.github.botComments(h.githubRepo, number);
+				const [failed, ...others] = h.notices('CMD-1');
 
 				assert.deepStrictEqual(yield* statuses(h), ['error'], name);
 				assert.deepStrictEqual(others, [], name);
-				assert.isTrue(failed.startsWith(`**sapphire-agent** (\`error\`): ${notice}`), `${name}: ${failed}`);
-				assert.deepStrictEqual(markerKeys([failed]), [`commandFailed:${(yield* h.commands)[0].claimedAt}`], name);
+				assert.isTrue(failed.text.startsWith(`🔴 **CMD-1 ${reason}**, so I stopped it.\n- Comment: https://github.com/test/repo/pull/${number}#issuecomment-`), `${name}: ${failed.text}`);
+				assert.strictEqual(failed.marker, `commandFailed:${(yield* h.commands)[0].claimedAt}`, name);
+				assert.deepStrictEqual(h.github.botComments(h.githubRepo, number), [], name);
 				assert.isTrue(Option.isNone(h.herdr.tab(tab.tabId)), name);
 			}
 		}),
@@ -288,13 +310,14 @@ describe('commands', () => {
 
 			h.herdr.setStartBehaviour('no-agent');
 
-			const { number } = yield* mention(h, '@orchestratorbot what is running?', 'acme/elsewhere');
-			const [failed] = h.github.botComments('acme/elsewhere', number);
+			yield* mention(h, '@orchestratorbot what is running?', 'acme/elsewhere');
+
+			const [failed] = h.notices('CMD-1');
 			const [command] = yield* h.commands;
 
 			assert.deepStrictEqual([command.status, command.cwd], ['error', h.dir]);
-			assert.isTrue(failed.startsWith('**sapphire-agent** (`error`): CMD-1 could not start: Claude did not start in '), failed);
-			assert.include(failed, ': no agent is running, so I stopped it.');
+			assert.isTrue(failed.text.startsWith('🔴 **CMD-1 could not start: Claude did not start in '), failed.text);
+			assert.include(failed.text, ': no agent is running**, so I stopped it.');
 			assert.deepStrictEqual(h.herdr.tabs(), []);
 		}),
 	);
@@ -306,7 +329,7 @@ describe('commands', () => {
 			h.herdr.crashAfterWrite(3, new Transient({ message: 'herdr is not answering' }));
 			h.herdr.setStartBehaviour('no-agent');
 
-			const { number } = yield* mention(h, '@orchestratorbot what is running?');
+			yield* mention(h, '@orchestratorbot what is running?');
 
 			assert.deepStrictEqual(yield* statuses(h), ['claimed']);
 
@@ -314,7 +337,7 @@ describe('commands', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual(yield* statuses(h), ['error']);
-			assert.isTrue(h.github.botComments(h.githubRepo, number)[0].startsWith('**sapphire-agent** (`error`): CMD-1 was not confirmed running within 300 s'));
+			assert.isTrue(h.notices('CMD-1')[0].text.startsWith('🔴 **CMD-1 was not confirmed running within 300 s**'));
 		}),
 	);
 });

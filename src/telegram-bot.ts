@@ -10,6 +10,7 @@ import {
 	MtcuteError,
 	MtTimeoutError,
 	TelegramClient,
+	type TextWithEntities,
 	tl,
 } from '@mtcute/node';
 import { LogManager } from '@mtcute/node/utils.js';
@@ -150,16 +151,18 @@ export class TelegramBot extends Context.Service<
 		// Stops of drafts, as they come; each subscriber gets every one.
 		readonly draftStops: Stream.Stream<DraftStop>;
 		// Returns the id of the new message.
-		readonly sendText: (chatId: number, text: string, options?: SendOptions) => Effect.Effect<number, CallError>;
+		readonly sendText: (chatId: number, text: TextWithEntities, options?: SendOptions) => Effect.Effect<number, CallError>;
 		// Sends the message unless one with the same key was sent already (`randomIdOf`).
-		readonly sendOnce: (chatId: number, text: string, key: string, options?: SendOptions) => Effect.Effect<void, CallError>;
+		readonly sendOnce: (chatId: number, text: TextWithEntities, key: string, options?: SendOptions) => Effect.Effect<void, CallError>;
 		// Shows the text as a draft answer with a stop button; the same draft id updates the same draft.
-		readonly sendDraft: (chatId: number, topicId: number | null, draftId: Long, text: string) => Effect.Effect<void, CallError>;
+		readonly sendDraft: (chatId: number, topicId: number | null, draftId: Long, text: TextWithEntities) => Effect.Effect<void, CallError>;
 		// Returns the new topic's id.
 		readonly createTopic: (chatId: number, title: string) => Effect.Effect<number, CallError>;
 		readonly editTopic: (chatId: number, topicId: number, title: string) => Effect.Effect<void, CallError>;
 		// A topic already gone is fine.
 		readonly deleteTopic: (chatId: number, topicId: number) => Effect.Effect<void, CallError>;
+		// Those of the topics that exist.
+		readonly existingTopics: (chatId: number, topicIds: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<number>, CallError>;
 		readonly download: (fileId: string) => Effect.Effect<Uint8Array, CallError>;
 	}
 >()('sapphire-agent/TelegramBot') {
@@ -224,7 +227,7 @@ export class TelegramBot extends Context.Service<
 							_: 'messages.setTyping',
 							peer: await client.resolvePeer(chatId),
 							topMsgId: topicId ?? undefined,
-							action: { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text, entities: [] } },
+							action: { _: 'sendMessageTextDraftAction', canStop: true, randomId: draftId, text: { _: 'textWithEntities', text: text.text, entities: text.entities ?? [] } },
 						}),
 					).pipe(Effect.asVoid),
 				createTopic: (chatId, title) =>
@@ -238,6 +241,12 @@ export class TelegramBot extends Context.Service<
 					),
 				editTopic: (chatId, topicId, title) => write('rename a topic', () => client.editForumTopic({ chatId, topicId, title })).pipe(Effect.asVoid, alreadyDone('TOPIC_NOT_MODIFIED')),
 				deleteTopic: (chatId, topicId) => write('delete a topic', () => client.deleteForumTopicHistory(chatId, topicId)).pipe(alreadyDone('TOPIC_ID_INVALID', 'MESSAGE_ID_INVALID')),
+				existingTopics: (chatId, topicIds) =>
+					Effect.tryPromise({ try: () => client.getForumTopicsById(chatId, [...topicIds]), catch: callFailure('look up topics') }).pipe(
+						withCallPolicy(callTimeouts.telegram),
+						// A deleted topic comes back as none.
+						Effect.map((topics) => topics.flatMap((topic) => (topic === null ? [] : [topic.id]))),
+					),
 				download: (fileId) => Effect.tryPromise({ try: () => client.downloadAsBuffer(fileId), catch: callFailure('download a file') }).pipe(withCallPolicy(callTimeouts.telegram)),
 			});
 		}),

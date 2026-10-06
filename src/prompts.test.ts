@@ -63,7 +63,7 @@ describe('Prompts', () => {
 			assert.include(prompt, '`sh /home/dev/sapphire-agent/scripts/ctl.sh <subcommand>`');
 			assert.include(prompt, "session <EPIC-ID> (prints the Claude session name of the epic's run, which SendMessage reaches it by)");
 			assert.include(prompt, 'start <EPIC-ID> [--reply-to <session>] (moves the epic to its ready state so it is dispatched; its run asks that Claude session its questions);');
-			assert.include(prompt, 'reply https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 <text>; done CMD-3.');
+			assert.include(prompt, 'reply https://github.com/marioparaschiv/unbound/pull/120#issuecomment-9 <text> (sent to their chat with the bot); done CMD-3.');
 			assert.isTrue(prompt.endsWith('then run done CMD-3.'));
 			assert.strictEqual(prompts.commandTabLabel({ identifier: 'CMD-3' }), '@bot CMD-3');
 		}),
@@ -74,6 +74,14 @@ describe('Prompts', () => {
 			assert.strictEqual(prompts.tabLabel(epic), 'HL-8 Rewrite the orchestrator on Effect 4 as…');
 			assert.strictEqual(prompts.tabLabel({ identifier: 'HL-9', title: 'Exactly forty characters long title here' }), 'HL-9 Exactly forty characters long title here');
 			assert.strictEqual(prompts.tabLabel({ identifier: 'HL-9', title: 'Add the foundation for the new orchestr ator' }), 'HL-9 Add the foundation for the new orchestr…');
+		}),
+	);
+
+	it.effect("tells the main chat's Claude to manage projects with the project subcommands", () =>
+		withPrompts((prompts) => {
+			for (const subcommand of ['project list', 'project add <team> <repo> [--label-repos <dir>]', 'project edit <team> [--repo <path>] [--label-repos <dir>]', 'project remove <team>']) {
+				assert.include(prompts.chat, subcommand);
+			}
 		}),
 	);
 });

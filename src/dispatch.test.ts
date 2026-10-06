@@ -107,8 +107,8 @@ describe('dispatch', () => {
 
 			const status = yield* h.ctl('status');
 
-			assert.include(status[0], 'session test-10, reply-to planning, ');
-			assert.notInclude(status[2], 'reply-to');
+			assert.include(status[1], 'session test-10, reply-to planning, ');
+			assert.notInclude(status[3], 'reply-to');
 			assert.deepStrictEqual(
 				status.filter((line) => line.startsWith('request')),
 				[],
@@ -267,7 +267,7 @@ describe('dispatch', () => {
 				yield* TestClock.adjust('100 seconds');
 			}
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
+			assert.deepStrictEqual(h.notices(epic.identifier), []);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((run) => run.status),
 				['claimed'],
@@ -279,8 +279,9 @@ describe('dispatch', () => {
 			yield* h.restart;
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['startFailed:0']);
-			assert.match(h.linear.comments(epic.id)[0].body, /couldn't start an agent for this epic: the agent was not confirmed running within 300 s/);
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['startFailed:0']);
+			assert.match(h.notices(epic.identifier)[0].text, /^🔴 \*\*TEST-10 didn't start\*\*: the agent was not confirmed running within 300 s/);
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((run) => run.status),
@@ -299,8 +300,9 @@ describe('dispatch', () => {
 			h.herdr.setStartBehaviour('no-agent');
 			yield* h.tick;
 
-			assert.deepStrictEqual(h.epicMarkers(epic.id), ['startFailed:0']);
-			assert.match(h.linear.comments(epic.id)[0].body, /Claude did not start in \S+: no agent is running/);
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['startFailed:0']);
+			assert.match(h.notices(epic.identifier)[0].text, /Claude did not start in \S+: no agent is running/);
+			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((run) => run.status),
 				['error'],

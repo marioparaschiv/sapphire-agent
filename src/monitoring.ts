@@ -2,21 +2,17 @@ import { createHash } from 'node:crypto';
 import { Clock, Effect, Option } from 'effect';
 import { Chat } from './chat.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
-import { Comments, type FlaggedRun } from './comments.ts';
+import { Comments, type FlaggedRun, shownTail } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Herdr } from './herdr.ts';
 import { type AgentStatus, Journal, type Run, type Topic } from './journal.ts';
-import { type Epic, Linear, type Reply } from './linear.ts';
-import { parseMarker } from './markers.ts';
+import type { Epic } from './linear.ts';
 import { activeRoles, hasRole, isStarted, type Observation, observedAgentStatus, type StartedRun, tabOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Prompts } from './prompts.ts';
 import { makeFlag, makeNudge, makeTabActions } from './run-actions.ts';
 
 export const quietStatuses: ReadonlyArray<AgentStatus> = ['idle', 'done', 'blocked'];
-
-// Marks a reply to a question as typed into the pane.
-export const deliveredEmoji = 'white_check_mark';
 
 // Claude's spinner glyph, its elapsed timer and the status line's counters tick even while a turn hangs, so they are
 // not progress.
@@ -58,24 +54,22 @@ export const track = <R extends Run>(run: R, status: AgentStatus, hash: string, 
 	const { tracked, progressed } = trackAgent(run, status, hash, now);
 	const resumed = (run.status === 'awaitingInput' && status === 'working') || (run.status === 'stale' && progressed);
 
-	return { ...tracked, status: resumed ? 'running' : run.status, questionCommentId: resumed ? null : run.questionCommentId };
+	return { ...tracked, status: resumed ? 'running' : run.status };
 };
 
-const sameRun = (a: Run, b: Run) => a.status === b.status && isSameWatch(a, b) && a.questionCommentId === b.questionCommentId;
+const sameRun = (a: Run, b: Run) => a.status === b.status && isSameWatch(a, b);
 
 // Watches started runs in herdr. Every tick reads herdr afresh, so an event that never arrived changes nothing: the
 // poll always wins. Flags, once each: awaitingInput (quiet too long without a result file), stale (working with an
 // unchanged pane even after a nudge), error (agent exited or vanished; its tab is then closed) and the wall-clock cap.
 // A run that asked its reply-to session by message is not flagged while it waits for the reply; after staleAfterSeconds
-// its question is asked on Linear instead. A run without one asks in its epic's chat thread, where the user's messages go
-// to the agent, or on Linear when the epic has no thread. While awaitingInput on Linear, the user's replies to the
-// question are typed into the pane.
+// its question is asked in its epic's chat thread instead. A run without one asks there at once. The user's messages in
+// the thread go to the agent. An epic without a thread is flagged instead, to be answered in the agent's tab.
 export const monitoringRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
 	const chat = yield* Chat;
 	const herdr = yield* Herdr;
-	const linear = yield* Linear;
 	const comments = yield* Comments;
 	const prompts = yield* Prompts;
 	const transcript = yield* ClaudeTranscript;
@@ -97,53 +91,11 @@ export const monitoringRule = Effect.gen(function* () {
 		now,
 	});
 
-	// The reply is typed, then recorded, then marked: a recorded reply is never typed again, and one without the emoji
-	// gets it next tick. A crash between typing and recording types it again after the restart, which beats losing it.
-	// A refused reply (e.g. the agent sits at a dialog) gets a notice under the question, whose marker also keeps it
-	// from being typed later.
-	const deliverReplies = (initial: StartedRun, question: string, replies: ReadonlyArray<Reply>) =>
-		Effect.gen(function* () {
-			let run = initial;
-			const notices = replies.flatMap((reply) => Option.toArray(parseMarker(reply.body)));
-			const refused = new Set(notices.filter((marker) => marker.purpose === 'replyFailed').map((marker) => marker.key));
-			const fromUser = replies
-				.filter((reply) => Option.isNone(parseMarker(reply.body)) && !/^\*\*(sapphire-agent|herdr-linear)/.test(reply.body))
-				.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
-
-			for (const reply of fromUser) {
-				if (reply.reactions.some((reaction) => reaction.emoji === deliveredEmoji) || refused.has(reply.id)) {
-					continue;
-				}
-
-				if (run.deliveredReplyIds.includes(reply.id)) {
-					yield* linear.react(reply.id, deliveredEmoji);
-					continue;
-				}
-
-				const typed = yield* herdr.prompt(run.paneId, reply.body).pipe(
-					Effect.as(true),
-					Effect.catchTag('Permanent', (error) =>
-						Effect.logWarning(`typing reply ${reply.id} failed: ${error.message}`).pipe(
-							Effect.andThen(linear.comment(run.epicId, comments.replyFailed({ identifier: run.identifier, replyCommentId: reply.id, error: error.message }), question)),
-							Effect.as(false),
-						),
-					),
-				);
-
-				if (typed) {
-					run = { ...run, deliveredReplyIds: [...run.deliveredReplyIds, reply.id] };
-					yield* journal.putRun(run);
-					yield* linear.react(reply.id, deliveredEmoji);
-					yield* Effect.log(`typed reply ${reply.id} into ${run.paneId}`);
-				}
-			}
-		});
-
 	// The question the agent sent its reply-to session and ended its turn on, while no reply came.
 	const pendingMessage = (run: StartedRun) =>
 		run.replyTo === null || run.session === null ? Effect.succeedNone : transcript.pendingMessage({ id: run.session.id, cwd: run.worktreePath }, run.replyTo);
 
-	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, replies: ReadonlyArray<Reply>, topic: Option.Option<Topic>) =>
+	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, topic: Option.Option<Topic>) =>
 		Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
 			const status = observedAgentStatus(observation, watched);
@@ -186,21 +138,20 @@ export const monitoringRule = Effect.gen(function* () {
 				}
 
 				// The question is posted before the status records it, and the chat shows it once, so a crash in between is safe.
-				if (run.replyTo === null && Option.isSome(topic)) {
-					yield* Effect.log(`agent ${status} without a result file; asking in its chat thread`);
-					yield* chat.send({ _tag: 'question', thread: topic.value.thread, text: tail, askedAt: since });
+				if (Option.isSome(topic)) {
+					yield* Effect.log(
+						Option.isSome(message)
+							? `no reply to the agent's message for ${config.staleAfterSeconds} s; asking in its chat thread`
+							: `agent ${status} without a result file; asking in its chat thread`,
+					);
+					yield* chat.send({ _tag: 'question', thread: topic.value.thread, text: Option.getOrElse(message, () => shownTail(tail)), askedAt: since });
 					yield* journal.putRun({ ...run, status: 'awaitingInput' });
 
 					return;
 				}
 
-				yield* Effect.log(
-					Option.isSome(message)
-						? `no reply to the agent's message for ${config.staleAfterSeconds} s; asking on Linear`
-						: `agent ${status} without a result file; flagging it as awaitingInput`,
-				);
-
-				const question = yield* flag(
+				yield* Effect.log(`agent ${status} without a result file and its epic has no chat thread; flagging it as awaitingInput`);
+				yield* flag(
 					observation,
 					run,
 					Option.match(message, {
@@ -209,7 +160,7 @@ export const monitoringRule = Effect.gen(function* () {
 					}),
 				);
 
-				yield* journal.putRun({ ...run, status: 'awaitingInput', questionCommentId: question });
+				yield* journal.putRun({ ...run, status: 'awaitingInput' });
 
 				return;
 			}
@@ -234,10 +185,6 @@ export const monitoringRule = Effect.gen(function* () {
 
 				return;
 			}
-
-			if (run.status === 'awaitingInput' && run.questionCommentId !== null) {
-				yield* deliverReplies(run, run.questionCommentId, replies);
-			}
 		});
 
 	const plan = (observation: Observation) =>
@@ -245,8 +192,6 @@ export const monitoringRule = Effect.gen(function* () {
 			const runs = (yield* journal.listRuns).filter(
 				(run): run is StartedRun => watchedStatuses.includes(run.status) && isStarted(run) && observation.teams.has(run.teamId) && observation.epics.has(run.epicId),
 			);
-			const questions = runs.flatMap((run) => (run.status === 'awaitingInput' && run.questionCommentId !== null ? [run.questionCommentId] : []));
-			const replies = yield* linear.replies(questions);
 			const topics = yield* journal.listTopics;
 
 			return runs.flatMap((run): Array<EpicWork> => {
@@ -256,9 +201,7 @@ export const monitoringRule = Effect.gen(function* () {
 					return [];
 				}
 
-				const own = replies.filter((reply) => reply.parent.id === run.questionCommentId);
-
-				return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: monitor(observation, run, epic, own, Option.fromUndefinedOr(topics.find((topic) => topic.epicId === run.epicId))) }];
+				return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: monitor(observation, run, epic, Option.fromUndefinedOr(topics.find((topic) => topic.epicId === run.epicId))) }];
 			});
 		});
 

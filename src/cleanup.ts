@@ -7,9 +7,10 @@ import { Git, type Worktree } from './git.ts';
 import { GitHub } from './github.ts';
 import { Herdr, type WorkspaceTab } from './herdr.ts';
 import { Journal, newSession, type Run } from './journal.ts';
-import { type Epic, Linear } from './linear.ts';
+import type { Epic } from './linear.ts';
 import { epicWithIdentifier, hasRole, identifierOfBranch, isAgentWorking, isFinished, type Observation } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
+import { Projects } from './projects.ts';
 import { makeTabActions } from './run-actions.ts';
 
 // Everything cleanup found for one epic this tick.
@@ -22,15 +23,15 @@ const isTrackedWorktree = (runs: ReadonlyArray<Run>, worktree: Worktree) =>
 
 // Ends what is left of a run once its epic shipped or its PR was merged or closed (or, for a ready epic's run that never started,
 // once it ended): its tab, then its worktree and local branch, then its row. Work that is not on origin keeps the
-// worktree and the epic is told once; it is removed on a later tick once pushed or discarded. Also resolves owned
+// worktree and the user is told once; it is removed on a later tick once pushed or discarded. Also resolves owned
 // tabs and worktrees that no run tracks.
 export const cleanupRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
+	const projects = yield* Projects;
 	const journal = yield* Journal;
 	const git = yield* Git;
 	const github = yield* GitHub;
 	const herdr = yield* Herdr;
-	const linear = yield* Linear;
 	const comments = yield* Comments;
 	const { closeRunTab } = yield* makeTabActions;
 
@@ -75,8 +76,7 @@ export const cleanupRule = Effect.gen(function* () {
 			if (Option.isSome(unsaved)) {
 				if (run.status !== 'kept') {
 					yield* Effect.log(`kept ${worktree.path}: ${unsaved.value}`);
-					yield* linear.comment(
-						run.epicId,
+					yield* journal.addNotice(
 						comments.keptWorktree({ identifier: run.identifier, claimedAt: Option.some(run.claimedAt), worktreePath: worktree.path, reason: unsaved.value }),
 					);
 					yield* journal.putRun({ ...run, status: 'kept' });
@@ -103,7 +103,7 @@ export const cleanupRule = Effect.gen(function* () {
 
 			if (Option.isNone(run) && hasRole(observation, epic, ['ready', 'implementing', 'inReview'])) {
 				const [first, ...others] = tabs;
-				const repo = yield* repoOf(config, epic);
+				const repo = yield* repoOf(config, projects, epic);
 				// Claude already in the tab runs in a session sapphire-agent never recorded. Without Claude, the start rule starts
 				// it in the new one.
 				const session = runsClaude(Option.some(first)) ? null : yield* newSession(epic.identifier);
@@ -116,7 +116,7 @@ export const cleanupRule = Effect.gen(function* () {
 
 			for (const tab of rest) {
 				if (tab.agentStatus === 'working') {
-					yield* linear.comment(epic.id, comments.workingOrphan({ identifier: epic.identifier, tabLabel: tab.label, tabId: tab.tabId, paneId: tab.paneId }));
+					yield* journal.addNotice(comments.workingOrphan({ identifier: epic.identifier, tabLabel: tab.label, tabId: tab.tabId, paneId: tab.paneId }));
 					continue;
 				}
 
@@ -134,8 +134,7 @@ export const cleanupRule = Effect.gen(function* () {
 					const unsaved = yield* git.unsavedWork(worktree);
 
 					if (Option.isSome(unsaved)) {
-						return yield* linear.comment(
-							epic.id,
+						return yield* journal.addNotice(
 							comments.keptWorktree({ identifier: epic.identifier, claimedAt: Option.none(), worktreePath: worktree.path, reason: unsaved.value }),
 						);
 					}

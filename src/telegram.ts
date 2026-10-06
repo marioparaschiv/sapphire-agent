@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { Long } from '@mtcute/node';
+import { Long, md, type TextWithEntities } from '@mtcute/node';
 import { Effect, Fiber, Layer, Option, Ref, Result, Schedule, Stream } from 'effect';
 import { Permanent } from './call-policy.ts';
 import { Chat, type EpicHeading, type EpicState, type InboundMessage, type SliceProgress } from './chat.ts';
@@ -37,6 +37,8 @@ const topicTitle = ({ identifier, title }: EpicHeading, state: EpicState) => `${
 
 const archiveTitle = '✅ Done';
 
+const projectTitle = (name: string) => `📁 ${name}`.slice(0, titleLength);
+
 const sliceIcons: Record<SliceProgress, string> = { started: '▶️', done: '✔️' };
 
 const chunks = (text: string) => Array.from({ length: Math.ceil(text.length / messageLength) }, (_, index) => text.slice(index * messageLength, (index + 1) * messageLength));
@@ -44,12 +46,25 @@ const chunks = (text: string) => Array.from({ length: Math.ceil(text.length / me
 // The end of the text, at most `length` characters.
 const endOf = (text: string, length: number) => (text.length > length ? `…${text.slice(-(length - 1))}` : text);
 
+// The start of the text, at most `length` characters.
+const startOf = (text: string, length: number) => (text.length > length ? `${text.slice(0, length - 1)}…` : text);
+
 // As much of the end of the text as one message shows.
 const draftOf = (text: string) => endOf(text, messageLength);
 
-const questionHeading = '⏸ Waiting for input:\n\n';
+// Text is markdown as Chat documents it. mtcute also reads `--` as underline, `__` as italic and a backslash as an
+// escape, which turn up as plain text in commands, names and paths, so those are kept literal. A cut that leaves a code
+// block open makes mtcute throw; that text goes out unformatted.
+const markdown = (text: string): TextWithEntities => {
+	try {
+		return md(text.replaceAll('\\', '\\\\').replaceAll('--', '\\-\\-').replaceAll('__', '\\_\\_'));
+	} catch {
+		return { text, entities: [] };
+	}
+};
 
-const questionFooter = '\n\nWrite here to answer; it is typed into the agent.';
+// The code block holds the question, cut to what one message shows besides the rest.
+const questionText = (question: string) => md`⏸ **The agent waits for input**\n\`\`\`\n${endOf(question, messageLength - 100)}\n\`\`\`\nWrite here to answer; it is typed into the agent.`;
 
 // Why a message is dropped, or what it is: text, or a voice note to transcribe first.
 const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number>): Result.Result<{ readonly voiceFileId: string | null }, string> => {
@@ -70,7 +85,7 @@ const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number
 
 // The Chat port over the Telegram bot. It lets through what an allowed user wrote in their private chat with the bot,
 // in the main chat (General) or in a topic, with voice notes transcribed; renders intents as messages and topics; and
-// streams replies as drafts. Epic topics go to the chat of the first allowed user.
+// streams replies as drafts. Epic and project topics go to the chat of the first allowed user.
 export const telegramChat = Layer.effect(
 	Chat,
 	Effect.gen(function* () {
@@ -79,7 +94,7 @@ export const telegramChat = Layer.effect(
 		const transcriber = yield* Transcriber;
 		const [userChat] = telegram.allowedUserIds;
 
-		const answerVoiceNote = (message: TelegramMessage, text: string) =>
+		const answerVoiceNote = (message: TelegramMessage, text: TextWithEntities) =>
 			bot.sendText(message.chatId, text, { replyTo: message.messageId, topicId: message.topicId ?? undefined }).pipe(
 				Effect.catch((error) => Effect.logError('cannot answer a voice note', error)),
 			);
@@ -95,10 +110,10 @@ export const telegramChat = Layer.effect(
 				Effect.matchEffect({
 					onFailure: (error) =>
 						Effect.logWarning('cannot transcribe a voice note', error).pipe(
-							Effect.andThen(answerVoiceNote(message, `Could not transcribe the voice note: ${error.message}`)),
+							Effect.andThen(answerVoiceNote(message, md`Couldn't transcribe the voice note: ${error.message}\nSend it again, or type it.`)),
 							Effect.as(Option.none()),
 						),
-					onSuccess: (transcript) => answerVoiceNote(message, `🎙 ${transcript}`).pipe(Effect.as(Option.some(transcript))),
+					onSuccess: (transcript) => answerVoiceNote(message, md`🎙 ${transcript}`).pipe(Effect.as(Option.some(transcript))),
 				}),
 			);
 		};
@@ -141,7 +156,7 @@ export const telegramChat = Layer.effect(
 					}
 
 					yield* Ref.set(shown, current);
-					yield* bot.sendDraft(chatId, topicId, draftId, draftOf(current)).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
+					yield* bot.sendDraft(chatId, topicId, draftId, markdown(draftOf(current))).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
 				});
 
 				const stopped = bot.draftStops.pipe(
@@ -159,7 +174,7 @@ export const telegramChat = Layer.effect(
 				const sent: Array<string> = [];
 
 				for (const [index, chunk] of chunks((yield* Ref.get(written)).trim()).entries()) {
-					const id = yield* bot.sendText(chatId, chunk, { replyTo: index === 0 ? messageId : undefined, topicId: topicId ?? undefined });
+					const id = yield* bot.sendText(chatId, markdown(chunk), { replyTo: index === 0 ? messageId : undefined, topicId: topicId ?? undefined });
 
 					sent.push(messageRef(chatId, id, topicId));
 				}
@@ -177,7 +192,7 @@ export const telegramChat = Layer.effect(
 						case 'reply': {
 							const { chatId, messageId, topicId } = yield* parseMessageRef(intent.to);
 
-							return yield* bot.sendText(chatId, intent.text, { replyTo: messageId, topicId: topicId ?? undefined }).pipe(Effect.asVoid);
+							return yield* bot.sendText(chatId, markdown(intent.text), { replyTo: messageId, topicId: topicId ?? undefined }).pipe(Effect.asVoid);
 						}
 
 						case 'epicState': {
@@ -189,9 +204,9 @@ export const telegramChat = Layer.effect(
 						case 'pullRequestOpened': {
 							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
 
-							yield* bot.sendOnce(chatId, `PR opened: ${intent.url}`, `pullRequestOpened:${intent.thread}:${intent.url}`, { topicId });
+							yield* bot.sendOnce(chatId, md`PR opened: ${intent.url}`, `pullRequestOpened:${intent.thread}:${intent.url}`, { topicId });
 
-							return yield* bot.sendOnce(chatId, `${intent.epic.identifier} ${intent.epic.title}: PR opened ${intent.url}`, `pullRequestOpened:main:${intent.url}`);
+							return yield* bot.sendOnce(chatId, md`${intent.epic.identifier} ${intent.epic.title}: PR opened ${intent.url}`, `pullRequestOpened:main:${intent.url}`);
 						}
 
 						case 'epicShipped': {
@@ -199,7 +214,7 @@ export const telegramChat = Layer.effect(
 							const { identifier, title } = intent.epic;
 							const line = [`${identifier} ${title}`, intent.pullRequestUrl ?? 'no PR', `${intent.slices} ${intent.slices === 1 ? 'slice' : 'slices'}`].join(' · ');
 
-							return yield* bot.sendOnce(chatId, line, `epicShipped:${intent.archive}:${identifier}`, { topicId });
+							return yield* bot.sendOnce(chatId, md`${line}`, `epicShipped:${intent.archive}:${identifier}`, { topicId });
 						}
 
 						case 'closeThread': {
@@ -212,26 +227,42 @@ export const telegramChat = Layer.effect(
 							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
 							const { identifier, title } = intent.slice;
 
-							return yield* bot.sendOnce(chatId, `${sliceIcons[intent.progress]} ${identifier} ${title} ${intent.progress}`, `sliceMoved:${intent.thread}:${identifier}:${intent.progress}`, { topicId });
+							return yield* bot.sendOnce(chatId, md`${sliceIcons[intent.progress]} ${identifier} ${title} ${intent.progress}`, `sliceMoved:${intent.thread}:${identifier}:${intent.progress}`, { topicId });
 						}
 
 						case 'phaseStarted': {
 							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
 
-							return yield* bot.sendOnce(chatId, `🔎 /${intent.phase} started`, `phaseStarted:${intent.thread}:${intent.phase}:${intent.startedAt}`, { topicId });
+							return yield* bot.sendOnce(chatId, md`🔎 /${intent.phase} started`, `phaseStarted:${intent.thread}:${intent.phase}:${intent.startedAt}`, { topicId });
 						}
 
 						case 'question': {
 							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
-							const text = `${questionHeading}${endOf(intent.text, messageLength - questionHeading.length - questionFooter.length)}${questionFooter}`;
+							return yield* bot.sendOnce(chatId, questionText(intent.text), `question:${intent.thread}:${intent.askedAt}`, { topicId });
+						}
 
-							return yield* bot.sendOnce(chatId, text, `question:${intent.thread}:${intent.askedAt}`, { topicId });
+						case 'notice': {
+							const { chatId, topicId } = intent.thread === null ? { chatId: userChat, topicId: undefined } : yield* parseThreadRef(intent.thread);
+							const text = markdown(startOf(intent.text, messageLength));
+
+							return yield* intent.key === null ? bot.sendText(chatId, text, { topicId }).pipe(Effect.asVoid) : bot.sendOnce(chatId, text, `notice:${intent.key}`, { topicId });
 						}
 					}
 				}),
 			streamReply,
 			openEpic: (epic, state) => openTopic(topicTitle(epic, state)),
 			openArchive: openTopic(archiveTitle),
+			openProject: (name) => openTopic(projectTitle(name)),
+			missingThreads: (threads) =>
+				Effect.gen(function* () {
+					const parsed = yield* Effect.forEach(threads, parseThreadRef);
+					const chats = [...new Set(parsed.map(({ chatId }) => chatId))];
+					const existing = yield* Effect.forEach(chats, (chatId) =>
+						bot.existingTopics(chatId, parsed.filter((thread) => thread.chatId === chatId).map(({ topicId }) => topicId)).pipe(Effect.map((topicIds) => topicIds.map((topicId) => threadRef(chatId, topicId)))),
+					);
+
+					return threads.filter((thread) => !existing.flat().includes(thread));
+				}),
 		});
 	}),
 );

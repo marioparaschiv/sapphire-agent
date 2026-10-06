@@ -3,7 +3,7 @@ import { Data, Deferred, Duration, Effect, Logger, Ref } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Permanent, Transient } from './call-policy.ts';
 import { LinearFixture } from './linear-fixture.ts';
-import { parseMarker } from './markers.ts';
+import { Journal } from './journal.ts';
 import { Planner, type Rule } from './planner.ts';
 import { plannerDependencies } from './test-harness.ts';
 
@@ -21,12 +21,8 @@ const failingRule = (epicId: string, identifier: string, outcome: Ref.Ref<Effect
 	plan: () => Effect.succeed([{ epicId, identifier, teamId: 'team-test', apply: Effect.flatten(Ref.get(outcome)) }]),
 });
 
-const markers = (fixture: LinearFixture['Service'], issueId: string) =>
-	fixture.comments(issueId).map((comment) => {
-		const marker = parseMarker(comment.body);
-
-		return marker._tag === 'Some' ? `${marker.value.purpose}:${marker.value.key}` : comment.body;
-	});
+// The rules here send nothing, so the outbox holds every notice written.
+const notices = Journal.use((journal) => journal.unsentNotices).pipe(Effect.map((rows) => rows.map(({ purpose, key, text }) => ({ marker: `${purpose}:${key}`, text }))));
 
 describe('Planner', () => {
 	it.effect('runs each epic in its own fiber, logs failures with the epic and moves on', () =>
@@ -78,15 +74,19 @@ describe('Planner', () => {
 			yield* tick;
 			yield* TestClock.adjust('9 minutes');
 			yield* tick;
-			assert.deepStrictEqual(fixture.comments(epic.id), []);
+			assert.deepStrictEqual(yield* notices, []);
 
 			yield* TestClock.adjust('1 minute');
 			yield* tick;
 			yield* TestClock.adjust('5 minutes');
 			yield* tick;
-			assert.deepStrictEqual(markers(fixture, epic.id), ['transientFailure:0']);
-			assert.match(fixture.comments(epic.id)[0].body, /calls for this epic have been failing for 10 min: herdr pane read: server_not_running/);
+			assert.deepStrictEqual(
+				(yield* notices).map(({ marker }) => marker),
+				['transientFailure:0'],
+			);
+			assert.match((yield* notices)[0].text, /^⚠️ \*\*TEST-10's calls keep failing\*\* for 10 min: herdr pane read: server_not_running/);
 			assert.deepStrictEqual(fixture.labelNames(epic.id), []);
+			assert.deepStrictEqual(fixture.comments(epic.id), []);
 
 			yield* Ref.set(outcome, Effect.void);
 			yield* tick;
@@ -94,7 +94,10 @@ describe('Planner', () => {
 			yield* tick;
 			yield* TestClock.adjust('10 minutes');
 			yield* tick;
-			assert.deepStrictEqual(markers(fixture, epic.id), ['transientFailure:0', `transientFailure:${Duration.toMillis('15 minutes')}`]);
+			assert.deepStrictEqual(
+				(yield* notices).map(({ marker }) => marker),
+				['transientFailure:0', `transientFailure:${Duration.toMillis('15 minutes')}`],
+			);
 		}).pipe(withPlanner({ flagTransientAfterSeconds: 600 })),
 	);
 
@@ -109,8 +112,12 @@ describe('Planner', () => {
 			yield* TestClock.adjust('1 minute');
 			yield* tick;
 
-			assert.deepStrictEqual(markers(fixture, epic.id), ['permanentFailure:0']);
-			assert.match(fixture.comments(epic.id)[0].body, /retrying cannot help: gh api: HTTP 422: Validation Failed/);
+			assert.deepStrictEqual(
+				(yield* notices).map(({ marker }) => marker),
+				['permanentFailure:0'],
+			);
+			assert.match((yield* notices)[0].text, /^🔴 \*\*A call for TEST-11 failed for good\*\*: gh api: HTTP 422: Validation Failed/);
+			assert.deepStrictEqual(fixture.comments(epic.id), []);
 			assert.deepStrictEqual(fixture.labelNames(epic.id), ['agent-stuck']);
 		}).pipe(withPlanner()),
 	);

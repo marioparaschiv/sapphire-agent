@@ -8,11 +8,11 @@ import { ClaudeTranscript } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig, TelegramConfig } from './config.ts';
-import { answerChatMessages, keepChatSessionWarm } from './conversations.ts';
+import { answerChatMessages, checkChatSettings, keepChatSessionWarm } from './conversations.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { GitHubApp } from './github-app.ts';
-import { Herdr } from './herdr.ts';
+import { agentWorkspaceLabels, Herdr } from './herdr.ts';
 import { Journal } from './journal.ts';
 import { refuseUndrainedClaims } from './legacy-claims.ts';
 import { Linear } from './linear.ts';
@@ -20,6 +20,7 @@ import { MissedDeliveries } from './missed-deliveries.ts';
 import { Observer } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
@@ -40,6 +41,7 @@ const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, Cla
 const MainLive = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
 	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
 	Layer.provideMerge(ServicesLive),
+	Layer.provideMerge(Projects.layer),
 	Layer.provideMerge(JournalLive),
 	Layer.provide(FetchHttpClient.layer),
 );
@@ -49,11 +51,16 @@ const program = Effect.gen(function* () {
 	const reconciler = yield* Reconciler;
 	const herdr = yield* Herdr;
 	const missedDeliveries = yield* MissedDeliveries;
+	const projects = yield* Projects;
 	const fs = yield* FileSystem.FileSystem;
+	const watched = yield* projects.list;
 
-	yield* Effect.log(`watching ${Object.keys(config.teams).join(', ')} every ${config.pollSeconds}s, at most ${config.maxInFlight} in flight`);
+	yield* Effect.log(`watching ${watched.map(({ team }) => team).join(', ') || 'no projects'} every ${config.pollSeconds}s, at most ${config.maxInFlight} in flight`);
 
-	yield* Effect.forkChild(Stream.runForEach(herdr.events, () => reconciler.wake));
+	yield* Effect.forkChild(Stream.runForEach(herdr.events(Effect.map(projects.list, (list) => agentWorkspaceLabels(list, config.workspaceLabel))), () => reconciler.wake));
+	// A project the requests rule changed is observed on the tick after.
+	yield* Effect.forkChild(Stream.runForEach(Stream.drop(projects.changes, 1), () => reconciler.wake));
+	yield* Effect.forkChild(checkChatSettings.pipe(Effect.catch((error) => Effect.logWarning("cannot check that chat turns run with the user's Claude settings", error))));
 	yield* Effect.forkChild(missedDeliveries.run);
 	yield* Effect.forkChild(answerChatMessages);
 	yield* Effect.forkChild(keepChatSessionWarm);

@@ -6,7 +6,7 @@ import { Config, Context, Effect, FileSystem, Layer, Predicate, Redacted, Result
 const expandHome = (path: string) => (path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path);
 
 // Without a trailing slash, so a path compares equal to the paths git and herdr report.
-const toPath = (path: string) => normalize(expandHome(path)).replace(/(.)\/$/, '$1');
+export const toPath = (path: string) => normalize(expandHome(path)).replace(/(.)\/$/, '$1');
 
 const Path = Schema.NonEmptyString.pipe(Schema.decode({ decode: SchemaGetter.transform(toPath), encode: SchemaGetter.passthrough() }));
 
@@ -40,6 +40,8 @@ const Settings = Schema.Struct({
 	nudgeGraceSeconds: IntAtLeast(60, 600),
 	// How long a run may go, in any state, before the epic is flagged once.
 	maxRunSeconds: IntAtLeast(600, 5400),
+	// How much context a run's agent or one of its subagents may use before it hands its work to a fresh session.
+	handoffAtTokens: IntAtLeast(10_000, 250_000),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
 	// How often the App's failed webhook deliveries are looked for and redelivered.
@@ -59,7 +61,8 @@ const Settings = Schema.Struct({
 	}).pipe(withDefault({})),
 	// The secret Linear signs its webhook deliveries with. They reach the server on 127.0.0.1:bot.app.webhookPort at /linear.
 	linearWebhookSecretFile: Path,
-	teams: Schema.Record(Schema.NonEmptyString, Team).check(Schema.makeFilter((teams) => Object.keys(teams).length > 0 || 'no teams configured')),
+	// Imported into the journal's projects while it has none; `sapphire project` manages them from then on.
+	teams: Schema.optionalKey(Schema.Record(Schema.NonEmptyString, Team)),
 	// The handle whose @mention by one of `allowedUsers` starts a command run. The GitHub App answers, and its webhook
 	// deliveries bring the mentions to a server on 127.0.0.1:webhookPort.
 	bot: Schema.Struct({

@@ -66,6 +66,7 @@ const outcome = (h: Harness, epic: Epic, number: number, threadIds: ReadonlyArra
 				return [thread.isResolved, markerKeys(thread.comments.map((comment) => comment.body))];
 			}),
 			pullRequestComments: markerKeys(h.github.comments(h.githubRepo, number)),
+			notices: h.notices(epic.identifier).map(({ marker }) => marker),
 			state: h.linear.stateName(epic.id),
 			openTabs: h.herdr.tabs().filter((tab) => tab.label.startsWith(`${epic.identifier} `)).length,
 			runs: (yield* h.runs).map((run) => `${run.status} ${run.job._tag}`),
@@ -73,16 +74,19 @@ const outcome = (h: Harness, epic: Epic, number: number, threadIds: ReadonlyArra
 		};
 	});
 
+const pullRequestOpened = 'pullRequestOpened:https://github.com/test/repo/pull/1';
+
 const answered = ({ rename, backoff, firstRunAt, followUpAt }: { readonly rename: string; readonly backoff: string; readonly firstRunAt: number; readonly followUpAt: number }) => ({
 	threads: [
 		[true, [`reply:${rename}.${followUpAt}`]],
 		[true, [`reply:${backoff}.${followUpAt}`]],
 	],
-	pullRequestComments: [`summary:${firstRunAt}`, `summary:${followUpAt}`],
+	pullRequestComments: [`addressed:${followUpAt}`],
+	notices: [`summary:${firstRunAt}`, `summary:${followUpAt}`],
 	state: 'To Review',
 	openTabs: 0,
 	runs: ['ended follow-up'],
-	linearComments: [],
+	linearComments: [pullRequestOpened],
 });
 
 describe('follow-ups', () => {
@@ -140,9 +144,14 @@ describe('follow-ups', () => {
 			);
 			assert.strictEqual(h.github.thread(backoff).comments[1].author, 'orchestratorbot[bot]');
 			assert.deepStrictEqual([h.github.thread(note).isResolved, h.github.thread(note).comments.length], [false, 1]);
-			assert.isTrue(h.github.comments(h.githubRepo, pullRequest.number)[1].startsWith('Renamed the sync function and added backoff.\n\nReady for review, @marioparaschiv.'));
+			assert.deepStrictEqual(
+				h.github.botComments(h.githubRepo, pullRequest.number).map((body) => body.split('\n\n')[0]),
+				['Addressed your concerns inline.'],
+			);
+			assert.isTrue(h.notices(epic.identifier)[1].text.startsWith(`✅ **TEST-10 is ready for review**: ${pullRequest.url}\nRenamed the sync function and added backoff.`));
 			assert.strictEqual(h.herdr.starts().length, 1);
 			assert.deepStrictEqual(yield* h.ctl('status'), [
+				`project Test: ${h.repo}`,
 				`TEST-10 ended (follow-up), epic in To Review, claimed 1970-01-01T00:01:00.000Z, tab ${tab.tabId}, session test-10, ${worktreePath}`,
 				'no commands',
 			]);
@@ -174,7 +183,11 @@ describe('follow-ups', () => {
 				(yield* h.runs).map((run) => [run.status, run.job, run.claimedAt]),
 				[['running', { _tag: 'follow-up', threadIds: [], instruction: 'Also update the changelog.' }, secondAt]],
 			);
-			assert.deepStrictEqual(markerKeys(h.github.comments(h.githubRepo, pullRequest.number)), [`summary:${firstRunAt}`, `summary:${followUpAt}`]);
+			assert.deepStrictEqual(markerKeys(h.github.comments(h.githubRepo, pullRequest.number)), [`addressed:${followUpAt}`]);
+			assert.deepStrictEqual(
+				h.notices(epic.identifier).map(({ marker }) => marker),
+				[`summary:${firstRunAt}`, `summary:${followUpAt}`],
+			);
 			assert.match(h.herdr.starts()[1].prompt, /, no threads, instruction "Also update the changelog\."$/);
 		}),
 	);
@@ -200,7 +213,7 @@ describe('follow-ups', () => {
 					`crash at journal write ${nth}`,
 				);
 				assert.strictEqual(h.herdr.starts().length, 1, `crash at journal write ${nth}`);
-				assert.deepStrictEqual(yield* h.ctl('status').pipe(Effect.map((lines) => lines.slice(1))), ['no commands'], `crash at journal write ${nth}`);
+				assert.deepStrictEqual(yield* h.ctl('status').pipe(Effect.map((lines) => lines.slice(2))), ['no commands'], `crash at journal write ${nth}`);
 			}
 		}),
 	);
@@ -208,8 +221,8 @@ describe('follow-ups', () => {
 	it.effect('replies once to and resolves every thread when a crash follows any PR write, after a restart', () =>
 		Effect.gen(function* () {
 			const crash = new Transient({ message: 'the process died' });
-			// GitHub writes: the summary, then a reply and a resolve per thread.
-			const writes = ['the summary', 'the first reply', 'the first resolve', 'the second reply', 'the second resolve'];
+			// GitHub writes: a reply and a resolve per thread, then the one PR comment.
+			const writes = ['the first reply', 'the first resolve', 'the second reply', 'the second resolve', 'the PR comment'];
 
 			for (const [index, where] of writes.entries()) {
 				const h = yield* makeHarness();
@@ -259,15 +272,16 @@ describe('follow-ups', () => {
 					[false, []],
 					[false, []],
 				],
-				pullRequestComments: [`summary:${firstRunAt}`],
+				pullRequestComments: [],
+				notices: [`summary:${firstRunAt}`, `threadMismatch:${followUpAt}`],
 				state: 'Implementing',
 				openTabs: 1,
 				runs: ['error follow-up'],
-				linearComments: [`threadMismatch:${followUpAt}`],
+				linearComments: [pullRequestOpened],
 			});
 			assert.match(
-				h.linear.comments(epic.id)[0].body,
-				new RegExp(`no reply for ${backoff}; replies to threads it was not given PRRT_99\\. Nothing was posted to the PR\\. Remove the label, move the epic to To Review and mention @orchestratorbot`),
+				h.notices(epic.identifier)[1].text,
+				new RegExp(`no reply for ${backoff}; replies to threads it was not given PRRT_99\\. Nothing was posted to the PR\\.\nNext: Remove the \`agent-stuck\` label, move the epic to To Review and ask for the follow-up again\\.$`),
 			);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
 		}),
@@ -310,7 +324,7 @@ describe('follow-ups', () => {
 	it.effect('a follow-up that fails to start goes back to ended in To Review, keeps its worktree and is asked for again once the label is removed', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { epic, worktreePath, pullRequest, followUpAt } = yield* reviewedEpic(h, { push: false });
+			const { epic, worktreePath, pullRequest, firstRunAt, followUpAt } = yield* reviewedEpic(h, { push: false });
 			const threads = addThreads(h, pullRequest.number);
 
 			yield* requestFollowUp(h, threads);
@@ -322,8 +336,11 @@ describe('follow-ups', () => {
 				[['ended', 'follow-up', worktreePath]],
 			);
 			assert.deepStrictEqual(h.worktrees(), [worktreePath]);
-			assert.deepStrictEqual(h.epicMarkers(epic.id), [`startFailed:${followUpAt}`]);
-			assert.match(h.linear.comments(epic.id)[0].body, /pull --ff-only/);
+			assert.deepStrictEqual(
+				h.notices(epic.identifier).map(({ marker }) => marker),
+				[`summary:${firstRunAt}`, `startFailed:${followUpAt}`],
+			);
+			assert.match(h.notices(epic.identifier)[1].text, /pull --ff-only/);
 			assert.strictEqual(h.linear.stateName(epic.id), 'To Review');
 			assert.deepStrictEqual(h.herdr.starts(), []);
 

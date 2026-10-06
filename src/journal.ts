@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
 import { EpicState, MessageRef, Phase, ThreadRef } from './chat.ts';
+import { Marker, type Notice } from './markers.ts';
 import { ResultFile } from './result-file.ts';
 
 // claimed: recorded before the run is started. running: Claude is confirmed started. awaitingInput: the agent sat
@@ -37,6 +39,16 @@ export const sessionName = (identifier: string) => identifier.toLowerCase();
 // Made when a run or command is claimed and kept from then on, so a start after a crash resumes into the same session.
 export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: sessionName(identifier) }));
 
+// The run's agent handing its work to a fresh session once its context filled up: asked to write the handoff doc, its
+// session cleared once the doc exists and the turn ended, then the new session told to read the doc. Each step is
+// recorded before it is typed, so none is typed twice.
+export const HandoffStep = Schema.Literals(['requested', 'cleared', 'resumed']);
+
+// `sessionId` is the session that hands off.
+export const Handoff = Schema.Struct({ sessionId: Schema.String, step: HandoffStep });
+
+export type Handoff = typeof Handoff.Type;
+
 // Only what cannot be observed from Linear, herdr, git or GitHub. Times are epoch milliseconds.
 export const Run = Schema.Struct({
 	epicId: Schema.String,
@@ -52,7 +64,7 @@ export const Run = Schema.Struct({
 	paneId: Schema.NullOr(Schema.String),
 	// None for a run claimed before sessions were recorded, or adopted from a tab Claude already ran in.
 	session: Schema.NullOr(Schema.fromJsonString(Session)),
-	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks on Linear.
+	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks in the epic's topic.
 	replyTo: Schema.NullOr(Schema.String),
 	claimedAt: Millis,
 	// When Claude was confirmed started in the pane.
@@ -64,10 +76,8 @@ export const Run = Schema.Struct({
 	nudgedAt: Schema.NullOr(Millis),
 	tailHash: Schema.NullOr(Schema.String),
 	result: Schema.NullOr(Schema.fromJsonString(ResultFile)),
-	// The awaitingInput comment whose replies are typed into the pane; cleared when the episode ends.
-	questionCommentId: Schema.NullOr(Schema.String),
-	// Replies already typed into the pane, so a crash before the delivery emoji is added never types one twice.
-	deliveredReplyIds: Schema.fromJsonString(Schema.Array(Schema.String)),
+	// The latest handoff; none before the first.
+	handoff: Schema.NullOr(Schema.fromJsonString(Handoff)),
 });
 
 export type Run = typeof Run.Type;
@@ -118,6 +128,24 @@ export type Command = typeof Command.Type;
 
 export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${command.id}`;
 
+// A Linear team sapphire-agent watches, by its exact name, and the local clone its epics run in.
+export const ProjectSettings = Schema.Struct({
+	team: Schema.String,
+	repo: Schema.String,
+	// An epic labelled `<repoPrefix><name>` runs in `<labelReposDirectory>/<name>` instead of `repo`.
+	labelReposDirectory: Schema.NullOr(Schema.String),
+});
+
+export type ProjectSettings = typeof ProjectSettings.Type;
+
+export const Project = Schema.Struct({
+	...ProjectSettings.fields,
+	// The project's own chat thread, once one is opened for it.
+	thread: Schema.NullOr(ThreadRef),
+});
+
+export type Project = typeof Project.Type;
+
 // What `scripts/ctl.sh` and the agent event server ask the reconciler to do on its next tick. Both only append these,
 // so they never race a rule over a row; the rule that acts on one deletes it.
 export const Request = Schema.Union([
@@ -131,6 +159,12 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
 	// Recorded by the agent event server when a run's agent starts a phase.
 	Schema.TaggedStruct('phase', { identifier: Schema.String, phase: Phase }),
+	// Recorded by the agent event server when a run's agent's context reached handoffAtTokens in that session.
+	Schema.TaggedStruct('handoff', { identifier: Schema.String, sessionId: Schema.String }),
+	// `sapphire project add`, `edit` and `remove`, checked by the CLI before they are recorded.
+	Schema.TaggedStruct('project-add', { project: ProjectSettings }),
+	Schema.TaggedStruct('project-edit', { project: ProjectSettings }),
+	Schema.TaggedStruct('project-remove', { team: Schema.String }),
 ]);
 
 export type Request = typeof Request.Type;
@@ -153,6 +187,32 @@ export const Topic = Schema.Struct({
 });
 
 export type Topic = typeof Topic.Type;
+
+// A chat turn's Claude session and the directory it runs in; Claude keeps sessions per directory, so a resume runs there too.
+export const ChatSession = Schema.Struct({ sessionId: Schema.String, cwd: Schema.String });
+
+export type ChatSession = typeof ChatSession.Type;
+
+// turn: the bot's answer to a message. reminder: the bot said the session's prompt cache is about to expire.
+export const ChatMessageKind = Schema.Literals(['turn', 'reminder']);
+
+// Bot messages written in one session: in the main chat (no thread) or in a project's thread.
+export const ChatPost = Schema.Struct({ ...ChatSession.fields, thread: Schema.NullOr(ThreadRef), kind: ChatMessageKind });
+
+export type ChatPost = typeof ChatPost.Type;
+
+export const ChatMessage = Schema.Struct({ messageRef: MessageRef, ...ChatPost.fields, createdAt: Millis });
+
+export type ChatMessage = typeof ChatMessage.Type;
+
+// A notice in the outbox, oldest first, until the notices rule sent it.
+export const UnsentNotice = Schema.Struct({ id: Schema.Int, ...Marker.fields, text: Schema.String });
+
+export type UnsentNotice = typeof UnsentNotice.Type;
+
+export const SubagentHandoff = Schema.Struct({ agentId: Schema.String, identifier: Schema.String });
+
+export type SubagentHandoff = typeof SubagentHandoff.Type;
 
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
@@ -298,6 +358,71 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0009_create_projects': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`
+				CREATE TABLE projects (
+					team TEXT PRIMARY KEY,
+					repo TEXT NOT NULL,
+					label_repos_directory TEXT,
+					thread TEXT
+				)
+			`;
+		}),
+		'0010_add_chat_session_cwd_and_thread': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// Every chat turn so far ran in the home directory, in the main chat.
+			yield* sql`
+				CREATE TABLE chat_messages (
+					message_ref TEXT PRIMARY KEY,
+					session_id TEXT NOT NULL,
+					cwd TEXT NOT NULL,
+					thread TEXT,
+					kind TEXT NOT NULL,
+					created_at INTEGER NOT NULL
+				)
+			`;
+			yield* sql`
+				INSERT INTO chat_messages (message_ref, session_id, cwd, thread, kind, created_at)
+				SELECT message_ref, session_id, ${homedir()}, NULL, 'turn', created_at FROM chat_sessions ORDER BY rowid
+			`;
+			yield* sql`DROP TABLE chat_sessions`;
+			yield* sql`ALTER TABLE chat_messages RENAME TO chat_sessions`;
+		}),
+		'0011_create_notices': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// Sent notices stay, so a notice written again for the same marker is not sent again.
+			yield* sql`
+				CREATE TABLE notices (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					identifier TEXT NOT NULL,
+					purpose TEXT NOT NULL,
+					key TEXT NOT NULL,
+					text TEXT NOT NULL,
+					created_at INTEGER NOT NULL,
+					sent_at INTEGER,
+					UNIQUE (identifier, purpose, key)
+				)
+			`;
+			yield* sql`ALTER TABLE runs DROP COLUMN question_comment_id`;
+			yield* sql`ALTER TABLE runs DROP COLUMN delivered_reply_ids`;
+		}),
+		'0012_add_handoffs': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN handoff TEXT`;
+			// The subagents told to hand off, so each is told once.
+			yield* sql`
+				CREATE TABLE subagent_handoffs (
+					agent_id TEXT PRIMARY KEY,
+					identifier TEXT NOT NULL,
+					requested_at INTEGER NOT NULL
+				)
+			`;
+		}),
 	}),
 });
 
@@ -331,17 +456,32 @@ export class Journal extends Context.Service<
 		// When the newest webhook delivery the last complete scan saw was delivered, in ms; none before the first scan.
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
 		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
-		// Records that the main chat's bot messages were written in the Claude session.
-		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) => Effect.Effect<void, JournalError>;
-		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<string>, JournalError>;
-		// The session of the newest bot message.
-		readonly latestChatSession: Effect.Effect<Option.Option<string>, JournalError>;
+		// Records that the bot messages were written in the Claude session.
+		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) => Effect.Effect<void, JournalError>;
+		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<ChatSession>, JournalError>;
+		// The session of the main chat's newest bot message.
+		readonly latestChatSession: Effect.Effect<Option.Option<ChatSession>, JournalError>;
+		// The newest bot message in the thread.
+		readonly lastChatMessage: (thread: ThreadRef) => Effect.Effect<Option.Option<ChatMessage>, JournalError>;
 		readonly listTopics: Effect.Effect<ReadonlyArray<Topic>, JournalError>;
 		// Inserts the topic or replaces the one of the same epic.
 		readonly putTopic: (topic: Topic) => Effect.Effect<void, JournalError>;
 		readonly deleteTopic: (epicId: string) => Effect.Effect<void, JournalError>;
 		readonly archiveThread: Effect.Effect<Option.Option<ThreadRef>, JournalError>;
 		readonly setArchiveThread: (thread: ThreadRef) => Effect.Effect<void, JournalError>;
+		// By team name.
+		readonly listProjects: Effect.Effect<ReadonlyArray<Project>, JournalError>;
+		// Inserts each project or replaces the one of the same team, all in one transaction.
+		readonly putProjects: (projects: ReadonlyArray<Project>) => Effect.Effect<void, JournalError>;
+		readonly deleteProject: (team: string) => Effect.Effect<void, JournalError>;
+		// Puts the notice in the outbox; false when one with the same marker was put there already.
+		readonly addNotice: (notice: Notice) => Effect.Effect<boolean, JournalError>;
+		readonly hasNotice: (marker: Marker) => Effect.Effect<boolean, JournalError>;
+		// Oldest first.
+		readonly unsentNotices: Effect.Effect<ReadonlyArray<UnsentNotice>, JournalError>;
+		readonly markNoticeSent: (id: number) => Effect.Effect<void, JournalError>;
+		// Records that the run's subagent was told to hand off; false when it was already.
+		readonly addSubagentHandoff: (handoff: SubagentHandoff) => Effect.Effect<boolean, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -450,29 +590,34 @@ export class Journal extends Context.Service<
 				});
 
 				const insertChatSession = SqlSchema.void({
-					Request: Schema.Struct({ messageRef: MessageRef, sessionId: Schema.String, createdAt: Millis }),
+					Request: ChatMessage,
 					execute: (row) => sql`INSERT OR REPLACE INTO chat_sessions ${sql.insert(row)}`,
 				});
 
-				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) =>
+				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) =>
 					Clock.currentTimeMillis.pipe(
 						Effect.flatMap((createdAt) =>
-							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, sessionId, createdAt }), { discard: true })),
+							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, ...post, createdAt }), { discard: true })),
 						),
 					);
 
-				const chatSession = (messageRef: MessageRef) =>
-					SqlSchema.findOneOption({
-						Request: MessageRef,
-						Result: Schema.Struct({ sessionId: Schema.String }),
-						execute: (ref) => sql`SELECT session_id FROM chat_sessions WHERE message_ref = ${ref}`,
-					})(messageRef).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
+				const chatSession = SqlSchema.findOneOption({
+					Request: MessageRef,
+					Result: ChatSession,
+					execute: (ref) => sql`SELECT session_id, cwd FROM chat_sessions WHERE message_ref = ${ref}`,
+				});
 
 				const latestChatSession = SqlSchema.findOneOption({
 					Request: Schema.Void,
-					Result: Schema.Struct({ sessionId: Schema.String }),
-					execute: () => sql`SELECT session_id FROM chat_sessions ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-				})(undefined).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
+					Result: ChatSession,
+					execute: () => sql`SELECT session_id, cwd FROM chat_sessions WHERE thread IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+				})(undefined);
+
+				const lastChatMessage = SqlSchema.findOneOption({
+					Request: ThreadRef,
+					Result: ChatMessage,
+					execute: (thread) => sql`SELECT * FROM chat_sessions WHERE thread = ${thread} ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+				});
 
 				const listTopics = SqlSchema.findAll({
 					Request: Schema.Void,
@@ -501,6 +646,69 @@ export class Journal extends Context.Service<
 					execute: (thread) => sql`INSERT OR REPLACE INTO archive_thread (id, thread) VALUES (1, ${thread})`,
 				});
 
+				const listProjects = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: Project,
+					execute: () => sql`SELECT * FROM projects ORDER BY team`,
+				})(undefined);
+
+				const putProject = SqlSchema.void({
+					Request: Project,
+					execute: (row) => sql`INSERT OR REPLACE INTO projects ${sql.insert(row)}`,
+				});
+
+				const putProjects = (projects: ReadonlyArray<Project>) => sql.withTransaction(Effect.forEach(projects, putProject, { discard: true }));
+
+				const deleteProject = SqlSchema.void({
+					Request: Schema.String,
+					execute: (team) => sql`DELETE FROM projects WHERE team = ${team}`,
+				});
+
+				const insertNotice = SqlSchema.findOneOption({
+					Request: Schema.Struct({ ...Marker.fields, text: Schema.String, createdAt: Millis }),
+					Result: Schema.Struct({ id: Schema.Int }),
+					execute: (row) => sql`INSERT INTO notices ${sql.insert(row)} ON CONFLICT (identifier, purpose, key) DO NOTHING RETURNING id`,
+				});
+
+				const addNotice = ({ marker, text }: Notice) =>
+					Clock.currentTimeMillis.pipe(
+						Effect.flatMap((createdAt) => insertNotice({ ...marker, text, createdAt })),
+						Effect.map(Option.isSome),
+					);
+
+				const findNotice = SqlSchema.findOneOption({
+					Request: Marker,
+					Result: Schema.Struct({ id: Schema.Int }),
+					execute: ({ identifier, purpose, key }) => sql`SELECT id FROM notices WHERE identifier = ${identifier} AND purpose = ${purpose} AND key = ${key}`,
+				});
+
+				const hasNotice = (marker: Marker) => findNotice(marker).pipe(Effect.map(Option.isSome));
+
+				const unsentNotices = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: UnsentNotice,
+					execute: () => sql`SELECT id, identifier, purpose, key, text FROM notices WHERE sent_at IS NULL ORDER BY id`,
+				})(undefined);
+
+				const markSent = SqlSchema.void({
+					Request: Schema.Struct({ id: Schema.Int, sentAt: Millis }),
+					execute: ({ id, sentAt }) => sql`UPDATE notices SET sent_at = ${sentAt} WHERE id = ${id}`,
+				});
+
+				const markNoticeSent = (id: number) => Clock.currentTimeMillis.pipe(Effect.flatMap((sentAt) => markSent({ id, sentAt })));
+
+				const insertSubagentHandoff = SqlSchema.findOneOption({
+					Request: Schema.Struct({ ...SubagentHandoff.fields, requestedAt: Millis }),
+					Result: Schema.Struct({ agentId: Schema.String }),
+					execute: (row) => sql`INSERT INTO subagent_handoffs ${sql.insert(row)} ON CONFLICT (agent_id) DO NOTHING RETURNING agent_id`,
+				});
+
+				const addSubagentHandoff = (handoff: SubagentHandoff) =>
+					Clock.currentTimeMillis.pipe(
+						Effect.flatMap((requestedAt) => insertSubagentHandoff({ ...handoff, requestedAt })),
+						Effect.map(Option.isSome),
+					);
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -520,11 +728,20 @@ export class Journal extends Context.Service<
 					addChatSession,
 					chatSession,
 					latestChatSession,
+					lastChatMessage,
 					listTopics,
 					putTopic,
 					deleteTopic,
 					archiveThread,
 					setArchiveThread,
+					listProjects,
+					putProjects,
+					deleteProject,
+					addNotice,
+					hasNotice,
+					unsentNotices,
+					markNoticeSent,
+					addSubagentHandoff,
 				});
 			}),
 		).pipe(

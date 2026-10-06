@@ -2,6 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem, NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope, Stream, SubscriptionRef } from 'effect';
 import { TestConsole } from 'effect/testing';
@@ -29,6 +30,7 @@ import { MissedDeliveries } from './missed-deliveries.ts';
 import { type Observation, Observer, type StartedRun } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
@@ -158,6 +160,8 @@ export type Harness = {
 	readonly commands: Effect.Effect<ReadonlyArray<Command>>;
 	// markerKeys of the issue's comments.
 	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
+	// The notices written for the epic or command, oldest first, with `<purpose>:<key>` and whether the chat got them.
+	readonly notices: (identifier: string) => ReadonlyArray<JournalNotice>;
 	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
 	// row claimed at the current TestClock time.
 	readonly startedRun: (seed: StartedRunSeed) => Effect.Effect<{ readonly epic: Epic; readonly run: StartedRun & { readonly session: Session } }>;
@@ -165,6 +169,8 @@ export type Harness = {
 	readonly writeResultFile: (run: Run, contents: string) => void;
 	// Writes the Claude session's transcript where Claude Code writes it.
 	readonly writeTranscript: (session: TranscriptSession, entries: ReadonlyArray<Record<string, unknown>>) => void;
+	// Writes the transcript of the session's subagent `agentId` where Claude Code writes it, and returns its path.
+	readonly writeSubagentTranscript: (session: TranscriptSession, agentId: string, entries: ReadonlyArray<Record<string, unknown>>) => string;
 	// Paths of the worktrees git knows under the worktrees directory.
 	readonly worktrees: () => ReadonlyArray<string>;
 	readonly hasBranch: (branch: string) => boolean;
@@ -172,11 +178,13 @@ export type Harness = {
 	// it printed.
 	readonly ctl: (...args: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<string>, unknown>;
 	// Runs `scripts/ctl.sh hook <agent>` as an agent's hook does in a herdr pane, with the payload on stdin; returns its
-	// exit code and stderr once the service answered.
+	// exit code, stdout and stderr once the service answered.
 	readonly hook: (agent: string, payload: string, paneId: string | null) => Effect.Effect<HookOutcome>;
 };
 
-export type HookOutcome = { readonly code: number | null; readonly stderr: string };
+export type JournalNotice = { readonly marker: string; readonly text: string; readonly sent: boolean };
+
+export type HookOutcome = { readonly code: number | null; readonly stdout: string; readonly stderr: string };
 
 const ctlScript = join(import.meta.dirname, '..', 'scripts', 'ctl.sh');
 
@@ -186,12 +194,16 @@ const runHook = (stateDirectory: string, agent: string, payload: string, paneId:
 		const child = spawn('sh', [ctlScript, 'hook', agent], {
 			env: { ...env, HERDR_PLUGIN_STATE_DIR: stateDirectory, ...(paneId === null ? {} : { HERDR_PANE_ID: paneId }) },
 		});
+		let stdout = '';
 		let stderr = '';
 
+		child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+			stdout += chunk;
+		});
 		child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
 			stderr += chunk;
 		});
-		child.on('close', (code) => resume(Effect.succeed({ code, stderr })));
+		child.on('close', (code) => resume(Effect.succeed({ code, stdout, stderr })));
 		child.stdin.end(payload);
 	});
 
@@ -267,7 +279,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					putTopic: (topic) => crashPoint.pipe(Effect.andThen(journal.putTopic(topic))),
 					deleteTopic: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteTopic(epicId))),
 					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
-					addChatSession: (messageRefs, sessionId) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, sessionId))),
+					addChatSession: (messageRefs, post) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, post))),
+					addNotice: (notice) => crashPoint.pipe(Effect.andThen(journal.addNotice(notice))),
+					addSubagentHandoff: (handoff) => crashPoint.pipe(Effect.andThen(journal.addSubagentHandoff(handoff))),
+					markNoticeSent: (id) => crashPoint.pipe(Effect.andThen(journal.markNoticeSent(id))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -278,6 +293,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			Layer.provideMerge(
 				Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer, telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest))),
 			),
+			Layer.provideMerge(Projects.layer),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
 			Layer.provide(NodeServices.layer),
@@ -293,7 +309,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			Context.get(fixtures, GitHubAppFixture).setWebhookUrl(Context.get(context, WebhookServer).url);
 
 			if (answerChat) {
-				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.forkIn(scope));
+				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.provide(fixtures), Effect.provide(NodeFileSystem.layer), Effect.forkIn(scope));
 			}
 
 			return { scope, context };
@@ -349,8 +365,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					nudgedAt: null,
 					tailHash: null,
 					result: null,
-					questionCommentId: null,
-					deliveredReplyIds: [],
+					handoff: null,
 				};
 
 				yield* (yield* journal).putRun(run).pipe(Effect.orDie);
@@ -400,6 +415,14 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			runs: journal.pipe(Effect.flatMap((found) => found.listRuns), Effect.orDie),
 			commands: journal.pipe(Effect.flatMap((found) => found.listCommands), Effect.orDie),
 			epicMarkers: (issueId) => markerKeys(linear.comments(issueId).map((comment) => comment.body)),
+			notices: (identifier) => {
+				const database = new DatabaseSync(join(dir, 'journal.db'), { readOnly: true });
+				const rows = database.prepare('SELECT purpose, key, text, sent_at FROM notices WHERE identifier = ? ORDER BY id').all(identifier);
+
+				database.close();
+
+				return rows.map(({ purpose, key, text, sent_at }) => ({ marker: `${String(purpose)}:${String(key)}`, text: String(text), sent: sent_at !== null }));
+			},
 			startedRun,
 			writeResultFile: (run, contents) => {
 				if (run.worktreePath === null) {
@@ -408,7 +431,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 				writeFileSync(join(git(run.worktreePath, 'rev-parse', '--absolute-git-dir'), 'herdr-result.json'), contents);
 			},
-			writeTranscript: (session, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries),
+			writeTranscript: (session, entries) => {
+				writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries);
+			},
+			writeSubagentTranscript: (session, agentId, entries) => writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries, agentId),
 			worktrees: () =>
 				git(repo, 'worktree', 'list', '--porcelain')
 					.split('\n')
@@ -421,7 +447,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 					yield* runCtl(args).pipe(
 						Effect.provideService(Console.Console, output),
-						Effect.provide(Layer.mergeAll(Journal.layer(join(dir, 'journal.db')), NodeServices.layer).pipe(Layer.provideMerge(Layer.succeedContext(fixtures)))),
+						Effect.provide(Layer.mergeAll(Journal.layer(join(dir, 'journal.db')), Git.layer).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(Layer.succeedContext(fixtures)))),
 					);
 
 					return (yield* output.logLines).flatMap((line) => String(line).split('\n'));

@@ -8,10 +8,13 @@ import { ChildProcessSpawner } from 'effect/process';
 import { TestClock } from 'effect/testing';
 import { Permanent, Transient } from './call-policy.ts';
 import { AppConfig } from './config.ts';
-import { Herdr, type HerdrEvent, identifierOf } from './herdr.ts';
+import { agentWorkspaceLabels, Herdr, type HerdrEvent, identifierOf } from './herdr.ts';
 import { FakeHerdr } from './herdr-fake.ts';
 
 // Output captured from herdr 0.9.3.
+// The workspaces of AppConfig.layerTest's Test team and of command agents.
+const workspaceLabels = agentWorkspaceLabels([{ team: 'Test' }], 'agents');
+
 const fixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures/herdr', name), 'utf8');
 
 type Reply = { readonly stdout?: string; readonly stderr?: string; readonly exitCode?: number };
@@ -144,7 +147,7 @@ describe('Herdr', () => {
 			const { herdr } = yield* liveHerdr(lists);
 
 			// The `personal` workspace is never read.
-			assert.deepStrictEqual(yield* herdr.workspaceTabs, [
+			assert.deepStrictEqual(yield* herdr.workspaceTabs(workspaceLabels), [
 				{ identifier: Option.none(), tabId: 'w1:t1', workspaceId: 'w1', label: 'notes', paneId: 'w1:p1', agent: Option.some('claude'), agentStatus: 'blocked' },
 				{ identifier: Option.some('HL-2'), tabId: 'w1:t4', workspaceId: 'w1', label: 'HL-2 Renamed', paneId: 'w1:p4', agent: Option.some('claude'), agentStatus: 'working' },
 				{ identifier: Option.some('HL-7'), tabId: 'w1:t6', workspaceId: 'w1', label: 'HL-7 Start', paneId: 'w1:p7', agent: Option.none(), agentStatus: 'unknown' },
@@ -154,9 +157,9 @@ describe('Herdr', () => {
 
 	it.effect('sees no tabs while its workspace does not exist', () =>
 		Effect.gen(function* () {
-			const { herdr, calls } = yield* liveHerdr(lists, { workspaceLabel: 'sapphire-agent' });
+			const { herdr, calls } = yield* liveHerdr(lists);
 
-			assert.deepStrictEqual(yield* herdr.workspaceTabs, []);
+			assert.deepStrictEqual(yield* herdr.workspaceTabs(['sapphire-agent']), []);
 			assert.deepStrictEqual(
 				calls.map(({ args }) => args),
 				['workspace list'],
@@ -338,7 +341,7 @@ describe('Herdr events', () => {
 				},
 			};
 
-			yield* Effect.forkScoped(Stream.runForEach(herdr.events, (event) => Queue.offer(received, event)));
+			yield* Effect.forkScoped(Stream.runForEach(herdr.events(Effect.succeed(workspaceLabels)), (event) => Queue.offer(received, event)));
 
 			const first = yield* Queue.take(connections);
 
@@ -395,7 +398,7 @@ describe('FakeHerdr', () => {
 			fake.addTab({ label: 'HL-4 Elsewhere', workspace: 'personal' });
 
 			assert.deepStrictEqual(
-				(yield* herdr.workspaceTabs).map(({ identifier, tabId, paneId, agentStatus }) => [identifier, tabId, paneId, agentStatus]),
+				(yield* herdr.workspaceTabs(workspaceLabels)).map(({ identifier, tabId, paneId, agentStatus }) => [identifier, tabId, paneId, agentStatus]),
 				[
 					[Option.some('HL-3'), owned.tabId, owned.paneId, 'idle'],
 					[Option.none(), command.tabId, command.paneId, 'working'],
@@ -480,7 +483,7 @@ describe('FakeHerdr', () => {
 			const received = yield* Queue.unbounded<HerdrEvent>();
 			const exited = (paneId: string): HerdrEvent => ({ _tag: 'PaneExited', paneId });
 
-			yield* Effect.forkScoped(Stream.runForEach(herdr.events, (event) => Queue.offer(received, event)));
+			yield* Effect.forkScoped(Stream.runForEach(herdr.events(Effect.succeed(workspaceLabels)), (event) => Queue.offer(received, event)));
 			yield* fake.awaitConnections(1);
 			yield* fake.emit(exited('w1:p1'));
 			assert.deepStrictEqual(yield* Queue.take(received), exited('w1:p1'));
