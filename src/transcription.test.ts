@@ -5,7 +5,7 @@ import { NodeServices } from '@effect/platform-node';
 import { assert, describe, layer } from '@effect/vitest';
 import { Effect, FileSystem, Layer } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
-import { AppConfig, transcriptionModel, transcriptionModelFiles } from './config.ts';
+import { TelegramConfig, transcriptionModel, transcriptionModelFiles } from './config.ts';
 import { Transcriber } from './transcription.ts';
 
 // The live service's state directory, whose model is only read.
@@ -13,7 +13,7 @@ const stateDirectory = join(homedir(), '.local/state/herdr/plugins/sapphire-agen
 const modelDirectory = join(stateDirectory, 'models', transcriptionModel);
 const modelPresent = Object.values(transcriptionModelFiles).every((file) => existsSync(join(modelDirectory, file)));
 
-const transcriberLayer = Transcriber.layer.pipe(Layer.provide(AppConfig.layerTest(stateDirectory)), Layer.provideMerge(NodeServices.layer));
+const transcriberLayer = Transcriber.layer.pipe(Layer.provide(TelegramConfig.layerTest(stateDirectory)), Layer.provideMerge(NodeServices.layer));
 
 describe.skipIf(!modelPresent)(modelPresent ? 'Transcriber' : `Transcriber (skipped: no ${transcriptionModel} in ${modelDirectory})`, () => {
 	layer(transcriberLayer, { timeout: '1 minute', excludeTestServices: true })((it) => {

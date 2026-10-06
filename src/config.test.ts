@@ -4,82 +4,86 @@ import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { ConfigProvider, Effect, FileSystem, Redacted } from 'effect';
-import { loadAppConfig, transcriptionModel, transcriptionModelFiles } from './config.ts';
+import { loadAppConfig, loadServiceConfig, type StartupError, transcriptionModel, transcriptionModelFiles } from './config.ts';
 
 type SecretFile = { text: string; mode: number };
 
-// `config` gets the temp directory the files are written to, which is also the state directory. Each Telegram file is
-// written unless given as null; the transcription model files go to `<directory>/models/<transcriptionModel>` unless
-// `modelFiles` names which.
-const load = (
-	env: Record<string, string>,
-	files: {
-		config?: (directory: string) => unknown;
-		key?: SecretFile;
-		appKey?: SecretFile;
-		webhookSecret?: SecretFile;
-		linearWebhookSecret?: SecretFile;
-		telegramToken?: SecretFile | null;
-		telegramApiId?: SecretFile | null;
-		telegramApiHash?: SecretFile | null;
-		modelFiles?: ReadonlyArray<string>;
-	},
-) =>
-	Effect.gen(function* () {
-		const fs = yield* FileSystem.FileSystem;
-		const directory = yield* fs.makeTempDirectoryScoped().pipe(Effect.orDie);
-		const config = files.config?.(directory);
+// Runs the loader. `config` gets the temp directory the files are written to, which is also the state directory. Each
+// Telegram file is written unless given as null; the transcription model files go to
+// `<directory>/models/<transcriptionModel>` unless `modelFiles` names which.
+const loadWith =
+	<A>(loader: Effect.Effect<A, StartupError, FileSystem.FileSystem>) =>
+	(
+		env: Record<string, string>,
+		files: {
+			config?: (directory: string) => unknown;
+			key?: SecretFile;
+			appKey?: SecretFile;
+			webhookSecret?: SecretFile;
+			linearWebhookSecret?: SecretFile;
+			telegramToken?: SecretFile | null;
+			telegramApiId?: SecretFile | null;
+			telegramApiHash?: SecretFile | null;
+			modelFiles?: ReadonlyArray<string>;
+		},
+	) =>
+		Effect.gen(function* () {
+			const fs = yield* FileSystem.FileSystem;
+			const directory = yield* fs.makeTempDirectoryScoped().pipe(Effect.orDie);
+			const config = files.config?.(directory);
 
-		if (config !== undefined) {
-			const text = typeof config === 'string' ? config : JSON.stringify(config);
-			yield* fs.writeFileString(join(directory, 'config.json'), text).pipe(Effect.orDie);
-		}
-
-		if (files.key) {
-			yield* fs.writeFileString(join(directory, 'linear-key'), files.key.text, { mode: files.key.mode }).pipe(Effect.orDie);
-		}
-
-		if (files.appKey) {
-			yield* fs.writeFileString(join(directory, 'app.pem'), files.appKey.text, { mode: files.appKey.mode }).pipe(Effect.orDie);
-		}
-
-		if (files.webhookSecret) {
-			yield* fs.writeFileString(join(directory, 'webhook-secret'), files.webhookSecret.text, { mode: files.webhookSecret.mode }).pipe(Effect.orDie);
-		}
-
-		if (files.linearWebhookSecret) {
-			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), files.linearWebhookSecret.text, { mode: files.linearWebhookSecret.mode }).pipe(Effect.orDie);
-		}
-
-		const telegramFiles = {
-			'telegram-bot-token': files.telegramToken === undefined ? { text: '123456:telegram-secret\n', mode: 0o600 } : files.telegramToken,
-			'telegram-api-id': files.telegramApiId === undefined ? { text: '1234567\n', mode: 0o600 } : files.telegramApiId,
-			'telegram-api-hash': files.telegramApiHash === undefined ? { text: 'telegram-api-hash\n', mode: 0o600 } : files.telegramApiHash,
-		};
-
-		for (const [name, file] of Object.entries(telegramFiles)) {
-			if (file) {
-				yield* fs.writeFileString(join(directory, name), file.text, { mode: file.mode }).pipe(Effect.orDie);
+			if (config !== undefined) {
+				const text = typeof config === 'string' ? config : JSON.stringify(config);
+				yield* fs.writeFileString(join(directory, 'config.json'), text).pipe(Effect.orDie);
 			}
-		}
 
-		const modelDirectory = join(directory, 'models', transcriptionModel);
+			if (files.key) {
+				yield* fs.writeFileString(join(directory, 'linear-key'), files.key.text, { mode: files.key.mode }).pipe(Effect.orDie);
+			}
 
-		yield* fs.makeDirectory(modelDirectory, { recursive: true }).pipe(Effect.orDie);
+			if (files.appKey) {
+				yield* fs.writeFileString(join(directory, 'app.pem'), files.appKey.text, { mode: files.appKey.mode }).pipe(Effect.orDie);
+			}
 
-		for (const file of files.modelFiles ?? Object.values(transcriptionModelFiles)) {
-			yield* fs.writeFileString(join(modelDirectory, file), '').pipe(Effect.orDie);
-		}
+			if (files.webhookSecret) {
+				yield* fs.writeFileString(join(directory, 'webhook-secret'), files.webhookSecret.text, { mode: files.webhookSecret.mode }).pipe(Effect.orDie);
+			}
 
-		const provider = ConfigProvider.fromEnvRecord({
-			HERDR_PLUGIN_CONFIG_DIR: directory,
-			HERDR_PLUGIN_STATE_DIR: directory,
-			SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
-			...env,
-		});
+			if (files.linearWebhookSecret) {
+				yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), files.linearWebhookSecret.text, { mode: files.linearWebhookSecret.mode }).pipe(Effect.orDie);
+			}
 
-		return yield* loadAppConfig.pipe(Effect.provide(ConfigProvider.layer(provider)));
-	}).pipe(Effect.provide(NodeFileSystem.layer));
+			const telegramFiles = {
+				'telegram-bot-token': files.telegramToken === undefined ? { text: '123456:telegram-secret\n', mode: 0o600 } : files.telegramToken,
+				'telegram-api-id': files.telegramApiId === undefined ? { text: '1234567\n', mode: 0o600 } : files.telegramApiId,
+				'telegram-api-hash': files.telegramApiHash === undefined ? { text: 'telegram-api-hash\n', mode: 0o600 } : files.telegramApiHash,
+			};
+
+			for (const [name, file] of Object.entries(telegramFiles)) {
+				if (file) {
+					yield* fs.writeFileString(join(directory, name), file.text, { mode: file.mode }).pipe(Effect.orDie);
+				}
+			}
+
+			const modelDirectory = join(directory, 'models', transcriptionModel);
+
+			yield* fs.makeDirectory(modelDirectory, { recursive: true }).pipe(Effect.orDie);
+
+			for (const file of files.modelFiles ?? Object.values(transcriptionModelFiles)) {
+				yield* fs.writeFileString(join(modelDirectory, file), '').pipe(Effect.orDie);
+			}
+
+			const provider = ConfigProvider.fromEnvRecord({
+				HERDR_PLUGIN_CONFIG_DIR: directory,
+				HERDR_PLUGIN_STATE_DIR: directory,
+				SAPPHIRE_AGENT_LINEAR_KEY_FILE: join(directory, 'linear-key'),
+				...env,
+			});
+
+			return yield* loader.pipe(Effect.provide(ConfigProvider.layer(provider)));
+		}).pipe(Effect.provide(NodeFileSystem.layer));
+
+const load = loadWith(loadServiceConfig);
 
 const fullEnv = { HERDR_BIN_PATH: '/bin/herdr', HERDR_SOCKET_PATH: '/run/herdr.sock' };
 const key = { text: 'lin_api_secret\n', mode: 0o600 };
@@ -104,7 +108,7 @@ const unbound = (directory: string) => ({ teams: { Unbound: { repo: '~/unbound' 
 describe('loadAppConfig', () => {
 	it.effect('fills defaults, expands ~ and reads the old stuckAfterSeconds key', () =>
 		Effect.gen(function* () {
-			const config = yield* load(fullEnv, { config: (directory) => ({ stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret });
+			const { app: config, telegram: telegramConfig } = yield* load(fullEnv, { config: (directory) => ({ stuckAfterSeconds: 240, teams: { Telecord: { repo: '~/telecord' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret });
 
 			assert.strictEqual(config.pollSeconds, 600);
 			assert.strictEqual(config.maxInFlight, 1);
@@ -122,15 +126,15 @@ describe('loadAppConfig', () => {
 			assert.isFalse('stuckAfterSeconds' in config);
 			assert.strictEqual(config.env.claudeConfigPath, join(homedir(), '.claude.json'));
 			assert.strictEqual(config.env.claudeConfigDirectory, join(homedir(), '.claude'));
-			assert.strictEqual(config.transcriptionModelDirectory, join(config.env.stateDirectory, 'models', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8'));
 			assert.strictEqual(Redacted.value(config.linearApiKey), 'lin_api_secret');
 			assert.strictEqual(config.appPrivateKey.export({ type: 'pkcs8', format: 'pem' }), appPem);
 			assert.strictEqual(Redacted.value(config.webhookSecret), 'whsec_test');
 			assert.strictEqual(Redacted.value(config.linearWebhookSecret), 'lin_wh_test');
 			assert.deepStrictEqual(config.telegram.allowedUserIds, [7_100_200_300]);
-			assert.strictEqual(Redacted.value(config.telegramBotToken), '123456:telegram-secret');
-			assert.strictEqual(config.telegramApiId, 1_234_567);
-			assert.strictEqual(Redacted.value(config.telegramApiHash), 'telegram-api-hash');
+			assert.strictEqual(Redacted.value(telegramConfig.botToken), '123456:telegram-secret');
+			assert.strictEqual(telegramConfig.apiId, 1_234_567);
+			assert.strictEqual(Redacted.value(telegramConfig.apiHash), 'telegram-api-hash');
+			assert.strictEqual(telegramConfig.transcriptionModelDirectory, join(config.env.stateDirectory, 'models', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8'));
 		}),
 	);
 
@@ -289,13 +293,22 @@ describe('loadAppConfig', () => {
 				Effect.flip,
 			);
 
-			assert.strictEqual(configured.transcriptionModelDirectory, join(configured.env.stateDirectory, 'models', transcriptionModel));
+			assert.strictEqual(configured.telegram.transcriptionModelDirectory, join(configured.app.env.stateDirectory, 'models', transcriptionModel));
 			assert.lengthOf(missing.problems, 2);
 			assert.match(missing.problems[0], /HERDR_BIN_PATH/);
 			assert.match(missing.problems[1], /^no transcription model in \S+\/models\/sherpa-onnx-nemo-parakeet-tdt-0\.6b-v3-int8: encoder\.int8\.onnx, tokens\.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0\.6b-v3-int8 there$/);
 			assert.deepStrictEqual(elsewhere.problems, [
 				`no transcription model in ${join(homedir(), 'no-such-model')}: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 there`,
 			]);
+		}),
+	);
+
+	it.effect("loads the CLI's config without the Telegram secrets or the transcription model", () =>
+		Effect.gen(function* () {
+			const config = yield* loadWith(loadAppConfig)(fullEnv, { config: unbound, key, appKey, webhookSecret, linearWebhookSecret, telegramToken: null, telegramApiId: null, telegramApiHash: null, modelFiles: [] });
+
+			assert.deepStrictEqual(config.teams, { Unbound: { repo: join(homedir(), 'unbound') } });
+			assert.strictEqual(Redacted.value(config.linearApiKey), 'lin_api_secret');
 		}),
 	);
 });

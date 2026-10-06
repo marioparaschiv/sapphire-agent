@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { Context, Effect, Layer, type PlatformError, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import sherpa from 'sherpa-onnx-node';
-import { AppConfig, transcriptionModelFiles } from './config.ts';
+import { TelegramConfig, transcriptionModelFiles } from './config.ts';
 
 export class TranscriptionError extends Schema.TaggedError<TranscriptionError>()('TranscriptionError', {
 	message: Schema.String,
@@ -26,7 +26,7 @@ export class Transcriber extends Context.Service<
 		Transcriber,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-			const { transcriptionModelDirectory } = yield* AppConfig;
+			const { transcriptionModelDirectory } = yield* TelegramConfig;
 			const model = (file: string) => join(transcriptionModelDirectory, file);
 			const recognizer = yield* Effect.tryPromise({
 				try: () =>

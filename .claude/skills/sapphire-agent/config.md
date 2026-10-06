@@ -142,7 +142,7 @@ Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl
 
 ## Startup errors
 
-Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero:
+Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero. The CLI (`ctl.ts`) checks the same minus the Telegram files and the model, which only the service uses:
 
 ```
 StartupError: cannot start, fix these and restart:

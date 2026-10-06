@@ -73,6 +73,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | Service | Module | Does | Test layer |
 | --- | --- | --- | --- |
 | `AppConfig` | `config.ts` | Env, config file, API key, Linear webhook secret and the GitHub App's private key and webhook secret, read once at startup. | `AppConfig.layerTest(dir, settings)` |
+| `TelegramConfig` | `config.ts` | The Telegram bot token, `api_id` and `api_hash` and the transcription model's directory; read by the service only, in the same pass as `AppConfig` (`TelegramConfig.layerWithAppConfig`), so the CLI runs without them. | `TelegramConfig.layerTest(dir)` |
 | `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, replies, comments, moves, labels, reactions. | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
 | `GitHub` | `github.ts` | `gh` CLI: PR lookup, summary, flags review, thread replies and resolves as the user; comments as the GitHub App. | `FakeGitHub.layer` |
 | `GitHubApp` | `github-app.ts` | GitHub App auth over `HttpClient`: its `<slug>[bot]` login, read at startup, installation tokens, cached per installation, and the App's webhook delivery log: a page of it and a redelivery. | `GitHubAppFixture.layer`: a real HTTP server with the real `GitHubApp` layer pointed at it. |
@@ -99,7 +100,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 
 ## Startup (`main.ts`)
 
-1. `AppConfig.layer` reads env, the config file, the API key, the Linear webhook secret, the GitHub App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
+1. `TelegramConfig.layerWithAppConfig` reads env, the config file, the API key, the Linear webhook secret, the GitHub App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash`, checks the transcription model's files, and reports every problem in one `StartupError` (one log line listing them all), then exits non-zero. See `config.md`.
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$HERDR_PLUGIN_STATE_DIR/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
 3. Only then are the services built: the journal opens `$HERDR_PLUGIN_STATE_DIR/journal.db` and runs its migrations, `GitHubApp` reads the App's slug from GitHub (`GET /app`), the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url> and Linear ones on <url>/linear`), and so does the agent event server (`listening for agent events on <path>`), and `TelegramBot` logs in (logging `logged in to Telegram as @<username>`). A failure there, e.g. the port taken, stops startup.
 4. Logs `watching <teams> every <n>s, at most <n> in flight`, forks a fiber that calls `wake` on every herdr event, one that calls it whenever the state directory's `wake` file is written, one that runs the delivery scan, one that answers chat messages (`answerChatMessages`) and one that keeps the chat session warm (`keepChatSessionWarm`), and runs the reconciler.

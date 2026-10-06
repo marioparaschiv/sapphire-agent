@@ -7,7 +7,7 @@ import { ClaudeChat } from './claude-chat.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
-import { AppConfig } from './config.ts';
+import { AppConfig, TelegramConfig } from './config.ts';
 import { answerChatMessages, keepChatSessionWarm } from './conversations.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
@@ -69,4 +69,4 @@ const program = Effect.gen(function* () {
 });
 
 // Refused before the services are built, which reaches out to GitHub.
-NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(AppConfig.layer.pipe(Layer.provideMerge(NodeServices.layer)))));
+NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(TelegramConfig.layerWithAppConfig.pipe(Layer.provideMerge(NodeServices.layer)))));

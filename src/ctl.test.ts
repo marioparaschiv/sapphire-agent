@@ -6,7 +6,6 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, FileSystem, Stream } from 'effect';
 import { CliError } from 'effect/cli';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
-import { transcriptionModel, transcriptionModelFiles } from './config.ts';
 import { Refused } from './ctl.ts';
 import { Journal, type Run } from './journal.ts';
 import { deliveries, makeHarness } from './test-harness.ts';
@@ -138,11 +137,6 @@ describe('ctl', () => {
 			yield* fs.writeFileString(join(directory, 'app.pem'), generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } }).privateKey, { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'webhook-secret'), 'whsec_test', { mode: 0o600 });
 			yield* fs.writeFileString(join(directory, 'linear-webhook-secret'), 'lin_wh_test', { mode: 0o600 });
-			yield* fs.writeFileString(join(directory, 'telegram-bot-token'), '123456:telegram-secret', { mode: 0o600 });
-			yield* fs.writeFileString(join(directory, 'telegram-api-id'), '1234567', { mode: 0o600 });
-			yield* fs.writeFileString(join(directory, 'telegram-api-hash'), 'telegram-api-hash', { mode: 0o600 });
-			yield* fs.makeDirectory(join(directory, 'models', transcriptionModel), { recursive: true });
-			yield* Effect.forEach(Object.values(transcriptionModelFiles), (file) => fs.writeFileString(join(directory, 'models', transcriptionModel, file), ''));
 			yield* Journal.use((journal) => journal.putRun(run)).pipe(Effect.provide(Journal.layer(join(directory, 'journal.db'))));
 
 			assert.deepStrictEqual(yield* ctlSh(directory, 'stop', 'UNB-13'), { stdout: '', stderr: 'UNB-13 has no run in flight\n', exitCode: ChildProcessSpawner.ExitCode(1) });

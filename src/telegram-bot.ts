@@ -15,7 +15,7 @@ import {
 import { LogManager } from '@mtcute/node/utils.js';
 import { Cause, Context, Duration, Effect, Layer, PubSub, Queue, Redacted, Stream } from 'effect';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy, withWritePolicy } from './call-policy.ts';
-import { AppConfig } from './config.ts';
+import { AppConfig, TelegramConfig } from './config.ts';
 
 // A new message the bot can see, reduced to what the Telegram Chat adapter reads.
 export type TelegramMessage = {
@@ -166,7 +166,8 @@ export class TelegramBot extends Context.Service<
 	static readonly layer = Layer.effect(
 		TelegramBot,
 		Effect.gen(function* () {
-			const { telegramBotToken, telegramApiId, telegramApiHash, env } = yield* AppConfig;
+			const { env } = yield* AppConfig;
+			const { botToken, apiId, apiHash } = yield* TelegramConfig;
 			const received = yield* Queue.unbounded<TelegramMessage>();
 			const stops = yield* PubSub.unbounded<DraftStop>();
 			const runFork = Effect.runForkWith(yield* Effect.context<never>());
@@ -174,8 +175,8 @@ export class TelegramBot extends Context.Service<
 				Effect.sync(
 					() =>
 						new TelegramClient({
-							apiId: telegramApiId,
-							apiHash: Redacted.value(telegramApiHash),
+							apiId,
+							apiHash: Redacted.value(apiHash),
 							storage: new BaseSqliteStorage(new NodeSqliteStorageDriver(join(env.stateDirectory, 'telegram.session'))),
 							updates: { catchUp: true },
 							logLevel: LogManager.WARN,
@@ -195,7 +196,7 @@ export class TelegramBot extends Context.Service<
 				}
 			});
 
-			const me = yield* Effect.tryPromise({ try: () => client.start({ botToken: Redacted.value(telegramBotToken) }), catch: callFailure('log in as the bot') }).pipe(
+			const me = yield* Effect.tryPromise({ try: () => client.start({ botToken: Redacted.value(botToken) }), catch: callFailure('log in as the bot') }).pipe(
 				withCallPolicy(callTimeouts.telegram),
 			);
 
