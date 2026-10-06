@@ -1,47 +1,23 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Context, Effect, Layer, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
-import { serveFixture } from './fixture-server.ts';
+import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
 import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
 // Linear-shaped payloads and applies mutations, so later reads see them.
 
-export const signLinearDelivery = (secret: Redacted.Redacted<string>, body: string) => createHmac('sha256', Redacted.value(secret)).update(body).digest('hex');
-
-// An Issue update webhook payload, as Linear sends one when an issue moves to another state.
-export const issueMovedDelivery = (identifier: string, stateName: string) => ({
-	action: 'update',
-	type: 'Issue',
-	createdAt: '2026-10-06T07:00:00.000Z',
-	data: { id: `issue-${identifier.toLowerCase()}`, identifier, state: { name: stateName } },
-	updatedFrom: { stateId: 'state-backlog' },
-	url: `https://linear.app/test/issue/${identifier}`,
-	webhookTimestamp: 1_791_270_000_000,
-	webhookId: 'webhook-1',
-});
+export const signLinearDelivery = hmacHex;
 
 // POSTs the payload as Linear sends a webhook delivery, signed with `secret` unless `signature` overrides the
 // Linear-Signature header (null leaves it out), and returns the HTTP status.
 export const postLinearDelivery = (url: string, secret: Redacted.Redacted<string>, payload: unknown, signature?: string | null) =>
-	Effect.promise(async () => {
+	Effect.promise(() => {
 		const body = JSON.stringify(payload);
 		const header = signature === undefined ? signLinearDelivery(secret, body) : signature;
-		const response = await fetch(url, {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/json',
-				'linear-event': 'Issue',
-				'linear-delivery': randomUUID(),
-				...(header === null ? {} : { 'linear-signature': header }),
-			},
-			body,
-		});
 
-		await response.arrayBuffer();
-
-		return response.status;
+		return postJson(url, body, { 'linear-event': 'Issue', 'linear-delivery': randomUUID(), ...(header === null ? {} : { 'linear-signature': header }) });
 	});
 
 export type FixtureIssue = {

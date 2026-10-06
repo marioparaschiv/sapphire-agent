@@ -5,11 +5,11 @@ import { TestClock } from 'effect/testing';
 import { AppConfig } from './config.ts';
 import { GitHubAppFixture, postDelivery, signDelivery } from './github-app-fixture.ts';
 import type { Command } from './journal.ts';
-import { issueMovedDelivery, postLinearDelivery, signLinearDelivery } from './linear-fixture.ts';
+import { postLinearDelivery, signLinearDelivery } from './linear-fixture.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Reconciler } from './reconciler.ts';
-import { deliveries, type Harness, makeHarness, plannerDependencies } from './test-harness.ts';
+import { deliveries, type Harness, linearIssueMoved, makeHarness, plannerDependencies } from './test-harness.ts';
 import { linearWebhookPath, WebhookServer } from './webhook-server.ts';
 
 const reviewedPullRequest = (h: Harness) => h.github.addPullRequest({ repo: h.githubRepo, branch: 'mario/test-10-plugin-settings-sync', author: 'marioparaschiv' });
@@ -182,8 +182,7 @@ describe('WebhookServer', () => {
 		Effect.gen(function* () {
 			const { config, reconciler, url, ticks } = yield* probedServer;
 			const linearUrl = new URL(linearWebhookPath, url).href;
-			const payload = issueMovedDelivery('TEST-12', 'Ready For Agent');
-			const body = JSON.stringify(payload);
+			const body = JSON.stringify(linearIssueMoved);
 
 			yield* Effect.forkScoped(reconciler.run);
 			assert.strictEqual(yield* Queue.take(ticks), 0);
@@ -191,17 +190,17 @@ describe('WebhookServer', () => {
 			yield* TestClock.adjust('5 seconds');
 			assert.deepStrictEqual(
 				[
-					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, payload, null),
-					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, payload, signLinearDelivery(Redacted.make('not-the-secret'), body)),
-					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, payload, signLinearDelivery(config.linearWebhookSecret, JSON.stringify({ ...payload, action: 'remove' }))),
-					yield* postLinearDelivery(linearUrl, config.webhookSecret, payload),
-					yield* postDelivery(linearUrl, config.webhookSecret, { event: 'issue_comment', payload }),
+					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved, null),
+					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved, signLinearDelivery(Redacted.make('not-the-secret'), body)),
+					yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved, signLinearDelivery(config.linearWebhookSecret, JSON.stringify({ ...linearIssueMoved, action: 'remove' }))),
+					yield* postLinearDelivery(linearUrl, config.webhookSecret, linearIssueMoved),
+					yield* postDelivery(linearUrl, config.webhookSecret, { event: 'issue_comment', payload: linearIssueMoved }),
 				],
 				[401, 401, 401, 401, 401],
 			);
 
 			yield* TestClock.adjust('5 seconds');
-			assert.strictEqual(yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, payload), 200);
+			assert.strictEqual(yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved), 200);
 			assert.strictEqual(yield* Queue.take(ticks), 10_000);
 		}).pipe(Effect.provide(NodeServices.layer)),
 	);

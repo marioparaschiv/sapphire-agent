@@ -1,9 +1,9 @@
-import { createHmac, createPublicKey, randomUUID, verify } from 'node:crypto';
+import { createPublicKey, randomUUID, verify } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Clock, Context, Effect, Layer, Option, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
 import { AppConfig } from './config.ts';
-import { serveFixture } from './fixture-server.ts';
+import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
 import { GitHubApp } from './github-app.ts';
 
 // A stand-in for the GitHub App endpoints of api.github.com. Like GitHub, it accepts a request only with an App JWT
@@ -14,25 +14,13 @@ import { GitHubApp } from './github-app.ts';
 // A GitHub App webhook delivery: the X-GitHub-Event header and the JSON payload.
 export type WebhookDelivery = { readonly event: string; readonly payload: unknown };
 
-export const signDelivery = (secret: Redacted.Redacted<string>, body: string) => `sha256=${createHmac('sha256', Redacted.value(secret)).update(body).digest('hex')}`;
+export const signDelivery = (secret: Redacted.Redacted<string>, body: string) => `sha256=${hmacHex(secret, body)}`;
 
-const sendDelivery = async (url: string, secret: Redacted.Redacted<string>, { event, payload }: WebhookDelivery, guid: string, signature?: string | null) => {
+const sendDelivery = (url: string, secret: Redacted.Redacted<string>, { event, payload }: WebhookDelivery, guid: string, signature?: string | null) => {
 	const body = JSON.stringify(payload);
 	const header = signature === undefined ? signDelivery(secret, body) : signature;
-	const response = await fetch(url, {
-		method: 'POST',
-		headers: {
-			'content-type': 'application/json',
-			'x-github-event': event,
-			'x-github-delivery': guid,
-			...(header === null ? {} : { 'x-hub-signature-256': header }),
-		},
-		body,
-	});
 
-	await response.arrayBuffer();
-
-	return response.status;
+	return postJson(url, body, { 'x-github-event': event, 'x-github-delivery': guid, ...(header === null ? {} : { 'x-hub-signature-256': header }) });
 };
 
 // POSTs the delivery as GitHub does, signed with `secret` unless `signature` overrides the header (null leaves it out),
