@@ -1,5 +1,5 @@
 import { Effect, Option } from 'effect';
-import { Chat } from './chat.ts';
+import { Chat, type ThreadRef } from './chat.ts';
 import { Herdr } from './herdr.ts';
 import { Journal, type ProjectSettings, type Request, type Run, sessionName } from './journal.ts';
 import { hasRunInFlight, isInFlight, isStarted, type Observation, tabOf } from './observation.ts';
@@ -15,8 +15,9 @@ const isProjectRequest = (request: Request): request is ProjectRequest =>
 	request._tag === 'project-add' || request._tag === 'project-edit' || request._tag === 'project-remove';
 
 // Acts on `ctl.sh stop`, `ctl.sh send`, `sapphire project` (a removed project's thread is deleted with it) and the
-// session changes the agent event server recorded, oldest first, and drops follow-up requests that can never be claimed. Each request is dropped once acted on, so a crash before that
-// repeats the stop (a no-op once the run ended) or types the message again. Not paused: a stop must work while paused.
+// session changes the agent event server recorded, oldest first, and drops follow-up requests that can never be
+// claimed. Each request is dropped once acted on, so a crash before that repeats the stop (a no-op once the run ended)
+// or types the message again. Not paused: a stop must work while paused.
 export const requestsRule = Effect.gen(function* () {
 	const journal = yield* Journal;
 	const herdr = yield* Herdr;
@@ -50,7 +51,7 @@ export const requestsRule = Effect.gen(function* () {
 			? journal.putRun({ ...run, session: { id: sessionId, name: run.session?.name ?? sessionName(run.identifier) } }).pipe(Effect.andThen(journal.deleteRequest(requestId)))
 			: drop(requestId, 'no run in flight to change the session of');
 
-	const putProject = (requestId: number, settings: ProjectSettings, thread: string | null, said: string) =>
+	const putProject = (requestId: number, settings: ProjectSettings, thread: ThreadRef | null, said: string) =>
 		projects.put({ ...settings, thread }).pipe(Effect.andThen(journal.deleteRequest(requestId)), Effect.andThen(Effect.log(said)));
 
 	// The CLI checked the request; this checks again what may have changed since.
