@@ -9,10 +9,12 @@ import { TestClock } from 'effect/testing';
 import { ClaudeChat } from './claude-chat.ts';
 import { type FakeClaudeAnswer, type FakeClaudeRun, fakeClaude, flagValue } from './claude-chat-fake.ts';
 import { AppConfig } from './config.ts';
-import { answerChatMessages, checkChatSettings, keepChatSessionWarm, unknownContext } from './conversations.ts';
+import { Chat } from './chat.ts';
+import { answerChatMessages, cacheReminder, checkChatSettings, keepChatSessionWarm, unknownContext } from './conversations.ts';
 import { Journal } from './journal.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
 import { telegramChat } from './telegram.ts';
@@ -29,6 +31,10 @@ const makeChat = (answer: (run: FakeClaudeRun) => FakeClaudeAnswer = () => ({ te
 		);
 		const config = AppConfig.layerTest(dir);
 		const claudeConfigDirectory = join(dir, 'claude');
+
+		mkdirSync(claudeConfigDirectory, { recursive: true });
+		writeFileSync(join(claudeConfigDirectory, 'settings.json'), JSON.stringify({ promptCacheTtl: '1h' }));
+
 		const claude = yield* fakeClaude(claudeConfigDirectory, answer);
 		const telegram = yield* Layer.build(FakeTelegram.layer);
 		const recorded = yield* SubscriptionRef.make(0);
@@ -36,16 +42,17 @@ const makeChat = (answer: (run: FakeClaudeRun) => FakeClaudeAnswer = () => ({ te
 		const CountingJournal = Layer.effect(
 			Journal,
 			Journal.useSync((journal) =>
-				Journal.of({ ...journal, addChatSession: (refs, sessionId) => journal.addChatSession(refs, sessionId).pipe(Effect.andThen(SubscriptionRef.update(recorded, (count) => count + 1))) }),
+				Journal.of({ ...journal, addChatSession: (refs, post) => journal.addChatSession(refs, post).pipe(Effect.andThen(SubscriptionRef.update(recorded, (count) => count + 1))) }),
 			),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
 		const services = Layer.mergeAll(
 			telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest)),
 			ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer, NodeFileSystem.layer])),
-			CountingJournal,
 			// Nothing to tick: a main-chat turn never wakes it.
 			Reconciler.layer.pipe(Layer.provide(Planner.layer(Effect.succeed([]))), Layer.provide(Pause.layer), Layer.provide([plannerDependencies(dir), NodeFileSystem.layer])),
-		).pipe(Layer.provideMerge(config), Layer.provide(Layer.succeedContext(telegram)));
+			Projects.layer,
+			NodeFileSystem.layer,
+		).pipe(Layer.provideMerge(CountingJournal), Layer.provideMerge(config), Layer.provide(Layer.succeedContext(telegram)));
 		const controls = yield* FakeTelegram.pipe(Effect.provide(telegram));
 
 		// Answers chat messages and keeps the session warm, as the service does, until the returned scope closes.
@@ -243,7 +250,7 @@ describe('answerChatMessages', () => {
 		}).pipe(Effect.scoped, Effect.provide(Logger.layer([]))),
 	);
 
-	it.effect('keeps the newest bot message’s session warm every 55 minutes, resuming it into a throwaway fork', () =>
+	it.effect('keeps the newest main-chat bot message’s session warm 5 minutes before its 1h prompt cache expires, resuming it into a throwaway fork in its directory', () =>
 		Effect.gen(function* () {
 			const chat = yield* makeChat();
 
@@ -260,7 +267,7 @@ describe('answerChatMessages', () => {
 
 			const [, latest, keepAlive] = chat.claude.runs;
 
-			assert.deepStrictEqual([keepAlive.prompt, parentOf(keepAlive)], ['ping', sessionOf(latest)]);
+			assert.deepStrictEqual([keepAlive.prompt, parentOf(keepAlive), keepAlive.cwd], ['ping', sessionOf(latest), homedir()]);
 		}).pipe(Effect.scoped),
 	);
 
@@ -299,6 +306,156 @@ describe('answerChatMessages', () => {
 				['hello'],
 			);
 			assert.isUndefined(chat.telegram.sent.find(({ topicId }) => topicId === 4242));
+		}).pipe(Effect.scoped),
+	);
+});
+
+// A project whose topic the bot opened, recorded before the chat starts, as the project topics rule leaves it. The user
+// greets the bot first, as Telegram lets the bot write only to a user who wrote to it; the bot client that opens the
+// topic receives the greeting, so the chat never answers it.
+const withProject = (chat: Effect.Success<ReturnType<typeof makeChat>>) =>
+	Effect.gen(function* () {
+		chat.telegram.write({ from: chat.user, text: 'hi' });
+
+		const thread = yield* Chat.use((service) => service.openProject('Hivemind')).pipe(Effect.provide(chat.services));
+		const repo = join(chat.dir, 'hivemind');
+		const project = { team: 'Hivemind', repo, labelReposDirectory: null, thread };
+
+		yield* Projects.use((service) => service.put(project)).pipe(Effect.provide(chat.services));
+
+		const [topic] = chat.telegram.topics();
+
+		return { project, topicId: topic.topicId };
+	});
+
+const inTopic = (chat: Effect.Success<ReturnType<typeof makeChat>>, topicId: number) => chat.telegram.sent.filter((message) => message.topicId === topicId);
+
+describe('project topics', () => {
+	it.effect("answers a message in a project's topic in its repo with the project in the prompt, and continues a reply from the replied message's session where it ran", () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat((run) => ({ text: [`answer to ${run.prompt}`] }));
+			const { project, topicId } = yield* withProject(chat);
+			const first = yield* chat.start;
+
+
+			const question = chat.telegram.write({ from: chat.user, text: 'what is in this repo?', topicId });
+
+			yield* chat.awaitRecorded(1);
+			yield* Scope.close(first, Exit.void);
+
+			const [answer] = inTopic(chat, topicId);
+			const moved = join(chat.dir, 'hivemind-moved');
+
+			yield* Projects.use((service) => service.put({ ...project, repo: moved })).pipe(Effect.provide(chat.services));
+			yield* chat.start;
+			chat.telegram.write({ from: chat.user, text: 'and its tests?', topicId, replyTo: answer.messageId });
+			yield* chat.awaitRecorded(2);
+			chat.telegram.write({ from: chat.user, text: 'start over', topicId });
+			yield* chat.awaitRecorded(3);
+
+			const [asked, followUp, fresh] = chat.claude.runs;
+			const prompts = yield* Prompts.pipe(Effect.provide(Prompts.layer));
+
+			assert.deepStrictEqual(
+				{ text: answer.text, replyTo: answer.replyToMessageId, cwd: asked.cwd, parent: parentOf(asked), prompt: flagValue(asked.args, '--append-system-prompt') },
+				{ text: 'answer to what is in this repo?', replyTo: question, cwd: project.repo, parent: null, prompt: prompts.projectChat(project) },
+			);
+			assert.deepStrictEqual([followUp.cwd, parentOf(followUp)], [project.repo, sessionOf(asked)]);
+			assert.deepStrictEqual([fresh.cwd, parentOf(fresh)], [moved, null]);
+			assert.deepStrictEqual(
+				inTopic(chat, topicId).map(({ text }) => text),
+				['answer to what is in this repo?', 'answer to and its tests?', 'answer to start over'],
+			);
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect("answers a voice note in a project's topic with its transcript, then as if it was typed", () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat((run) => ({ text: [`answer to ${run.prompt}`] }));
+			const { project, topicId } = yield* withProject(chat);
+
+			yield* chat.start;
+
+			const voice = chat.telegram.write({ from: chat.user, voice: new TextEncoder().encode('Run the tests.'), topicId });
+
+			yield* chat.awaitRecorded(1);
+
+			const [spoken] = chat.claude.runs;
+
+			assert.deepStrictEqual(
+				inTopic(chat, topicId).map(({ text, replyToMessageId }) => ({ text, replyToMessageId })),
+				[
+					{ text: '🎙 Run the tests.', replyToMessageId: voice },
+					{ text: 'answer to Run the tests.', replyToMessageId: voice },
+				],
+			);
+			assert.deepStrictEqual([spoken.prompt, spoken.cwd], ['Run the tests.', project.repo]);
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect("reminds once, 5 minutes before the prompt cache of a project topic's session expires, with no keep-alive, and a reply to the reminder continues the session", () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat((run) => ({ text: [`answer to ${run.prompt}`] }));
+			const { project, topicId } = yield* withProject(chat);
+
+			yield* chat.start;
+			chat.telegram.write({ from: chat.user, text: 'plan the release', topicId });
+			yield* chat.awaitRecorded(1);
+			yield* TestClock.adjust('54 minutes');
+
+			assert.lengthOf(inTopic(chat, topicId), 1);
+
+			yield* TestClock.adjust('1 minute');
+			yield* chat.awaitRecorded(2);
+			yield* TestClock.adjust('3 hours');
+
+			const [answer, reminder] = inTopic(chat, topicId);
+
+			assert.deepStrictEqual(
+				inTopic(chat, topicId).map(({ text, replyToMessageId }) => ({ text, replyToMessageId })),
+				[
+					{ text: 'answer to plan the release', replyToMessageId: answer.replyToMessageId },
+					{ text: cacheReminder, replyToMessageId: answer.messageId },
+				],
+			);
+			assert.isTrue(chat.claude.runs.every((run) => run.prompt !== 'ping' || run.cwd !== project.repo));
+
+			chat.telegram.write({ from: chat.user, text: 'go on', topicId, replyTo: reminder.messageId });
+			yield* chat.awaitRecorded(3);
+
+			const asked = chat.claude.runs.find((run) => run.prompt === 'plan the release');
+			const continued = chat.claude.runs.find((run) => run.prompt === 'go on');
+
+			assert.deepStrictEqual([continued?.cwd, continued === undefined ? null : parentOf(continued)], [project.repo, asked === undefined ? null : sessionOf(asked)]);
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect('brings a waiting reminder back after a restart, and posts it once', () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat();
+			const { topicId } = yield* withProject(chat);
+			const first = yield* chat.start;
+
+			chat.telegram.write({ from: chat.user, text: 'plan the release', topicId });
+			yield* chat.awaitRecorded(1);
+			yield* TestClock.adjust('10 minutes');
+			yield* Scope.close(first, Exit.void);
+
+			const second = yield* chat.start;
+
+			yield* TestClock.adjust('44 minutes');
+			assert.lengthOf(inTopic(chat, topicId), 1);
+
+			yield* TestClock.adjust('1 minute');
+			yield* chat.awaitRecorded(2);
+			yield* Scope.close(second, Exit.void);
+			yield* chat.start;
+			yield* TestClock.adjust('1 hour');
+
+			assert.deepStrictEqual(
+				inTopic(chat, topicId).map(({ text }) => text),
+				['Sure.', cacheReminder],
+			);
 		}).pipe(Effect.scoped),
 	);
 });

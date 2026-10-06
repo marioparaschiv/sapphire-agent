@@ -40,6 +40,8 @@ export type FakeTelegramControls = {
 	readonly drafts: ReadonlyArray<Draft>;
 	// The topics that exist, in the order they were made, with their current titles.
 	readonly topics: () => ReadonlyArray<Topic>;
+	// As the user deletes a topic.
+	readonly deleteTopic: (topicId: number) => void;
 	// Every topic ever made, deleted ones included.
 	readonly topicsCreated: () => number;
 	// Completes once the bot has sent n messages in total.
@@ -182,6 +184,7 @@ const make = Effect.gen(function* () {
 							}),
 						),
 					),
+				existingTopics: (chatId, topicIds) => Effect.sync(() => topicIds.filter((topicId) => topics.get(topicId)?.chatId === chatId)),
 				download: (fileId) => Effect.suspend(() => Effect.fromNullishOr(files.get(fileId)).pipe(Effect.mapError(() => new Permanent({ message: 'Telegram refused to download a file: 400 FILE_ID_INVALID' })))),
 			});
 		}),
@@ -229,6 +232,9 @@ const make = Effect.gen(function* () {
 		sent,
 		drafts,
 		topics: () => [...topics.values()],
+		deleteTopic: (topicId) => {
+			topics.delete(topicId);
+		},
 		topicsCreated: () => topicsCreated,
 		awaitSent: (n) => awaitCount(sentCount, n),
 		awaitDrafts: (n) => awaitCount(draftCount, n),

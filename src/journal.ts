@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
@@ -176,6 +177,23 @@ export const Topic = Schema.Struct({
 
 export type Topic = typeof Topic.Type;
 
+// A chat turn's Claude session and the directory it runs in; Claude keeps sessions per directory, so a resume runs there too.
+export const ChatSession = Schema.Struct({ sessionId: Schema.String, cwd: Schema.String });
+
+export type ChatSession = typeof ChatSession.Type;
+
+// turn: the bot's answer to a message. reminder: the bot said the session's prompt cache is about to expire.
+export const ChatMessageKind = Schema.Literals(['turn', 'reminder']);
+
+// Bot messages written in one session: in the main chat (no thread) or in a project's thread.
+export const ChatPost = Schema.Struct({ ...ChatSession.fields, thread: Schema.NullOr(ThreadRef), kind: ChatMessageKind });
+
+export type ChatPost = typeof ChatPost.Type;
+
+export const ChatMessage = Schema.Struct({ messageRef: MessageRef, ...ChatPost.fields, createdAt: Millis });
+
+export type ChatMessage = typeof ChatMessage.Type;
+
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
 const migrations = SqliteMigrator.layer({
@@ -332,6 +350,27 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0010_add_chat_session_cwd_and_thread': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// Every chat turn so far ran in the home directory, in the main chat.
+			yield* sql`
+				CREATE TABLE chat_messages (
+					message_ref TEXT PRIMARY KEY,
+					session_id TEXT NOT NULL,
+					cwd TEXT NOT NULL,
+					thread TEXT,
+					kind TEXT NOT NULL,
+					created_at INTEGER NOT NULL
+				)
+			`;
+			yield* sql`
+				INSERT INTO chat_messages (message_ref, session_id, cwd, thread, kind, created_at)
+				SELECT message_ref, session_id, ${homedir()}, NULL, 'turn', created_at FROM chat_sessions ORDER BY rowid
+			`;
+			yield* sql`DROP TABLE chat_sessions`;
+			yield* sql`ALTER TABLE chat_messages RENAME TO chat_sessions`;
+		}),
 	}),
 });
 
@@ -365,11 +404,13 @@ export class Journal extends Context.Service<
 		// When the newest webhook delivery the last complete scan saw was delivered, in ms; none before the first scan.
 		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
 		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
-		// Records that the main chat's bot messages were written in the Claude session.
-		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) => Effect.Effect<void, JournalError>;
-		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<string>, JournalError>;
-		// The session of the newest bot message.
-		readonly latestChatSession: Effect.Effect<Option.Option<string>, JournalError>;
+		// Records that the bot messages were written in the Claude session.
+		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) => Effect.Effect<void, JournalError>;
+		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<ChatSession>, JournalError>;
+		// The session of the main chat's newest bot message.
+		readonly latestChatSession: Effect.Effect<Option.Option<ChatSession>, JournalError>;
+		// The newest bot message in the thread.
+		readonly lastChatMessage: (thread: ThreadRef) => Effect.Effect<Option.Option<ChatMessage>, JournalError>;
 		readonly listTopics: Effect.Effect<ReadonlyArray<Topic>, JournalError>;
 		// Inserts the topic or replaces the one of the same epic.
 		readonly putTopic: (topic: Topic) => Effect.Effect<void, JournalError>;
@@ -489,29 +530,34 @@ export class Journal extends Context.Service<
 				});
 
 				const insertChatSession = SqlSchema.void({
-					Request: Schema.Struct({ messageRef: MessageRef, sessionId: Schema.String, createdAt: Millis }),
+					Request: ChatMessage,
 					execute: (row) => sql`INSERT OR REPLACE INTO chat_sessions ${sql.insert(row)}`,
 				});
 
-				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, sessionId: string) =>
+				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) =>
 					Clock.currentTimeMillis.pipe(
 						Effect.flatMap((createdAt) =>
-							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, sessionId, createdAt }), { discard: true })),
+							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, ...post, createdAt }), { discard: true })),
 						),
 					);
 
-				const chatSession = (messageRef: MessageRef) =>
-					SqlSchema.findOneOption({
-						Request: MessageRef,
-						Result: Schema.Struct({ sessionId: Schema.String }),
-						execute: (ref) => sql`SELECT session_id FROM chat_sessions WHERE message_ref = ${ref}`,
-					})(messageRef).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
+				const chatSession = SqlSchema.findOneOption({
+					Request: MessageRef,
+					Result: ChatSession,
+					execute: (ref) => sql`SELECT session_id, cwd FROM chat_sessions WHERE message_ref = ${ref}`,
+				});
 
 				const latestChatSession = SqlSchema.findOneOption({
 					Request: Schema.Void,
-					Result: Schema.Struct({ sessionId: Schema.String }),
-					execute: () => sql`SELECT session_id FROM chat_sessions ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-				})(undefined).pipe(Effect.map(Option.map(({ sessionId }) => sessionId)));
+					Result: ChatSession,
+					execute: () => sql`SELECT session_id, cwd FROM chat_sessions WHERE thread IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+				})(undefined);
+
+				const lastChatMessage = SqlSchema.findOneOption({
+					Request: ThreadRef,
+					Result: ChatMessage,
+					execute: (thread) => sql`SELECT * FROM chat_sessions WHERE thread = ${thread} ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+				});
 
 				const listTopics = SqlSchema.findAll({
 					Request: Schema.Void,
@@ -577,6 +623,7 @@ export class Journal extends Context.Service<
 					addChatSession,
 					chatSession,
 					latestChatSession,
+					lastChatMessage,
 					listTopics,
 					putTopic,
 					deleteTopic,

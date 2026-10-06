@@ -355,7 +355,7 @@ describe('lifecycle', () => {
 					git: { worktrees: [], branch: false },
 					runs: 0,
 					telegram: {
-						topics: ['✅ Done'],
+						topics: ['✅ Done', '📁 Test'],
 						sent: [
 							'OK.',
 							'▶️ TEST-101 Slice 1 started',
@@ -393,9 +393,9 @@ describe('lifecycle', () => {
 				// prompt, or at the journal write that records it, types it again.
 				assert.deepStrictEqual(retyped.toSorted(), ['herdr', 'journal']);
 				// Nor can making a topic and recording it (Telegram does not let a bot list topics): a crash right after making
-				// the epic's or the Done topic, or at the journal write that records it, leaves that topic behind and makes
-				// another.
-				assert.deepStrictEqual(strayTopics.toSorted(), ['journal ✅ Done', 'journal 🟢 TEST-10 Plugin settings sync', 'telegram ✅ Done', 'telegram 🟢 TEST-10 Plugin settings sync']);
+				// the epic's, the project's or the Done topic, or at the journal write that records it, leaves that topic behind
+				// and makes another.
+				assert.deepStrictEqual(strayTopics.toSorted(), ['journal ✅ Done', 'journal 🟢 TEST-10 Plugin settings sync', 'telegram ✅ Done', 'telegram 📁 Test', 'telegram 🟢 TEST-10 Plugin settings sync']);
 			}),
 		{ timeout: 120_000 },
 	);

@@ -1,4 +1,5 @@
 import { Effect, Option } from 'effect';
+import { Chat } from './chat.ts';
 import { Herdr } from './herdr.ts';
 import { Journal, type ProjectSettings, type Request, type Run, sessionName } from './journal.ts';
 import { hasRunInFlight, isInFlight, isStarted, type Observation, tabOf } from './observation.ts';
@@ -13,13 +14,14 @@ type ProjectRequest = Extract<Request, { readonly _tag: 'project-add' | 'project
 const isProjectRequest = (request: Request): request is ProjectRequest =>
 	request._tag === 'project-add' || request._tag === 'project-edit' || request._tag === 'project-remove';
 
-// Acts on `ctl.sh stop`, `ctl.sh send`, `sapphire project` and the session changes the agent event server recorded,
-// oldest first, and drops follow-up requests that can never be claimed. Each request is dropped once acted on, so a crash before that
+// Acts on `ctl.sh stop`, `ctl.sh send`, `sapphire project` (a removed project's thread is deleted with it) and the
+// session changes the agent event server recorded, oldest first, and drops follow-up requests that can never be claimed. Each request is dropped once acted on, so a crash before that
 // repeats the stop (a no-op once the run ended) or types the message again. Not paused: a stop must work while paused.
 export const requestsRule = Effect.gen(function* () {
 	const journal = yield* Journal;
 	const herdr = yield* Herdr;
 	const projects = yield* Projects;
+	const chat = yield* Chat;
 	const { endRun } = yield* makeTabActions;
 
 	const drop = (requestId: number, reason: string) => journal.deleteRequest(requestId).pipe(Effect.andThen(Effect.log(`${reason}; dropped request ${requestId}`)));
@@ -75,6 +77,10 @@ export const requestsRule = Effect.gen(function* () {
 
 					if (resolved !== undefined && hasRunInFlight(runs, resolved.team.id)) {
 						return yield* drop(requestId, `project ${team} has a run in flight, so it is not removed`);
+					}
+
+					if (project.value.thread !== null) {
+						yield* chat.send({ _tag: 'closeThread', thread: project.value.thread });
 					}
 
 					yield* projects.remove(team);

@@ -1,4 +1,5 @@
 import { Context, Layer } from 'effect';
+import type { ProjectSettings } from './journal.ts';
 
 export type PromptEpic = {
 	readonly identifier: string;
@@ -62,6 +63,14 @@ const chat = [
 	'When the user asks to start, run or dispatch an epic, run `sapphire start <EPIC-ID>`. When they ask to add, change or remove a project, run `sapphire project add`, `edit` or `remove`.',
 ].join(' ');
 
+// The chat prompt for a turn in a project's own topic, which runs in the project's repo.
+const projectChat = ({ team, repo, labelReposDirectory }: ProjectSettings) =>
+	[
+		chat,
+		`This conversation is the topic of the project ${team}. You run in its repo, ${repo}.`,
+		...(labelReposDirectory === null ? [] : [`Its epics labelled repo:<name> run in ${labelReposDirectory}/<name>.`]),
+	].join(' ');
+
 export class Prompts extends Context.Service<
 	Prompts,
 	{
@@ -73,7 +82,8 @@ export class Prompts extends Context.Service<
 		readonly commandTabLabel: typeof commandTabLabel;
 		readonly command: typeof command;
 		readonly chat: string;
+		readonly projectChat: typeof projectChat;
 	}
 >()('sapphire-agent/Prompts') {
-	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat });
+	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat, projectChat });
 }

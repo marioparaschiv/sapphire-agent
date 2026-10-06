@@ -72,7 +72,7 @@ describe('monitoring', () => {
 			yield* TestClock.adjust('1 minute');
 			yield* h.tick;
 
-			const [topic] = h.telegram.topics();
+			const [topic] = h.telegram.topics().filter(({ title }) => title !== '📁 Test');
 
 			assert.deepStrictEqual(
 				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
@@ -101,7 +101,7 @@ describe('monitoring', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual(h.epicMarkers(epic.id), ['awaitingInput:0-0']);
-			assert.strictEqual(h.telegram.topics().length, 1);
+			assert.strictEqual(h.telegram.topics().length, 2);
 			assert.deepStrictEqual(h.telegram.sent, []);
 		}),
 	);

@@ -160,6 +160,8 @@ export class TelegramBot extends Context.Service<
 		readonly editTopic: (chatId: number, topicId: number, title: string) => Effect.Effect<void, CallError>;
 		// A topic already gone is fine.
 		readonly deleteTopic: (chatId: number, topicId: number) => Effect.Effect<void, CallError>;
+		// Those of the topics that exist.
+		readonly existingTopics: (chatId: number, topicIds: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<number>, CallError>;
 		readonly download: (fileId: string) => Effect.Effect<Uint8Array, CallError>;
 	}
 >()('sapphire-agent/TelegramBot') {
@@ -238,6 +240,12 @@ export class TelegramBot extends Context.Service<
 					),
 				editTopic: (chatId, topicId, title) => write('rename a topic', () => client.editForumTopic({ chatId, topicId, title })).pipe(Effect.asVoid, alreadyDone('TOPIC_NOT_MODIFIED')),
 				deleteTopic: (chatId, topicId) => write('delete a topic', () => client.deleteForumTopicHistory(chatId, topicId)).pipe(alreadyDone('TOPIC_ID_INVALID', 'MESSAGE_ID_INVALID')),
+				existingTopics: (chatId, topicIds) =>
+					Effect.tryPromise({ try: () => client.getForumTopicsById(chatId, [...topicIds]), catch: callFailure('look up topics') }).pipe(
+						withCallPolicy(callTimeouts.telegram),
+						// A deleted topic comes back as none.
+						Effect.map((topics) => topics.flatMap((topic) => (topic === null ? [] : [topic.id]))),
+					),
 				download: (fileId) => Effect.tryPromise({ try: () => client.downloadAsBuffer(fileId), catch: callFailure('download a file') }).pipe(withCallPolicy(callTimeouts.telegram)),
 			});
 		}),

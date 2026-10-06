@@ -6,6 +6,7 @@ import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { InitEvent } from './claude-settings.ts';
 import { projectSlug } from './claude-transcript.ts';
 import { AppConfig } from './config.ts';
+import type { ChatSession, ProjectSettings } from './journal.ts';
 import { Prompts } from './prompts.ts';
 
 export class ClaudeError extends Schema.TaggedError<ClaudeError>()('ClaudeError', { message: Schema.String }) {}
@@ -49,25 +50,35 @@ const outputOf = (line: string): Effect.Effect<ReadonlyArray<Output>, ClaudeErro
 
 const lastLine = (text: string) => text.trim().split('\n').at(-1) ?? '';
 
+export type ChatTurn = {
+	readonly sessionId: string;
+	readonly parent: Option.Option<string>;
+	readonly prompt: string;
+	// Claude keeps sessions per directory, so a fork runs in its parent's.
+	readonly cwd: string;
+	// The project whose topic the turn is in; none in the main chat.
+	readonly project: ProjectSettings | null;
+};
+
 // One-word prompt of the keep-alive turn, and of the settings check, which is killed before it is answered.
 const pingPrompt = 'ping';
 
 // The user's, the project's and the local settings, named so that no default leaves one of them out.
 const settingSources = 'user,project,local';
 
-// The main chat's Claude: the user's own `claude`, with their settings, CLAUDE.md, hooks and MCP servers, run once per
-// message. Every turn gets a session of its own: a new one, or a fork of the session it continues (`--resume
-// --fork-session`), which stays as it was, so any earlier message can be continued again.
+// The chat's Claude: the user's own `claude`, with their settings, CLAUDE.md, hooks and MCP servers, run once per
+// message in the main chat or a project's topic. Every turn gets a session of its own: a new one, or a fork of the
+// session it continues (`--resume --fork-session`), which stays as it was, so any earlier message can be continued again.
 export class ClaudeChat extends Context.Service<
 	ClaudeChat,
 	{
 		// What a turn runs with, read from its `system/init` event; Claude is killed before it calls the model.
 		readonly init: Effect.Effect<InitEvent, ClaudeError>;
 		// The reply's text, in pieces as Claude writes it. Interrupting the stream kills Claude, which ends the turn.
-		readonly turn: (options: { readonly sessionId: string; readonly parent: Option.Option<string>; readonly prompt: string }) => Stream.Stream<string, ClaudeError>;
+		readonly turn: (turn: ChatTurn) => Stream.Stream<string, ClaudeError>;
 		// Resumes the session into a throwaway fork for one short turn, so the prompt cache of the session stays warm, then
 		// deletes the fork's transcript.
-		readonly keepAlive: (sessionId: string) => Effect.Effect<void, ClaudeError>;
+		readonly keepAlive: (session: ChatSession) => Effect.Effect<void, ClaudeError>;
 	}
 >()('sapphire-agent/ClaudeChat') {
 	static readonly layer = Layer.effect(
@@ -77,11 +88,9 @@ export class ClaudeChat extends Context.Service<
 			const fs = yield* FileSystem.FileSystem;
 			const { env } = yield* AppConfig;
 			const prompts = yield* Prompts;
-			// Sessions are kept per working directory, so every turn runs in the same one to resume the others.
-			const cwd = homedir();
 			const encoder = new TextEncoder();
 
-			const command = (sessionId: string, parent: Option.Option<string>, prompt: string, outputArgs: ReadonlyArray<string>) =>
+			const command = ({ sessionId, parent, prompt, cwd, project }: ChatTurn, outputArgs: ReadonlyArray<string>) =>
 				ChildProcess.make(
 					'claude',
 					[
@@ -90,7 +99,7 @@ export class ClaudeChat extends Context.Service<
 						'--setting-sources',
 						settingSources,
 						'--append-system-prompt',
-						prompts.chat,
+						project === null ? prompts.chat : prompts.projectChat(project),
 						'--session-id',
 						sessionId,
 						...Option.match(parent, { onNone: () => [], onSome: (id) => ['--resume', id, '--fork-session'] }),
@@ -113,7 +122,7 @@ export class ClaudeChat extends Context.Service<
 			// The scope closing kills Claude once the event is read. Nothing is kept of the session.
 			const init = Effect.scoped(
 				Effect.gen(function* () {
-					const handle = yield* spawner.spawn(command(randomUUID(), Option.none(), pingPrompt, ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
+					const handle = yield* spawner.spawn(command({ sessionId: randomUUID(), parent: Option.none(), prompt: pingPrompt, cwd: homedir(), project: null }, ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
 
 					return yield* handle.stdout.pipe(
 						Stream.decodeText(),
@@ -127,10 +136,10 @@ export class ClaudeChat extends Context.Service<
 				}),
 			);
 
-			const turn = ({ sessionId, parent, prompt }: { readonly sessionId: string; readonly parent: Option.Option<string>; readonly prompt: string }) =>
+			const turn = (chatTurn: ChatTurn) =>
 				Stream.unwrap(
 					Effect.gen(function* () {
-						const handle = yield* spawner.spawn(command(sessionId, parent, prompt, ['--output-format', 'stream-json', '--include-partial-messages', '--verbose'])).pipe(Effect.mapError(failure('start claude')));
+						const handle = yield* spawner.spawn(command(chatTurn, ['--output-format', 'stream-json', '--include-partial-messages', '--verbose'])).pipe(Effect.mapError(failure('start claude')));
 						const stderr = yield* handle.stderr.pipe(Stream.decodeText(), Stream.mkString, Effect.forkScoped);
 
 						return handle.stdout.pipe(
@@ -155,11 +164,11 @@ export class ClaudeChat extends Context.Service<
 					}),
 				);
 
-			const keepAlive = (sessionId: string) =>
+			const keepAlive = ({ sessionId, cwd }: ChatSession) =>
 				Effect.gen(function* () {
 					const fork = randomUUID();
 					const exitCode = yield* Effect.scoped(
-						spawner.spawn(command(fork, Option.some(sessionId), pingPrompt, [])).pipe(
+						spawner.spawn(command({ sessionId: fork, parent: Option.some(sessionId), prompt: pingPrompt, cwd, project: null }, [])).pipe(
 							Effect.flatMap((handle) => Effect.all([handle.stdout.pipe(Stream.runDrain), handle.stderr.pipe(Stream.runDrain), handle.exitCode], { concurrency: 'unbounded' })),
 							Effect.map(([, , code]) => code),
 						),

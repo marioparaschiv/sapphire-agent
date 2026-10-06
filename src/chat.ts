@@ -12,7 +12,7 @@ export const ThreadRef = Schema.String;
 export type ThreadRef = typeof ThreadRef.Type;
 
 // Where a message was written. The main chat is the platform's general conversation with the bot; a thread is one the
-// platform opened for core (`openEpic`), which core knows by its ref.
+// platform opened for core (`openEpic`, `openProject`), which core knows by its ref.
 export const Conversation = Schema.Union([Schema.TaggedStruct('main', {}), Schema.TaggedStruct('thread', { thread: ThreadRef })]);
 
 export type Conversation = typeof Conversation.Type;
@@ -83,5 +83,9 @@ export class Chat extends Context.Service<
 		readonly openEpic: (epic: EpicHeading, state: EpicState) => Effect.Effect<ThreadRef, CallError>;
 		// A new thread for the summaries of shipped epics.
 		readonly openArchive: Effect.Effect<ThreadRef, CallError>;
+		// A new thread for the project, named after it.
+		readonly openProject: (name: string) => Effect.Effect<ThreadRef, CallError>;
+		// Those of the threads that are gone, e.g. deleted by the user.
+		readonly missingThreads: (threads: ReadonlyArray<ThreadRef>) => Effect.Effect<ReadonlyArray<ThreadRef>, CallError>;
 	}
 >()('sapphire-agent/Chat') {}

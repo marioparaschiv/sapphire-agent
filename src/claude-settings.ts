@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Effect, FileSystem, Schema } from 'effect';
+import { Duration, Effect, FileSystem, Option, Schema } from 'effect';
 import { AppConfig } from './config.ts';
 
 // What `claude -p --output-format stream-json --verbose` says it runs with, before it calls the model.
@@ -25,6 +25,14 @@ export const ClaudeSettings = Schema.Struct({
 });
 
 export type ClaudeSettings = typeof ClaudeSettings.Type;
+
+// How long a session's prompt cache lives after its last use. Unset, Claude picks it by account, so nothing is assumed.
+const PromptCacheSettings = Schema.Struct({ promptCacheTtl: Schema.optionalKey(Schema.Literals(['5m', '1h'])) });
+
+const cacheLifetimes = { '5m': Duration.minutes(5), '1h': Duration.hours(1) };
+
+// A session is warmed or reminded about this long before its cache expires.
+export const cacheExpiryNotice = Duration.minutes(5);
 
 // The user's MCP servers live in ~/.claude.json, not settings.json.
 const ClaudeConfig = Schema.Struct({ mcpServers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)) });
@@ -84,12 +92,28 @@ export const settingsMismatches = (settings: ClaudeSettings, mcpServers: Readonl
 
 export const describeMismatch = ({ key, configured, reported }: SettingsMismatch) => `⚠️ Chat Claude runs with ${key} ${reported}, but your settings say ${configured}`;
 
+const readSettingsFile = Effect.gen(function* () {
+	const { env } = yield* AppConfig;
+	const fs = yield* FileSystem.FileSystem;
+
+	return yield* fs.readFileString(join(env.claudeConfigDirectory, 'settings.json'));
+});
+
 // settings.json in the Claude config directory, and the MCP server names of ~/.claude.json.
 export const readClaudeSettings = Effect.gen(function* () {
 	const { env } = yield* AppConfig;
 	const fs = yield* FileSystem.FileSystem;
-	const settings = yield* Schema.decodeEffect(Schema.fromJsonString(ClaudeSettings))(yield* fs.readFileString(join(env.claudeConfigDirectory, 'settings.json')));
+	const settings = yield* Schema.decodeEffect(Schema.fromJsonString(ClaudeSettings))(yield* readSettingsFile);
 	const { mcpServers = {} } = yield* Schema.decodeEffect(Schema.fromJsonString(ClaudeConfig))(yield* fs.readFileString(env.claudeConfigPath));
 
 	return { settings, mcpServers: Object.keys(mcpServers) };
 });
+
+// How long after a session's last turn its prompt cache is about to expire, from settings.json's promptCacheTtl. None
+// when the cache lives no longer than the notice, or its lifetime is not set.
+export const readCacheRefreshDelay = readSettingsFile.pipe(
+	Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(PromptCacheSettings))),
+	Effect.map(({ promptCacheTtl }) =>
+		Option.filter(Option.map(Option.fromUndefinedOr(promptCacheTtl), (ttl) => Duration.subtract(cacheLifetimes[ttl], cacheExpiryNotice)), Duration.isPositive),
+	),
+);

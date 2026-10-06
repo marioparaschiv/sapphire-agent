@@ -37,6 +37,8 @@ const topicTitle = ({ identifier, title }: EpicHeading, state: EpicState) => `${
 
 const archiveTitle = '✅ Done';
 
+const projectTitle = (name: string) => `📁 ${name}`.slice(0, titleLength);
+
 const sliceIcons: Record<SliceProgress, string> = { started: '▶️', done: '✔️' };
 
 const chunks = (text: string) => Array.from({ length: Math.ceil(text.length / messageLength) }, (_, index) => text.slice(index * messageLength, (index + 1) * messageLength));
@@ -70,7 +72,7 @@ const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number
 
 // The Chat port over the Telegram bot. It lets through what an allowed user wrote in their private chat with the bot,
 // in the main chat (General) or in a topic, with voice notes transcribed; renders intents as messages and topics; and
-// streams replies as drafts. Epic topics go to the chat of the first allowed user.
+// streams replies as drafts. Epic and project topics go to the chat of the first allowed user.
 export const telegramChat = Layer.effect(
 	Chat,
 	Effect.gen(function* () {
@@ -242,6 +244,17 @@ export const telegramChat = Layer.effect(
 			streamReply,
 			openEpic: (epic, state) => openTopic(topicTitle(epic, state)),
 			openArchive: openTopic(archiveTitle),
+			openProject: (name) => openTopic(projectTitle(name)),
+			missingThreads: (threads) =>
+				Effect.gen(function* () {
+					const parsed = yield* Effect.forEach(threads, parseThreadRef);
+					const chats = [...new Set(parsed.map(({ chatId }) => chatId))];
+					const existing = yield* Effect.forEach(chats, (chatId) =>
+						bot.existingTopics(chatId, parsed.filter((thread) => thread.chatId === chatId).map(({ topicId }) => topicId)).pipe(Effect.map((topicIds) => topicIds.map((topicId) => threadRef(chatId, topicId)))),
+					);
+
+					return threads.filter((thread) => !existing.flat().includes(thread));
+				}),
 		});
 	}),
 );

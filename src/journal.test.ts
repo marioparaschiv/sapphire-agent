@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem } from '@effect/platform-node';
@@ -167,6 +168,49 @@ describe('Journal', () => {
 			assert.deepStrictEqual(yield* cli.listRuns, [claimed]);
 			assert.deepStrictEqual((yield* cli.listRequests).map(({ id }) => id), [stop]);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
+	);
+
+	it.effect('moves the chat sessions recorded before sessions had a directory to the main chat in the home directory, which they ran in', () =>
+		Effect.gen(function* () {
+			const fs = yield* FileSystem.FileSystem;
+			const filename = join(yield* fs.makeTempDirectoryScoped(), 'journal.db');
+			const database = new DatabaseSync(filename);
+
+			// The journal as migration 0009 left it.
+			database.exec(`
+				CREATE TABLE effect_sql_migrations (migration_id integer PRIMARY KEY NOT NULL, created_at datetime NOT NULL DEFAULT current_timestamp, name VARCHAR(255) NOT NULL);
+				CREATE TABLE chat_sessions (message_ref TEXT PRIMARY KEY, session_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+				INSERT INTO chat_sessions VALUES ('7100200300:12', 'session-a', 1000), ('7100200300:14', 'session-b', 2000);
+			`);
+
+			for (const [id, name] of ['create_journal', 'drop_mention_threads', 'create_delivery_mark', 'add_sessions', 'add_reply_to', 'add_command_acknowledged_at', 'create_chat_sessions', 'create_topics', 'create_projects'].entries()) {
+				database.prepare('INSERT INTO effect_sql_migrations (migration_id, name) VALUES (?, ?)').run(id + 1, name);
+			}
+
+			database.close();
+
+			const journal = yield* Layer.build(Journal.layer(filename)).pipe(Effect.map(Context.get(Journal)));
+
+			assert.deepStrictEqual(yield* journal.chatSession('7100200300:12'), Option.some({ sessionId: 'session-a', cwd: homedir() }));
+			assert.deepStrictEqual(yield* journal.latestChatSession, Option.some({ sessionId: 'session-b', cwd: homedir() }));
+		}).pipe(Effect.provide(NodeFileSystem.layer)),
+	);
+
+	it.effect("keeps the main chat's newest session apart from a project thread's newest bot message", () =>
+		Effect.gen(function* () {
+			const journal = yield* Journal;
+
+			yield* journal.addChatSession(['1:2'], { sessionId: 'main', cwd: '/home/dev', thread: null, kind: 'turn' });
+			yield* TestClock.setTime(5_000);
+			yield* journal.addChatSession(['1:4:3', '1:5:3'], { sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' });
+
+			assert.deepStrictEqual(yield* journal.latestChatSession, Option.some({ sessionId: 'main', cwd: '/home/dev' }));
+			assert.deepStrictEqual(
+				yield* journal.lastChatMessage('1:3'),
+				Option.some({ messageRef: '1:5:3', sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' as const, createdAt: 5_000 }),
+			);
+			assert.deepStrictEqual(yield* journal.lastChatMessage('1:9'), Option.none());
+		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
 
 	it.effect('migrates an empty database file and reopens an already migrated one', () =>

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Layer, Option, Stream } from 'effect';
-import { ClaudeChat } from './claude-chat.ts';
+import { ClaudeChat, type ChatTurn } from './claude-chat.ts';
 import { type FakeClaudeAnswer, type FakeClaudeRun, fakeClaude, flagValue } from './claude-chat-fake.ts';
 import { projectSlug } from './claude-transcript.ts';
 import { AppConfig } from './config.ts';
@@ -23,7 +23,7 @@ const makeClaude = (answer: (run: FakeClaudeRun) => FakeClaudeAnswer) =>
 		return { claude, fake, transcript };
 	});
 
-const newTurn = { sessionId: '8b0f5c1e-2d9a-4c3b-9f1e-6a7d5e4c3b2a', parent: Option.none<string>(), prompt: 'hello' };
+const newTurn: ChatTurn = { sessionId: '8b0f5c1e-2d9a-4c3b-9f1e-6a7d5e4c3b2a', parent: Option.none(), prompt: 'hello', cwd: homedir(), project: null };
 
 describe('ClaudeChat', () => {
 	it.effect('streams the text pieces of a turn without what its subagents write, a message after a tool call on a paragraph of its own', () =>
@@ -48,12 +48,30 @@ describe('ClaudeChat', () => {
 		}).pipe(Effect.scoped),
 	);
 
+	it.effect("runs a project topic's turn in the directory it is given, with the project appended to the chat prompt", () =>
+		Effect.gen(function* () {
+			const { claude, fake } = yield* makeClaude(() => ({ text: ['On it.'] }));
+			const project = { team: 'Hivemind', repo: '/home/dev/hivemind', labelReposDirectory: '/home/dev/hivemind-repos' };
+			const prompts = yield* Prompts.pipe(Effect.provide(Prompts.layer));
+
+			yield* claude.turn({ ...newTurn, cwd: project.repo, project }).pipe(Stream.runDrain);
+
+			const [run] = fake.runs;
+			const prompt = flagValue(run.args, '--append-system-prompt') ?? '';
+
+			assert.strictEqual(run.cwd, project.repo);
+			assert.isTrue(prompt.startsWith(prompts.chat));
+			assert.include(prompt, 'project Hivemind. You run in its repo, /home/dev/hivemind.');
+			assert.include(prompt, '/home/dev/hivemind-repos/<name>');
+		}).pipe(Effect.scoped),
+	);
+
 	it.effect('keeps a session warm in a throwaway fork of it and deletes the fork’s transcript, leaving the session’s', () =>
 		Effect.gen(function* () {
 			const { claude, fake, transcript } = yield* makeClaude(() => ({ text: ['pong'] }));
 
 			yield* claude.turn(newTurn).pipe(Stream.runDrain);
-			yield* claude.keepAlive(newTurn.sessionId);
+			yield* claude.keepAlive({ sessionId: newTurn.sessionId, cwd: newTurn.cwd });
 
 			const [, keepAlive] = fake.runs;
 			const fork = flagValue(keepAlive.args, '--session-id');

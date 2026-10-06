@@ -268,7 +268,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					putTopic: (topic) => crashPoint.pipe(Effect.andThen(journal.putTopic(topic))),
 					deleteTopic: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteTopic(epicId))),
 					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
-					addChatSession: (messageRefs, sessionId) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, sessionId))),
+					addChatSession: (messageRefs, post) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, post))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -295,7 +295,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			Context.get(fixtures, GitHubAppFixture).setWebhookUrl(Context.get(context, WebhookServer).url);
 
 			if (answerChat) {
-				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.forkIn(scope));
+				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.provide(fixtures), Effect.provide(NodeFileSystem.layer), Effect.forkIn(scope));
 			}
 
 			return { scope, context };
