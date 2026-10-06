@@ -21,8 +21,11 @@ How the live service is installed, started, paused, drained, deployed, inspected
 `sh scripts/install.sh` (idempotent):
 
 1. `herdr plugin link ~/sapphire-agent`.
-2. Copy both units to `~/.config/systemd/user/`.
-3. `systemctl --user daemon-reload` and `enable` both.
+2. Symlink `~/.local/bin/sapphire` to `scripts/ctl.sh`, so `sapphire <subcommand>` works anywhere.
+3. Copy both units to `~/.config/systemd/user/`.
+4. `systemctl --user daemon-reload` and `enable` both.
+
+The Claude hooks are not installed by the script: `~/.claude/settings.json` has one `{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }` entry under each of `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd` (`rules.md`, Agent events).
 
 Editing a file in `systemd/` does nothing until you rerun the install (or copy it) and `daemon-reload`.
 
@@ -72,6 +75,7 @@ sh ~/sapphire-agent/scripts/ctl.sh follow-up HL-9 Rename it --threads PRRT_kwDO1
 sh ~/sapphire-agent/scripts/ctl.sh session HL-9               # the Claude session name of its run, e.g. hl-9
 sh ~/sapphire-agent/scripts/ctl.sh reply <comment-url> Done.   # as the App; only on a command's comment
 sh ~/sapphire-agent/scripts/ctl.sh done CMD-3                  # the command agent is done
+sapphire hook claude < payload.json                           # what the Claude hooks run; any subcommand works as `sapphire`
 ```
 
 - Pause stops new runs only: no ready epic and no follow-up is claimed. Claimed runs still start, runs in flight are still watched, results are still posted, worktrees still cleaned up, and mentions still run commands (so `resume` can come in as one).
@@ -106,7 +110,7 @@ After the cutover, epics the old dispatcher left in To Review have no journal ro
 
 - Logs: `journalctl --user -u sapphire-agent -f` (stdout). Lines carry `epic=<IDENTIFIER>` and `rule=<name>` annotations.
 - Logs of a command carry `task=CMD-<n>`. Logs of a webhook delivery carry `delivery=<X-GitHub-Delivery>`: `queued the mention by @<login> in <url>`, `ignored the mention ...`, `refused a delivery ...`, `cannot handle the delivery`. The delivery scan logs `redelivered webhook delivery <id> (<guid>), which failed with HTTP <status>`, `cannot redeliver webhook delivery ...` and `cannot scan for failed webhook deliveries; trying again next scan`.
-- State dir: `~/.local/state/herdr/plugins/sapphire-agent/` holds `journal.db`, `paused` and `wake`.
+- State dir: `~/.local/state/herdr/plugins/sapphire-agent/` holds `journal.db`, `paused`, `wake` and `events.sock` (agent events, while the service runs).
 - Run tabs: herdr workspace `<team name>`, tab `<IDENTIFIER> <title>`; command tabs `@bot CMD-<n>` in their repo's team workspace, or `agents` for a repo of no team.
 - Worktrees: `~/.herdr/worktrees/<repo>/<branch-slug>`. Removed with the local branch once the epic is Shipped or its PR is merged or closed, unless they hold unpushed work (then the epic gets a comment with the path).
 

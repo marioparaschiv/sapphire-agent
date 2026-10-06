@@ -24,10 +24,11 @@ Which Linear states a run belongs in (`activeRoles`): a started run in Implement
 
 ## 1. Requests
 
-`scripts/ctl.sh` only appends requests to the journal (`journal-and-markers.md`); the rules act on them, oldest first, at most one per epic per tick. This rule takes `stop` and `send`:
+`scripts/ctl.sh` and the agent event server only append requests to the journal (`journal-and-markers.md`); the rules act on them, oldest first, at most one per epic per tick. This rule takes `stop`, `send` and `session`:
 
 - `stop <EPIC>`: the epic's run, if in flight, is ended: its tab is closed even while the agent works, status `ended`. The epic stays in its Linear state; move it to start over. Not in flight any more: dropped.
 - `send <EPIC> <text>`: typed into the run's agent (`herdr agent prompt`), as a question reply is. No started run in flight, or no tab: dropped. herdr refuses it (the agent sits at a dialog): logged and dropped, not tried again.
+- `session <EPIC> <id>`: recorded by the agent event server (Agent events) when the run's agent started another session in its pane. The run's session id becomes that one, so the question relay reads the session the agent is in now; its name stays. Not in flight any more: dropped.
 - `start` requests are left to the dispatch rule.
 - `follow-up` requests are left to the follow-up rule, except one whose epic has no run left (cleanup dropped it) or only a `kept` one: dropped.
 
@@ -133,6 +134,14 @@ GitHub does not redeliver a failed delivery by itself, so `MissedDeliveries` (`m
 The redelivery is a new attempt with the same `guid`, delivered after the mark: if it fails again (the service went down again), the next scan redelivers it once more; once it succeeds, the event is left alone. It comes in through the webhook server like any delivery, so recording it is idempotent. A crash anywhere in the scan leaves the mark where it was, so nothing is skipped; the next scan finds the event's newer successful attempt or redelivers it again.
 
 A failed scan (GitHub unreachable or refusing, a journal error) is logged as `cannot scan for failed webhook deliveries; trying again next scan` and does not stop the service.
+
+## Agent events
+
+The coding agents report their session events through one-line hooks in their own settings: Claude's `~/.claude/settings.json` runs `sapphire hook claude` (`async`, so Claude never waits on it) on `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd`. `sapphire hook <agent>` (`src/agent-hook.ts`, node built-ins only, about 50 ms) sends the payload from stdin and `$HERDR_PANE_ID` as one JSON line to `$STATE/events.sock` and waits for the one-line answer. The service not running (no socket, or refused) is a silent success: events only make it act sooner. Anything else the service refuses exits 1 with the reason on stderr.
+
+`AgentEventServer` (`agent-event-server.ts`) decodes the payload with that agent's adapter (`claude-hooks.ts`) into an agent-neutral `AgentEvent` (`agent-event.ts`): `SessionStarted` (with how: `startup`, `resume`, `clear`, `compact`, `fork`), `TurnStarted`, `TurnEnded`, `Notified`, `SessionEnded`. A subagent's events are dropped. An event from the pane of a run in flight or a command claimed or running wakes the reconciler; a `SessionStarted` whose session is not the run's recorded one also records a `session` request (Requests). Events from any other pane are answered and dropped.
+
+Another agent (e.g. pi) needs an adapter (`(payload) => Option<AgentEvent>`) added to `adapters` in `agent-event-server.ts`, and a hook in that agent that runs `sapphire hook <name>`.
 
 ## 8. Commands
 

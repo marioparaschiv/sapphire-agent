@@ -1,10 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { TestConsole } from 'effect/testing';
+import { AgentEventServer } from './agent-event-server.ts';
 import type { CallError } from './call-policy.ts';
 import { writeTranscript } from './claude-transcript-fixture.ts';
 import { ClaudeTranscript, type TranscriptSession } from './claude-transcript.ts';
@@ -146,7 +147,29 @@ export type Harness = {
 	// Runs `scripts/ctl.sh <args>` as a command's agent does, through its own journal connection, and returns the lines
 	// it printed.
 	readonly ctl: (...args: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<string>, unknown>;
+	// Runs `scripts/ctl.sh hook <agent>` as an agent's hook does in a herdr pane, with the payload on stdin; returns its
+	// exit code and stderr once the service answered.
+	readonly hook: (agent: string, payload: string, paneId: string | null) => Effect.Effect<HookOutcome>;
 };
+
+export type HookOutcome = { readonly code: number | null; readonly stderr: string };
+
+const ctlScript = join(import.meta.dirname, '..', 'scripts', 'ctl.sh');
+
+const runHook = (stateDirectory: string, agent: string, payload: string, paneId: string | null) =>
+	Effect.callback<HookOutcome>((resume) => {
+		const { HERDR_PANE_ID: _, ...env } = process.env;
+		const child = spawn('sh', [ctlScript, 'hook', agent], {
+			env: { ...env, HERDR_PLUGIN_STATE_DIR: stateDirectory, ...(paneId === null ? {} : { HERDR_PANE_ID: paneId }) },
+		});
+		let stderr = '';
+
+		child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+			stderr += chunk;
+		});
+		child.on('close', (code) => resume(Effect.succeed({ code, stderr })));
+		child.stdin.end(payload);
+	});
 
 const makeRepos = (dir: string) => {
 	const origin = join(dir, 'github.com', 'test', 'repo.git');
@@ -214,7 +237,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
 
-		const stack = Layer.mergeAll(WebhookServer.layer, MissedDeliveries.layer).pipe(
+		const stack = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
 			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
 			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
 			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer)),
@@ -352,6 +375,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 					return (yield* output.logLines).flatMap((line) => String(line).split('\n'));
 				}),
+			hook: (agent, payload, paneId) => runHook(dir, agent, payload, paneId),
 		} satisfies Harness;
 	});
 

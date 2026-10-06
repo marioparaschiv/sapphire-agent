@@ -1,13 +1,15 @@
 import { Effect, Option } from 'effect';
 import { Herdr } from './herdr.ts';
-import { Journal, type Run } from './journal.ts';
+import { Journal, type Run, sessionName } from './journal.ts';
 import { isInFlight, isStarted, type Observation, tabOf } from './observation.ts';
 import type { Rule, Work } from './planner.ts';
 import { makeTabActions } from './run-actions.ts';
 
-// Acts on `ctl.sh stop` and `ctl.sh send`, oldest first, and drops follow-up requests that can never be claimed. Each
-// request is dropped once acted on, so a crash before that repeats the stop (a no-op once the run ended) or types the
-// message again. Not paused: a stop must work while paused.
+const verbs = { stop: 'stop', send: 'send', 'follow-up': 'follow up on', session: 'change the session of' } as const;
+
+// Acts on `ctl.sh stop`, `ctl.sh send` and the session changes the agent event server recorded, oldest first, and
+// drops follow-up requests that can never be claimed. Each request is dropped once acted on, so a crash before that
+// repeats the stop (a no-op once the run ended) or types the message again. Not paused: a stop must work while paused.
 export const requestsRule = Effect.gen(function* () {
 	const journal = yield* Journal;
 	const herdr = yield* Herdr;
@@ -33,6 +35,12 @@ export const requestsRule = Effect.gen(function* () {
 			yield* journal.deleteRequest(requestId);
 		});
 
+	// The run keeps its session's name, which other sessions message it by.
+	const changeSession = (run: Run, requestId: number, sessionId: string) =>
+		isInFlight(run)
+			? journal.putRun({ ...run, session: { id: sessionId, name: run.session?.name ?? sessionName(run.identifier) } }).pipe(Effect.andThen(journal.deleteRequest(requestId)))
+			: drop(requestId, 'no run in flight to change the session of');
+
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
@@ -40,14 +48,14 @@ export const requestsRule = Effect.gen(function* () {
 			const busy = new Set<string>();
 
 			for (const { id, request } of yield* journal.listRequests) {
-				if (request._tag !== 'stop' && request._tag !== 'send' && request._tag !== 'follow-up') {
+				if (request._tag !== 'stop' && request._tag !== 'send' && request._tag !== 'follow-up' && request._tag !== 'session') {
 					continue;
 				}
 
 				const run = runs.find((candidate) => candidate.identifier === request.identifier);
 
 				if (!run || (request._tag === 'follow-up' && run.status === 'kept')) {
-					work.push({ task: `request ${id}`, apply: drop(id, `${request.identifier} has no run to ${request._tag === 'follow-up' ? 'follow up on' : request._tag}`) });
+					work.push({ task: `request ${id}`, apply: drop(id, `${request.identifier} has no run to ${verbs[request._tag]}`) });
 					continue;
 				}
 
@@ -57,7 +65,8 @@ export const requestsRule = Effect.gen(function* () {
 
 				busy.add(run.epicId);
 
-				const apply = request._tag === 'stop' ? stop(observation, run, id) : send(observation, run, id, request.text);
+				const apply =
+					request._tag === 'stop' ? stop(observation, run, id) : request._tag === 'send' ? send(observation, run, id, request.text) : changeSession(run, id, request.sessionId);
 
 				work.push({ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply });
 			}
