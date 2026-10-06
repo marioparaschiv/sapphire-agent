@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
-import { EpicState } from './chat.ts';
+import { EpicState, Phase } from './chat.ts';
 import { ResultFile } from './result-file.ts';
 
 // claimed: recorded before the run is started. running: Claude is confirmed started. awaitingInput: the agent sat
@@ -129,6 +129,8 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('done', { commandId: Schema.Int }),
 	// Recorded by the agent event server when a run's agent starts another session in its pane.
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
+	// Recorded by the agent event server when a run's agent starts a phase.
+	Schema.TaggedStruct('phase', { identifier: Schema.String, phase: Phase }),
 ]);
 
 export type Request = typeof Request.Type;
@@ -147,6 +149,8 @@ export const Topic = Schema.Struct({
 	state: EpicState,
 	// The PR whose link was posted, so it is posted once.
 	pullRequestUrl: Schema.NullOr(Schema.String),
+	// The slice milestones posted, `<sub-issue id>:<progress>`, so each is posted once.
+	milestones: Schema.fromJsonString(Schema.Array(Schema.String)),
 });
 
 export type Topic = typeof Topic.Type;
@@ -293,6 +297,11 @@ const migrations = SqliteMigrator.layer({
 					thread TEXT NOT NULL
 				)
 			`;
+		}),
+		'0009_add_topic_milestones': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE topics ADD COLUMN milestones TEXT NOT NULL DEFAULT '[]'`;
 		}),
 	}),
 });

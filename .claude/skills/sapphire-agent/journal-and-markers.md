@@ -59,7 +59,7 @@ One row per comment that mentioned the bot, written by the webhook server before
 
 ### `requests`
 
-What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id), plus the `session` changes the agent event server saw (by epic identifier). Both only append rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
+What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id), plus the `session` changes and `phase` starts (`sreview`, `review-verify`, `pr`) the agent event server saw (by epic identifier); a chat message in an epic's thread is recorded as a `send`. Both only append rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
 ### `delivery_mark`
 
@@ -71,7 +71,7 @@ One row per bot message of the main chat (`message_ref`, the platform's ref, e.g
 
 ### `topics` and `archive_thread`
 
-One row per epic with a chat thread (`epic_id`, `identifier`, `thread` the platform's ref, `state` it shows, `pull_request_url` posted, if any), written right after the thread is made and dropped right after it is deleted (`rules.md`, Topics). `archive_thread` holds at most one row: the `✅ Done` thread shipped epics are summed up in.
+One row per epic with a chat thread (`epic_id`, `identifier`, `thread` the platform's ref, `state` it shows, `pull_request_url` posted, if any, `milestones` the slice milestones posted, as a JSON array of `<sub-issue id>:started|done`), written right after the thread is made and dropped right after it is deleted (`rules.md`, Topics). `archive_thread` holds at most one row: the `✅ Done` thread shipped epics are summed up in.
 
 ### Journal service
 

@@ -135,7 +135,7 @@ const variableSchemas = {
 	Replies: Schema.Struct({ questionIds: Ids }),
 	Comments: Schema.Struct({ issueId: Schema.String, after: Schema.NullOr(Schema.String) }),
 	Reactions: Schema.Struct({ id: Schema.String }),
-	SubIssues: Schema.Struct({ id: Schema.String }),
+	SubIssues: Schema.Struct({ parentIds: Ids, after: Schema.NullOr(Schema.String) }),
 	Labels: Schema.Struct({ name: Schema.String }),
 	Move: Schema.Struct({ id: Schema.String, stateId: Schema.String }),
 	Comment: Schema.Struct({ issueId: Schema.String, body: Schema.String, parentId: Schema.optionalKey(Schema.NullOr(Schema.String)) }),
@@ -294,9 +294,17 @@ const make = Effect.gen(function* () {
 			}
 
 			case 'SubIssues': {
-				const { id } = Schema.decodeUnknownSync(variableSchemas.SubIssues)(variables);
+				const { parentIds, after } = Schema.decodeUnknownSync(variableSchemas.SubIssues)(variables);
+				const children = issueList.filter((candidate) => candidate.parentId !== null && parentIds.includes(candidate.parentId));
+				const start = after === null ? 0 : children.findIndex((candidate) => candidate.id === after) + 1;
+				const page = children.slice(start, start + MAX_PAGE_SIZE);
 
-				return { issue: { children: { nodes: issueList.filter((candidate) => candidate.parentId === id).map((child) => ({ id: child.id })) } } };
+				return {
+					issues: {
+						nodes: page.map((child) => ({ id: child.id, identifier: child.identifier, title: child.title, parent: { id: child.parentId }, state: stateOf(child) })),
+						pageInfo: { hasNextPage: start + MAX_PAGE_SIZE < children.length, endCursor: page.at(-1)?.id ?? null },
+					},
+				};
 			}
 
 			case 'Comments': {

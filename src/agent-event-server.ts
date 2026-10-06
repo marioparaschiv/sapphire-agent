@@ -4,6 +4,7 @@ import { Cause, Context, Effect, FileSystem, Layer, Option, Schema, Struct } fro
 import { Socket } from 'effect/socket';
 import type { AgentAdapter } from './agent-event.ts';
 import { eventSocketName } from './agent-hook.ts';
+import { Phase } from './chat.ts';
 import { decodeClaudeHook } from './claude-hooks.ts';
 import { AppConfig } from './config.ts';
 import { Journal } from './journal.ts';
@@ -17,7 +18,8 @@ const EventEnvelope = Schema.fromJsonString(Schema.Struct({ agent: Schema.Litera
 
 // Session events from the coding agents' hooks, on `<state dir>/events.sock` while the service runs. An event from the
 // pane of a run or command in flight wakes the reconciler, and a session start that changes a run's session (a resume
-// of another, a clear, a fork) records a `session` request, which the requests rule applies to the run. Events from any
+// of another, a clear, a fork) records a `session` request, which the requests rule applies to the run. A run's skill
+// that starts a phase records a `phase` request, which the topics rule posts in the epic's thread. Events from any
 // other pane are answered and dropped.
 export class AgentEventServer extends Context.Service<
 	AgentEventServer,
@@ -55,6 +57,10 @@ export class AgentEventServer extends Context.Service<
 					if (run !== undefined && event.value._tag === 'SessionStarted' && run.session?.id !== event.value.sessionId) {
 						yield* journal.addRequest({ _tag: 'session', identifier: run.identifier, sessionId: event.value.sessionId });
 						yield* Effect.log(`${run.identifier}'s ${agent} session is now ${event.value.sessionId} (${event.value.source})`);
+					}
+
+					if (run !== undefined && event.value._tag === 'SkillInvoked' && Schema.is(Phase)(event.value.skill)) {
+						yield* journal.addRequest({ _tag: 'phase', identifier: run.identifier, phase: event.value.skill });
 					}
 
 					yield* reconciler.wake;

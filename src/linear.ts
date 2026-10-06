@@ -52,6 +52,16 @@ export const Reply = Schema.Struct({ ...Comment.fields, parent: Schema.Struct({ 
 
 export type Reply = typeof Reply.Type;
 
+export const SubIssue = Schema.Struct({
+	id: Schema.String,
+	identifier: Schema.String,
+	title: Schema.String,
+	parent: Schema.Struct({ id: Schema.String }),
+	state: State,
+});
+
+export type SubIssue = typeof SubIssue.Type;
+
 const EPIC_FIELDS = `
 	id identifier title url branchName sortOrder createdAt
 	team { id name }
@@ -85,6 +95,8 @@ const PageInfo = Schema.Struct({ hasNextPage: Schema.Boolean, endCursor: Schema.
 
 const CommentsPage = Schema.Struct({ comments: Schema.Struct({ nodes: Schema.Array(Comment), pageInfo: PageInfo }) });
 
+const SubIssuesPage = Schema.Struct({ issues: Schema.Struct({ nodes: Schema.Array(SubIssue), pageInfo: PageInfo }) });
+
 const IssueLabels = Schema.Struct({ issueLabels: nodes(Schema.Struct({ id: Schema.String, team: Schema.NullOr(Schema.Struct({ id: Schema.String })) })) });
 
 const retryAfter = (response: HttpClientResponse.HttpClientResponse) =>
@@ -113,8 +125,8 @@ export type LinearShape = {
 	readonly replies: (questionIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Reply>, CallError>;
 	// Every comment on the issue, replies included, oldest first.
 	readonly comments: (issueId: string) => Effect.Effect<ReadonlyArray<Comment>, CallError>;
-	// At most MAX_PAGE_SIZE.
-	readonly subIssueCount: (issueId: string) => Effect.Effect<number, CallError>;
+	// The sub-issues of every given issue.
+	readonly subIssues: (parentIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<SubIssue>, CallError>;
 	readonly moveIssue: (issueId: string, stateId: string) => Effect.Effect<void, CallError>;
 	// Returns the ID of the issue's comment carrying the marker, posting it first (as a reply when parentId is
 	// given) only if no comment carries it yet.
@@ -192,6 +204,29 @@ const make = (endpoint: string) =>
 			} while (after !== null);
 
 			return comments;
+		});
+
+		const readSubIssues = Effect.fn(function* (parentIds: ReadonlyArray<string>) {
+			const subIssues: Array<SubIssue> = [];
+			let after: string | null = null;
+
+			do {
+				const { issues: page }: typeof SubIssuesPage.Type = yield* request(
+					SubIssuesPage,
+					`query SubIssues($parentIds: [ID!], $after: String) {
+						issues(first: ${MAX_PAGE_SIZE}, after: $after, filter: { parent: { id: { in: $parentIds } } }) {
+							nodes { id identifier title parent { id } state { id name type } }
+							pageInfo { hasNextPage endCursor }
+						}
+					}`,
+					{ parentIds, after },
+				);
+
+				subIssues.push(...page.nodes);
+				after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+			} while (after !== null);
+
+			return subIssues;
 		});
 
 		const labelId = Effect.fn(function* (teamId: string, name: string) {
@@ -324,17 +359,7 @@ const make = (endpoint: string) =>
 
 			comments: (issueId) => readComments(issueId).pipe(withPolicy),
 
-			subIssueCount: (issueId) =>
-				request(
-					Schema.Struct({ issue: Schema.Struct({ children: nodes(Schema.Struct({ id: Schema.String })) }) }),
-					`query SubIssues($id: String!) {
-						issue(id: $id) { children(first: ${MAX_PAGE_SIZE}) { nodes { id } } }
-					}`,
-					{ id: issueId },
-				).pipe(
-					Effect.map((result) => result.issue.children.nodes.length),
-					withPolicy,
-				),
+			subIssues: (parentIds) => (parentIds.length === 0 ? Effect.succeed([]) : readSubIssues(parentIds).pipe(withPolicy)),
 
 			moveIssue: (issueId, stateId) =>
 				request(

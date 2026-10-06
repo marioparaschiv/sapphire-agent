@@ -11,9 +11,13 @@ import { type FakeClaudeAnswer, type FakeClaudeRun, fakeClaude, flagValue } from
 import { AppConfig } from './config.ts';
 import { answerChatMessages, keepChatSessionWarm, unknownContext } from './conversations.ts';
 import { Journal } from './journal.ts';
+import { Pause } from './pause.ts';
+import { Planner } from './planner.ts';
 import { Prompts } from './prompts.ts';
+import { Reconciler } from './reconciler.ts';
 import { telegramChat } from './telegram.ts';
 import { FakeTelegram } from './telegram-fake.ts';
+import { plannerDependencies } from './test-harness.ts';
 import { Transcriber } from './transcription.ts';
 
 // The main chat as the service runs it, over the Telegram fake, a fake `claude` and a journal file in a temp dir.
@@ -39,6 +43,8 @@ const makeChat = (answer: (run: FakeClaudeRun) => FakeClaudeAnswer = () => ({ te
 			telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest)),
 			ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer, NodeFileSystem.layer])),
 			CountingJournal,
+			// Nothing to tick: a main-chat turn never wakes it.
+			Reconciler.layer.pipe(Layer.provide(Planner.layer(Effect.succeed([]))), Layer.provide(Pause.layer), Layer.provide([plannerDependencies(dir), NodeFileSystem.layer])),
 		).pipe(Layer.provideMerge(config), Layer.provide(Layer.succeedContext(telegram)));
 		const controls = yield* FakeTelegram.pipe(Effect.provide(telegram));
 

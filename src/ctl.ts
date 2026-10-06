@@ -6,7 +6,7 @@ import { FetchHttpClient } from 'effect/http';
 import { AppConfig } from './config.ts';
 import { type Command as CommandRow, commandIdentifier, Journal, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { isInFlight, isOver, isStarted } from './observation.ts';
+import { acceptsMessages, isInFlight, isOver } from './observation.ts';
 import { wakeFileName } from './reconciler.ts';
 
 // What the CLI refuses, said to whoever ran it: a person, or a command's agent.
@@ -41,6 +41,8 @@ const describeRequest = (request: Request) => {
 			return `done CMD-${request.commandId}`;
 		case 'session':
 			return `session ${request.identifier}: ${request.sessionId}`;
+		case 'phase':
+			return `phase ${request.identifier}: /${request.phase}`;
 	}
 };
 
@@ -156,7 +158,7 @@ const stop = Command.make('stop', { epic: epicArgument }, ({ epic: identifier })
 
 const send = Command.make('send', { epic: epicArgument, message: words('message', 'What to type into the agent') }, ({ epic: identifier, message }) =>
 	Effect.gen(function* () {
-		if (!Option.exists(yield* runOf(identifier), (run) => isInFlight(run) && isStarted(run))) {
+		if (!Option.exists(yield* runOf(identifier), acceptsMessages)) {
 			return yield* new Refused({ message: `${identifier} has no agent running` });
 		}
 

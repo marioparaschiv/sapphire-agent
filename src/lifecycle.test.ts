@@ -5,7 +5,6 @@ import { Transient } from './call-policy.ts';
 import type { WebhookDelivery } from './github-app-fixture.ts';
 import type { Command, Run } from './journal.ts';
 import { parseMarker } from './markers.ts';
-import { deliveredEmoji } from './monitoring.ts';
 import { deliveries, git, type Harness, makeHarness } from './test-harness.ts';
 
 const writeKinds = ['journal', 'linear', 'github', 'herdr', 'telegram'] as const;
@@ -46,6 +45,12 @@ const seed = 20_261_004;
 
 const question = '⏺ The sync needs a conflict rule.\n\n❯ Which should win, local or remote?';
 
+// A PostToolUse hook payload as Claude Code writes it once a skill ran.
+const skillHook = (sessionId: string, skill: string) =>
+	JSON.stringify({ session_id: sessionId, hook_event_name: 'PostToolUse', tool_name: 'Skill', tool_input: { skill }, tool_response: { success: true } });
+
+const sentTexts = (h: Harness) => h.telegram.sent.map((message) => message.text);
+
 const markerOrFirstLine = (body: string) =>
 	Option.match(parseMarker(body), { onNone: () => body.split('\n')[0], onSome: (marker) => `${marker.purpose}:${marker.key}` });
 
@@ -73,11 +78,11 @@ const makeDriver = (h: Harness, crash: Option.Option<CrashPoint>) => {
 		if (Option.exists(pending, (point) => writesSoFar(h)[point.kind] >= point.nth)) {
 			yield* Fiber.interrupt(fiber);
 
-			// A reply is typed before it is recorded, so a crash in between types it again after the restart.
+			// A message is typed before its request is dropped, so a crash in between types it again after the restart.
 			const typed = h.herdr.prompts().length - typedBefore;
-			const recorded = (yield* h.runs).flatMap((run) => run.deliveredReplyIds).length;
+			const waiting = (yield* h.ctl('status')).some((line) => line.startsWith('request '));
 
-			retypes = typed > 0 && recorded === 0;
+			retypes = typed > 0 && waiting;
 			pending = Option.none();
 			yield* h.restart;
 		}
@@ -97,6 +102,14 @@ const makeDriver = (h: Harness, crash: Option.Option<CrashPoint>) => {
 			assert.fail(`${what} was not reached${Option.match(crash, { onNone: () => '', onSome: (point) => ` after a ${describePoint(point)}` })}`);
 		});
 
+	// The process died at the armed crash: a fresh one takes over.
+	const restartAfterCrash = (what: string) =>
+		Effect.gen(function* () {
+			assert.isTrue(Option.exists(pending, (point) => writesSoFar(h)[point.kind] >= point.nth), `${what} without a crash`);
+			pending = Option.none();
+			yield* h.restart;
+		});
+
 	// A delivery the crash failed is redelivered once the service is back, as GitHub's delivery log allows.
 	const deliver = (delivery: WebhookDelivery) =>
 		Effect.gen(function* () {
@@ -104,13 +117,41 @@ const makeDriver = (h: Harness, crash: Option.Option<CrashPoint>) => {
 				return;
 			}
 
-			assert.isTrue(Option.exists(pending, (point) => writesSoFar(h)[point.kind] >= point.nth), 'a delivery failed without a crash');
-			pending = Option.none();
-			yield* h.restart;
+			yield* restartAfterCrash('a delivery failed');
 			assert.strictEqual(yield* h.deliver(delivery), 204);
 		});
 
-	return { tickUntil, deliver, crashed: () => Option.isSome(crash) && Option.isNone(pending), retypes: () => retypes };
+	// A hook the crash failed is sent again as soon as the service is back.
+	const hook = (payload: string, paneId: string) =>
+		Effect.gen(function* () {
+			if ((yield* h.hook('claude', payload, paneId)).code === 0) {
+				return;
+			}
+
+			yield* restartAfterCrash('a hook failed');
+			assert.strictEqual((yield* h.hook('claude', payload, paneId)).code, 0);
+		});
+
+	// A message whose recording the crash killed is lost with the process; the user writes it again.
+	const writeInTopic = (topicId: number, text: string) =>
+		Effect.gen(function* () {
+			const write = Effect.suspend(() => {
+				const before = h.journalWrites();
+
+				h.telegram.write({ from: h.telegramUser, text, topicId });
+
+				return h.awaitJournalWrites(before + 1);
+			});
+
+			yield* write;
+
+			if (Option.exists(pending, (point) => point.kind === 'journal' && writesSoFar(h).journal >= point.nth)) {
+				yield* restartAfterCrash('a message was lost');
+				yield* write;
+			}
+		});
+
+	return { tickUntil, deliver, hook, writeInTopic, crashed: () => Option.isSome(crash) && Option.isNone(pending), retypes: () => retypes };
 };
 
 const runOf = (runs: ReadonlyArray<Run>) => Option.fromUndefinedOr(runs[0]);
@@ -152,14 +193,14 @@ const currentRun = (h: Harness) =>
 		}),
 	);
 
-// The whole life of one epic: dispatch, a question relayed through Linear, the result posted to the PR, a review thread
-// that mentions the bot, whose command hands it to a follow-up, the cleanup once the PR is merged, and its chat topic,
-// summed up once it ships. Returns everything the run left behind in Linear, GitHub, herdr, git, Telegram and the
+// The whole life of one epic: dispatch, a slice and a phase posted in its chat topic, a question asked and answered
+// there, the result posted to the PR, a review thread that mentions the bot, whose command hands it to a follow-up, the
+// cleanup once the PR is merged, and its chat topic, summed up once it ships. Returns everything the run left behind in Linear, GitHub, herdr, git, Telegram and the
 // journal.
 const lifecycle = (crash: Option.Option<CrashPoint>) =>
 	Effect.gen(function* () {
-		const h = yield* makeHarness();
-		const { tickUntil, deliver, crashed, retypes } = makeDriver(h, crash);
+		const h = yield* makeHarness({}, { answerChat: true });
+		const { tickUntil, deliver, hook, writeInTopic, crashed, retypes } = makeDriver(h, crash);
 
 		// The workspace exists already, as in production, and the user has written to the bot, so it may write to them.
 		h.herdr.addTab({ label: 'notes', workspace: 'Test', agent: null });
@@ -175,20 +216,33 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 
 		assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
 
-		// Monitoring: the agent stops to ask, the question goes to the epic, the user's reply is typed into the pane.
+		// Topic: the agent starts and finishes the first slice, then reviews; each is posted in the epic's topic once.
+		const [slice] = h.linear.subIssues(epic.id);
+		const { session } = yield* currentRun(h);
+
+		h.moveEpic(slice.id, 'Implementing');
+		yield* tickUntil('the started slice', () => sentTexts(h).includes('▶️ TEST-101 Slice 1 started'));
+		h.moveEpic(slice.id, 'Done');
+		yield* tickUntil('the done slice', () => sentTexts(h).includes('✔️ TEST-101 Slice 1 done'));
+		yield* hook(skillHook(session?.id ?? '', 'sreview'), paneId);
+		yield* tickUntil('the review phase', () => sentTexts(h).includes('🔎 /sreview started'));
+
+		// Monitoring: the agent stops to ask, the question goes to the epic's topic, the user's answer there is typed into
+		// the pane.
 		h.herdr.setAgentStatus(paneId, 'idle');
 		h.herdr.setTail(paneId, question);
 		yield* tickUntil('the quiet agent', (runs) => isRun(runs, (run) => run.agentStatus === 'idle'));
 		yield* TestClock.adjust('3 minutes');
 		yield* tickUntil('the question', (runs) => isRun(runs, (run) => run.status === 'awaitingInput'));
 
-		const questionId = Option.getOrThrow(Option.flatMap(runOf(yield* h.runs), (run) => Option.fromNullishOr(run.questionCommentId)));
-		const reply = h.linear.addComment(epic.id, 'Remote wins.\nKeep a backup of local.', { parentId: questionId });
+		const asked = h.telegram.sent.find((message) => message.text.startsWith('⏸ '));
 
-		yield* tickUntil('the delivered reply', () => h.linear.comments(epic.id).some((comment) => comment.id === reply.id && comment.reactions.includes(deliveredEmoji)));
+		assert.isNotNull(asked?.topicId);
+		yield* writeInTopic(asked?.topicId ?? 0, 'Remote wins.\nKeep a backup of local.');
+		yield* tickUntil('the typed answer', () => h.herdr.prompts().length > 0);
 		h.herdr.setAgentStatus(paneId, 'working');
 		h.herdr.setTail(paneId, '⏺ Wrote src/sync/merge.ts');
-		yield* tickUntil('the working agent', (runs) => isRun(runs, (run) => run.status === 'running' && run.questionCommentId === null));
+		yield* tickUntil('the working agent', (runs) => isRun(runs, (run) => run.status === 'running'));
 
 		// Results: the agent pushed, opened the PR and wrote its result file.
 		git(worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Sync plugin settings');
@@ -288,16 +342,9 @@ describe('lifecycle', () => {
 				const pullRequestUrl = 'https://github.com/test/repo/pull/1';
 
 				assert.deepStrictEqual(uncrashed.outcome, {
-					linear: {
-						state: 'Shipped',
-						labels: [],
-						comments: [
-							['awaitingInput:0-0', null, []],
-							['Remote wins.', 'awaitingInput:0-0', [deliveredEmoji]],
-						],
-					},
+					linear: { state: 'Shipped', labels: [], comments: [] },
 					github: {
-						comments: ['summary:0', 'commandReply:1', `summary:${followUpAt}`],
+						comments: ['summary:0', 'commandReply:3', `summary:${followUpAt}`],
 						reviews: [['flags:0', ['src/sync/merge.ts:3']]],
 						thread: [true, ['Rename this to syncSettings. @orchestratorbot', `reply:PRRT_1.${followUpAt}`]],
 					},
@@ -307,7 +354,16 @@ describe('lifecycle', () => {
 					runs: 0,
 					telegram: {
 						topics: ['✅ Done'],
-						sent: [`PR opened: ${pullRequestUrl}`, `TEST-10 Plugin settings sync: PR opened ${pullRequestUrl}`, `TEST-10 Plugin settings sync · ${pullRequestUrl} · 2 slices`],
+						sent: [
+							'OK.',
+							'▶️ TEST-101 Slice 1 started',
+							'✔️ TEST-101 Slice 1 done',
+							'🔎 /sreview started',
+							`⏸ Waiting for input:\n\n${question}\n\nWrite here to answer; it is typed into the agent.`,
+							`PR opened: ${pullRequestUrl}`,
+							`TEST-10 Plugin settings sync: PR opened ${pullRequestUrl}`,
+							`TEST-10 Plugin settings sync · ${pullRequestUrl} · 2 slices`,
+						],
 					},
 				});
 

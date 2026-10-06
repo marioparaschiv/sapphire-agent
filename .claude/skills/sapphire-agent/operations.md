@@ -27,7 +27,15 @@ How the live service is installed, started, paused, drained, deployed, inspected
 3. Copy both units to `~/.config/systemd/user/`.
 4. `systemctl --user daemon-reload` and `enable` both.
 
-The Claude hooks are not installed by the script: `~/.claude/settings.json` has one `{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }` entry under each of `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd` (`rules.md`, Agent events).
+The Claude hooks are not installed by the script: `~/.claude/settings.json` has one `{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }` entry under each of `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification` and `SessionEnd`, and the same entry under `PostToolUse` with the `Skill` matcher, for the phases a topic shows (`rules.md`, Agent events):
+
+```json
+"PostToolUse": [
+  { "matcher": "Skill", "hooks": [{ "type": "command", "command": "sapphire hook claude", "async": true, "timeout": 10 }] }
+]
+```
+
+Add the `PostToolUse` entry only once the running service knows it: an older one refuses the event, and the hook fails on every skill.
 
 Editing a file in `systemd/` does nothing until you rerun the install (or copy it) and `daemon-reload`.
 

@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Clock, Effect, Option } from 'effect';
+import { Chat } from './chat.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { Comments, type FlaggedRun } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Herdr } from './herdr.ts';
-import { type AgentStatus, Journal, type Run } from './journal.ts';
+import { type AgentStatus, Journal, type Run, type Topic } from './journal.ts';
 import { type Epic, Linear, type Reply } from './linear.ts';
 import { parseMarker } from './markers.ts';
 import { activeRoles, hasRole, isStarted, type Observation, observedAgentStatus, type StartedRun, tabOf } from './observation.ts';
@@ -66,10 +67,13 @@ const sameRun = (a: Run, b: Run) => a.status === b.status && isSameWatch(a, b) &
 // poll always wins. Flags, once each: awaitingInput (quiet too long without a result file), stale (working with an
 // unchanged pane even after a nudge), error (agent exited or vanished; its tab is then closed) and the wall-clock cap.
 // A run that asked its reply-to session by message is not flagged while it waits for the reply; after staleAfterSeconds
-// its question is asked on Linear instead. While awaitingInput, the user's replies to the question are typed into the pane.
+// its question is asked on Linear instead. A run without one asks in its epic's chat thread, where the user's messages go
+// to the agent, or on Linear when the epic has no thread. While awaitingInput on Linear, the user's replies to the
+// question are typed into the pane.
 export const monitoringRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
+	const chat = yield* Chat;
 	const herdr = yield* Herdr;
 	const linear = yield* Linear;
 	const comments = yield* Comments;
@@ -139,7 +143,7 @@ export const monitoringRule = Effect.gen(function* () {
 	const pendingMessage = (run: StartedRun) =>
 		run.replyTo === null || run.session === null ? Effect.succeedNone : transcript.pendingMessage({ id: run.session.id, cwd: run.worktreePath }, run.replyTo);
 
-	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, replies: ReadonlyArray<Reply>) =>
+	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, replies: ReadonlyArray<Reply>, topic: Option.Option<Topic>) =>
 		Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
 			const status = observedAgentStatus(observation, watched);
@@ -178,6 +182,15 @@ export const monitoringRule = Effect.gen(function* () {
 				const message = yield* pendingMessage(run);
 
 				if (now - since < (Option.isSome(message) ? config.staleAfterSeconds : config.awaitingInputAfterSeconds) * 1000) {
+					return;
+				}
+
+				// The question is posted before the status records it, and the chat shows it once, so a crash in between is safe.
+				if (run.replyTo === null && Option.isSome(topic)) {
+					yield* Effect.log(`agent ${status} without a result file; asking in its chat thread`);
+					yield* chat.send({ _tag: 'question', thread: topic.value.thread, text: tail, askedAt: since });
+					yield* journal.putRun({ ...run, status: 'awaitingInput' });
+
 					return;
 				}
 
@@ -234,6 +247,7 @@ export const monitoringRule = Effect.gen(function* () {
 			);
 			const questions = runs.flatMap((run) => (run.status === 'awaitingInput' && run.questionCommentId !== null ? [run.questionCommentId] : []));
 			const replies = yield* linear.replies(questions);
+			const topics = yield* journal.listTopics;
 
 			return runs.flatMap((run): Array<EpicWork> => {
 				const epic = observation.epics.get(run.epicId);
@@ -244,7 +258,7 @@ export const monitoringRule = Effect.gen(function* () {
 
 				const own = replies.filter((reply) => reply.parent.id === run.questionCommentId);
 
-				return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: monitor(observation, run, epic, own) }];
+				return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: monitor(observation, run, epic, own, Option.fromUndefinedOr(topics.find((topic) => topic.epicId === run.epicId))) }];
 			});
 		});
 

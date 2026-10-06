@@ -37,6 +37,15 @@ export const EpicHeading = Schema.Struct({ identifier: Schema.String, title: Sch
 
 export type EpicHeading = typeof EpicHeading.Type;
 
+// The phases of a run its thread shows as they start, named by the skill the agent runs for each.
+export const Phase = Schema.Literals(['sreview', 'review-verify', 'pr']);
+
+export type Phase = typeof Phase.Type;
+
+export const SliceProgress = Schema.Literals(['started', 'done']);
+
+export type SliceProgress = typeof SliceProgress.Type;
+
 // What core asks the platform to show; the platform decides how it looks. Every intent but `reply` may be sent again
 // after a crash, so the platform shows each once.
 export const Intent = Schema.Union([
@@ -47,6 +56,12 @@ export const Intent = Schema.Union([
 	// One line in the archive thread (`openArchive`).
 	Schema.TaggedStruct('epicShipped', { archive: ThreadRef, epic: EpicHeading, pullRequestUrl: Schema.NullOr(Schema.String), slices: Schema.Int }),
 	Schema.TaggedStruct('closeThread', { thread: ThreadRef }),
+	// A sub-issue of the epic started or was done.
+	Schema.TaggedStruct('sliceMoved', { thread: ThreadRef, slice: EpicHeading, progress: SliceProgress }),
+	// When it started tells two runs of the same phase apart.
+	Schema.TaggedStruct('phaseStarted', { thread: ThreadRef, phase: Phase, startedAt: Schema.Int }),
+	// The run waits for input, and shows what it last printed. When it went quiet tells its questions apart.
+	Schema.TaggedStruct('question', { thread: ThreadRef, text: Schema.String, askedAt: Schema.Int }),
 ]);
 
 export type Intent = typeof Intent.Type;

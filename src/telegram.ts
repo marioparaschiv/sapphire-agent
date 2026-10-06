@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Long } from '@mtcute/node';
 import { Effect, Fiber, Layer, Option, Ref, Result, Schedule, Stream } from 'effect';
 import { Permanent } from './call-policy.ts';
-import { Chat, type EpicHeading, type EpicState, type InboundMessage } from './chat.ts';
+import { Chat, type EpicHeading, type EpicState, type InboundMessage, type SliceProgress } from './chat.ts';
 import { AppConfig } from './config.ts';
 import { TelegramBot, type TelegramMessage } from './telegram-bot.ts';
 import { Transcriber } from './transcription.ts';
@@ -37,10 +37,19 @@ const topicTitle = ({ identifier, title }: EpicHeading, state: EpicState) => `${
 
 const archiveTitle = '✅ Done';
 
+const sliceIcons: Record<SliceProgress, string> = { started: '▶️', done: '✔️' };
+
 const chunks = (text: string) => Array.from({ length: Math.ceil(text.length / messageLength) }, (_, index) => text.slice(index * messageLength, (index + 1) * messageLength));
 
-// The end of the text, as much as one message shows.
-const draftOf = (text: string) => (text.length > messageLength ? `…${text.slice(-(messageLength - 1))}` : text);
+// The end of the text, at most `length` characters.
+const endOf = (text: string, length: number) => (text.length > length ? `…${text.slice(-(length - 1))}` : text);
+
+// As much of the end of the text as one message shows.
+const draftOf = (text: string) => endOf(text, messageLength);
+
+const questionHeading = '⏸ Waiting for input:\n\n';
+
+const questionFooter = '\n\nWrite here to answer; it is typed into the agent.';
 
 // Why a message is dropped, or what it is: text, or a voice note to transcribe first.
 const accepted = (message: TelegramMessage, allowedUserIds: ReadonlyArray<number>): Result.Result<{ readonly voiceFileId: string | null }, string> => {
@@ -197,6 +206,26 @@ export const telegramChat = Layer.effect(
 							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
 
 							return yield* bot.deleteTopic(chatId, topicId);
+						}
+
+						case 'sliceMoved': {
+							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
+							const { identifier, title } = intent.slice;
+
+							return yield* bot.sendOnce(chatId, `${sliceIcons[intent.progress]} ${identifier} ${title} ${intent.progress}`, `sliceMoved:${intent.thread}:${identifier}:${intent.progress}`, { topicId });
+						}
+
+						case 'phaseStarted': {
+							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
+
+							return yield* bot.sendOnce(chatId, `🔎 /${intent.phase} started`, `phaseStarted:${intent.thread}:${intent.phase}:${intent.startedAt}`, { topicId });
+						}
+
+						case 'question': {
+							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
+							const text = `${questionHeading}${endOf(intent.text, messageLength - questionHeading.length - questionFooter.length)}${questionFooter}`;
+
+							return yield* bot.sendOnce(chatId, text, `question:${intent.thread}:${intent.askedAt}`, { topicId });
 						}
 					}
 				}),

@@ -1,11 +1,15 @@
 import { Effect, Option, Semaphore } from 'effect';
-import { Chat, type EpicState } from './chat.ts';
+import type { CallError } from './call-policy.ts';
+import { Chat, type EpicState, type Phase, type SliceProgress } from './chat.ts';
+import { AppConfig } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { Journal, type Run, type Topic } from './journal.ts';
-import { type Epic, Linear } from './linear.ts';
+import { type Epic, Linear, type SubIssue } from './linear.ts';
 import { activeRoles, hasRole, isInFlight, type Observation } from './observation.ts';
 import type { Rule, TaskWork } from './planner.ts';
+
+type SubIssues = Effect.Effect<ReadonlyArray<SubIssue>, CallError>;
 
 // What the epic's thread should show, or none once it should be gone: a run in flight or failed shows its state; with
 // no run in flight the thread waits on the review (To Review, In Review), and goes once the epic is anywhere else, e.g.
@@ -31,9 +35,11 @@ export const topicState = (observation: Observation, epic: Epic, run: Option.Opt
 };
 
 // Gives each running epic a thread in the chat, made when its run is dispatched, which shows the run's state, posts
-// its PR once it opens, and goes once the epic ships (with a summary line in the archive thread) or its run stops. Its
-// work is a task, not the epic's: the chat failing never flags the epic, and is tried again next tick. Not pausable.
+// its PR once it opens, its slices as they start and finish and its run's phases as they start, and goes once the epic
+// ships (with a summary line in the archive thread) or its run stops. Its work is a task, not the epic's: the chat
+// failing never flags the epic, and is tried again next tick. Not pausable.
 export const topicsRule = Effect.gen(function* () {
+	const config = yield* AppConfig;
 	const journal = yield* Journal;
 	const chat = yield* Chat;
 	const git = yield* Git;
@@ -62,7 +68,7 @@ export const topicsRule = Effect.gen(function* () {
 		Effect.gen(function* () {
 			const thread = yield* chat.openEpic(epic, state);
 
-			yield* journal.putTopic({ epicId: epic.id, identifier: epic.identifier, thread, state, pullRequestUrl: null });
+			yield* journal.putTopic({ epicId: epic.id, identifier: epic.identifier, thread, state, pullRequestUrl: null, milestones: [] });
 			yield* Effect.log('opened its chat thread');
 		});
 
@@ -73,10 +79,10 @@ export const topicsRule = Effect.gen(function* () {
 			yield* Effect.log('closed its chat thread');
 		});
 
-	const ship = (topic: Topic, epic: Epic) =>
+	const ship = (topic: Topic, epic: Epic, subIssues: SubIssues) =>
 		Effect.gen(function* () {
 			const archive = yield* archiveThread;
-			const slices = yield* linear.subIssueCount(epic.id);
+			const slices = (yield* subIssues).filter((subIssue) => subIssue.parent.id === epic.id).length;
 
 			yield* chat.send({ _tag: 'epicShipped', archive, epic, pullRequestUrl: topic.pullRequestUrl, slices });
 			yield* close(topic);
@@ -100,19 +106,56 @@ export const topicsRule = Effect.gen(function* () {
 			return posted;
 		});
 
-	const update = (topic: Topic, epic: Epic, run: Option.Option<Run>, state: EpicState) =>
+	// A slice started in the implementing state; done in any completed one.
+	const progressOf = (subIssue: SubIssue): Option.Option<SliceProgress> => {
+		if (subIssue.state.type === 'completed') {
+			return Option.some('done');
+		}
+
+		return subIssue.state.name === config.states.implementing ? Option.some('started') : Option.none();
+	};
+
+	// Each milestone is posted, then recorded on the topic, so a poll or a restart never posts it again.
+	const postSlices = (topic: Topic, subIssues: ReadonlyArray<SubIssue>) =>
 		Effect.gen(function* () {
-			const current = Option.isSome(run) && topic.pullRequestUrl === null ? yield* postPullRequest(topic, epic, run.value) : topic;
+			let current = topic;
+			const due = subIssues
+				.filter((subIssue) => subIssue.parent.id === topic.epicId)
+				.flatMap((subIssue) => Option.toArray(Option.map(progressOf(subIssue), (progress) => ({ subIssue, progress, key: `${subIssue.id}:${progress}` }))))
+				.filter(({ key }) => !topic.milestones.includes(key));
 
-			if (current.state === state) {
-				return;
+			for (const { subIssue, progress, key } of due) {
+				yield* chat.send({ _tag: 'sliceMoved', thread: current.thread, slice: subIssue, progress });
+				current = { ...current, milestones: [...current.milestones, key] };
+				yield* journal.putTopic(current);
 			}
-
-			yield* chat.send({ _tag: 'epicState', thread: current.thread, epic, state });
-			yield* journal.putTopic({ ...current, state });
 		});
 
-	const reconcile = (observation: Observation, topic: Topic, run: Option.Option<Run>): Option.Option<Effect.Effect<void, unknown>> => {
+	const update = (topic: Topic, epic: Epic, run: Option.Option<Run>, state: EpicState, subIssues: SubIssues) =>
+		Effect.gen(function* () {
+			let current = Option.isSome(run) && topic.pullRequestUrl === null ? yield* postPullRequest(topic, epic, run.value) : topic;
+
+			if (current.state !== state) {
+				yield* chat.send({ _tag: 'epicState', thread: current.thread, epic, state });
+				current = { ...current, state };
+				yield* journal.putTopic(current);
+			}
+
+			yield* postSlices(current, yield* subIssues);
+		});
+
+	// The request is dropped once posted; a crash in between posts it again, which the chat shows once.
+	const postPhase = (topics: ReadonlyArray<Topic>, requestId: number, identifier: string, phase: Phase, startedAt: number) =>
+		Option.match(Option.fromUndefinedOr(topics.find((topic) => topic.identifier === identifier)), {
+			onNone: () => journal.deleteRequest(requestId).pipe(Effect.andThen(Effect.log(`no thread to post /${phase} in; dropped request ${requestId}`))),
+			onSome: (topic) =>
+				chat.send({ _tag: 'phaseStarted', thread: topic.thread, phase, startedAt }).pipe(
+					Effect.andThen(journal.deleteRequest(requestId)),
+					Effect.andThen(Effect.log(`posted /${phase} in its chat thread`)),
+				),
+		});
+
+	const reconcile = (observation: Observation, topic: Topic, run: Option.Option<Run>, subIssues: SubIssues): Option.Option<Effect.Effect<void, unknown>> => {
 		const epic = observation.epics.get(topic.epicId);
 
 		if (epic === undefined) {
@@ -125,13 +168,13 @@ export const topicsRule = Effect.gen(function* () {
 		}
 
 		if (hasRole(observation, epic, ['shipped'])) {
-			return Option.some(ship(topic, epic));
+			return Option.some(ship(topic, epic, subIssues));
 		}
 
 		return Option.some(
 			Option.match(topicState(observation, epic, run), {
 				onNone: () => close(topic),
-				onSome: (state) => update(topic, epic, run, state),
+				onSome: (state) => update(topic, epic, run, state, subIssues),
 			}),
 		);
 	};
@@ -143,6 +186,8 @@ export const topicsRule = Effect.gen(function* () {
 			const topics = yield* journal.listTopics;
 			const runs = yield* journal.listRuns;
 			const runOf = (epicId: string) => Option.fromUndefinedOr(runs.find((run) => run.epicId === epicId));
+			// One read for every thread, made only if one needs it.
+			const subIssues = yield* Effect.cached(linear.subIssues(topics.map((topic) => topic.epicId)));
 			const opened = runs
 				.filter((run) => isInFlight(run) && !topics.some((topic) => topic.epicId === run.epicId))
 				.flatMap((run) =>
@@ -152,9 +197,14 @@ export const topicsRule = Effect.gen(function* () {
 						),
 					),
 				);
-			const reconciled = topics.flatMap((topic) => Option.toArray(Option.map(reconcile(observation, topic, runOf(topic.epicId)), (apply) => task(topic.identifier, apply))));
+			const reconciled = topics.flatMap((topic) =>
+				Option.toArray(Option.map(reconcile(observation, topic, runOf(topic.epicId), subIssues), (apply) => task(topic.identifier, apply))),
+			);
+			const phases = (yield* journal.listRequests).flatMap(({ id, request, createdAt }) =>
+				request._tag === 'phase' ? [task(request.identifier, postPhase(topics, id, request.identifier, request.phase, createdAt))] : [],
+			);
 
-			return [...opened, ...reconciled];
+			return [...opened, ...reconciled, ...phases];
 		});
 
 	return { name: 'topics', pausable: false, plan } satisfies Rule;

@@ -38,6 +38,9 @@ export type StartedRun = Run & { readonly worktreePath: string; readonly tabId: 
 
 export const isStarted = (run: Run): run is StartedRun => run.worktreePath !== null && run.tabId !== null && run.paneId !== null;
 
+// A run whose agent can be sent a message (`send` requests).
+export const acceptsMessages = (run: Run) => isInFlight(run) && isStarted(run);
+
 // A run that was never confirmed running belongs in the ready state, or in To Review for a follow-up (or in
 // implementing, once the start moved it); a started run in implementing or in review. Elsewhere its tab is closed.
 export const activeRoles = (run: Run): ReadonlyArray<StateRole> => {
