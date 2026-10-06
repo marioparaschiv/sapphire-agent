@@ -90,8 +90,6 @@ export const settingsMismatches = (settings: ClaudeSettings, mcpServers: Readonl
 	return mismatches;
 };
 
-export const describeMismatch = ({ key, configured, reported }: SettingsMismatch) => `⚠️ Chat Claude runs with ${key} ${reported}, but your settings say ${configured}`;
-
 const readSettingsFile = Effect.gen(function* () {
 	const { env } = yield* AppConfig;
 	const fs = yield* FileSystem.FileSystem;
