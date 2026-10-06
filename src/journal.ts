@@ -287,7 +287,8 @@ const migrations = SqliteMigrator.layer({
 					identifier TEXT NOT NULL,
 					thread TEXT NOT NULL,
 					state TEXT NOT NULL,
-					pull_request_url TEXT
+					pull_request_url TEXT,
+					milestones TEXT NOT NULL
 				)
 			`;
 			// At most one row: the thread shipped epics are summed up in.
@@ -297,11 +298,6 @@ const migrations = SqliteMigrator.layer({
 					thread TEXT NOT NULL
 				)
 			`;
-		}),
-		'0009_add_topic_milestones': Effect.gen(function* () {
-			const sql = yield* SqlClient.SqlClient;
-
-			yield* sql`ALTER TABLE topics ADD COLUMN milestones TEXT NOT NULL DEFAULT '[]'`;
 		}),
 	}),
 });
