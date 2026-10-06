@@ -120,7 +120,7 @@ const make = (config: AppConfigShape) => {
 			notice(
 				{ identifier: run.identifier, purpose: 'overCap', key: `${run.claimedAt}` },
 				{
-					title: `⏰ **${run.identifier} is over the time cap**: ${minutesBetween(run.claimedAt, run.now)} min, cap ${config.maxRunSeconds / 60} min. It keeps running.`,
+					title: `⏰ **${run.identifier} is over the time cap**: ${minutesBetween(run.claimedAt, run.now)} min, cap ${Math.round(config.maxRunSeconds / 60)} min. It keeps running.`,
 					items: [`Status: \`${run.status}\``],
 					block: Option.some(run.tail),
 					next: 'Look at the agent in its tab.',
@@ -250,7 +250,7 @@ const make = (config: AppConfigShape) => {
 			notice(
 				{ identifier: handoff.identifier, purpose: 'handoffMissing', key: handoff.sessionId },
 				{
-					title: `📝 **${handoff.identifier} wrote no handoff doc** ${config.startTimeoutSeconds / 60} min after its context passed ${config.handoffAtTokens} tokens, so its session was not cleared.`,
+					title: `📝 **${handoff.identifier} wrote no handoff doc** ${Math.round(config.startTimeoutSeconds / 60)} min after its context passed ${config.handoffAtTokens} tokens, so its session was not cleared.`,
 					items: [`Expected: \`${handoff.path}\``],
 					next: 'Look at the agent in its tab.',
 				},
