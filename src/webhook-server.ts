@@ -116,7 +116,7 @@ export class WebhookServer extends Context.Service<
 					return respond(200);
 				}).pipe(answerFailures('cannot handle the Linear delivery', request.headers['linear-delivery']));
 
-			const handle = (request: HttpServerRequest.HttpServerRequest) =>
+			const handleGitHub = (request: HttpServerRequest.HttpServerRequest) =>
 				Effect.gen(function* () {
 					const body = new Uint8Array(yield* request.arrayBuffer);
 
@@ -146,7 +146,7 @@ export class WebhookServer extends Context.Service<
 			const server = yield* NodeHttpServer.make(createServer, { host: '127.0.0.1', port: bot.app.webhookPort });
 			const url = HttpServer.formatAddress(server.address);
 
-			yield* server.serve(HttpServerRequest.HttpServerRequest.use((request) => (request.url === linearWebhookPath ? handleLinear(request) : handle(request))));
+			yield* server.serve(HttpServerRequest.HttpServerRequest.use((request) => (request.url === linearWebhookPath ? handleLinear(request) : handleGitHub(request))));
 			yield* Effect.log(`listening for GitHub webhook deliveries on ${url} and Linear ones on ${new URL(linearWebhookPath, url).href}`);
 
 			return WebhookServer.of({ url });
