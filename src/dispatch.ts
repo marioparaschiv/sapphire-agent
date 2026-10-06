@@ -7,24 +7,24 @@ import { AppConfig, type AppConfigShape } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub, type PullRequest } from './github.ts';
 import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
-import { Journal, type Job, newSession, type Run, type Session } from './journal.ts';
+import { Journal, type Job, newSession, type Project, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { activeRoles, hasRole, isInFlight, isOver, type Observation, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { makeFlag } from './run-actions.ts';
 
 const repoNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-// The local clone an epic runs in: its team's repo, or `<labelReposDirectory>/<name>` for an epic labelled
+// The local clone an epic runs in: its project's repo, or `<labelReposDirectory>/<name>` for an epic labelled
 // `<repoPrefix><name>` or labelled `<name>` inside the label group named like the prefix (Linear shows `repo/<name>`).
-const resolveRepo = (config: AppConfigShape, epic: Epic): Result.Result<string, string> => {
-	const team = config.teams[epic.team.name];
-
-	if (!team) {
-		return Result.fail(`team ${epic.team.name} has no repo in the config`);
+const resolveRepo = (config: AppConfigShape, project: Option.Option<Project>, epic: Epic): Result.Result<string, string> => {
+	if (Option.isNone(project)) {
+		return Result.fail(`team ${epic.team.name} is not a project`);
 	}
 
+	const { repo, labelReposDirectory } = project.value;
 	const prefix = config.labels.repoPrefix;
 	const group = prefix.replace(/:$/, '');
 	const names = epic.labels.nodes.flatMap((label) => {
@@ -36,7 +36,7 @@ const resolveRepo = (config: AppConfigShape, epic: Epic): Result.Result<string, 
 	});
 
 	if (names.length === 0) {
-		return Result.succeed(team.repo);
+		return Result.succeed(repo);
 	}
 
 	if (names.length > 1) {
@@ -45,19 +45,23 @@ const resolveRepo = (config: AppConfigShape, epic: Epic): Result.Result<string, 
 
 	const [name] = names;
 
-	if (!team.labelReposDirectory) {
-		return Result.fail(`the epic is labelled ${prefix}${name}, but team ${epic.team.name} has no labelReposDirectory`);
+	if (labelReposDirectory === null) {
+		return Result.fail(`the epic is labelled ${prefix}${name}, but project ${epic.team.name} has no label repos directory`);
 	}
 
 	if (!repoNamePattern.test(name)) {
 		return Result.fail(`${JSON.stringify(name)} is not a valid repo name`);
 	}
 
-	return Result.succeed(join(team.labelReposDirectory, name));
+	return Result.succeed(join(labelReposDirectory, name));
 };
 
-export const repoOf = (config: AppConfigShape, epic: Epic) =>
-	Result.match(resolveRepo(config, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed });
+export const repoOf = (config: AppConfigShape, projects: Projects['Service'], epic: Epic) =>
+	projects.get(epic.team.name).pipe(
+		Effect.flatMap((project) =>
+			Result.match(resolveRepo(config, project, epic), { onFailure: (message) => Effect.fail(new Permanent({ message })), onSuccess: Effect.succeed }),
+		),
+	);
 
 // A run recorded before anything is started for it. The start rule takes it from here.
 export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session: Session | null, job: Job = { _tag: 'orchestrate' }): Run => ({
@@ -100,11 +104,12 @@ const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identi
 export const dispatchRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
+	const projects = yield* Projects;
 
 	// The newest start request names the session the run replies to; the claim drops them all.
 	const claim = (epic: Epic, starts: ReadonlyArray<{ readonly id: number; readonly replyTo: string | null }>) =>
 		Effect.gen(function* () {
-			const repo = yield* repoOf(config, epic);
+			const repo = yield* repoOf(config, projects, epic);
 			const replyTo = starts.at(-1)?.replyTo ?? null;
 
 			yield* journal.claimRun(

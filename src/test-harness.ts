@@ -29,6 +29,7 @@ import { MissedDeliveries } from './missed-deliveries.ts';
 import { type Observation, Observer, type StartedRun } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
@@ -278,6 +279,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			Layer.provideMerge(
 				Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer, telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest))),
 			),
+			Layer.provideMerge(Projects.layer),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
 			Layer.provide(NodeServices.layer),
@@ -421,7 +423,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 					yield* runCtl(args).pipe(
 						Effect.provideService(Console.Console, output),
-						Effect.provide(Layer.mergeAll(Journal.layer(join(dir, 'journal.db')), NodeServices.layer).pipe(Layer.provideMerge(Layer.succeedContext(fixtures)))),
+						Effect.provide(Layer.mergeAll(Journal.layer(join(dir, 'journal.db')), Git.layer).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(Layer.succeedContext(fixtures)))),
 					);
 
 					return (yield* output.logLines).flatMap((line) => String(line).split('\n'));

@@ -13,6 +13,7 @@ import { type Command, commandIdentifier, type CommandStatus, Journal, newSessio
 import { isSameWatch, quietStatuses, tailHash, trackAgent } from './monitoring.ts';
 import { type Observation, observedAgentStatus } from './observation.ts';
 import type { Rule, TaskWork } from './planner.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
 import { makeNudge } from './run-actions.ts';
 
@@ -58,6 +59,7 @@ const minutes = (millis: number) => Math.round(millis / 60_000);
 export const commandsRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
+	const projects = yield* Projects;
 	const git = yield* Git;
 	const github = yield* GitHub;
 	const herdr = yield* Herdr;
@@ -78,14 +80,14 @@ export const commandsRule = Effect.gen(function* () {
 		CLAUDE_CONFIG_PATH: env.claudeConfigPath,
 	};
 
-	// A configured clone whose origin is the comment's repo; the state directory when there is none, so status, pause
+	// A project's clone whose origin is the comment's repo; the state directory when there is none, so status, pause
 	// and the like still work.
 	const cwdOf = (repo: string) =>
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
 			const name = basename(repo);
 			const candidates = new Set([
-				...Object.values(config.teams).flatMap((team) => [team.repo, ...(team.labelReposDirectory ? [join(team.labelReposDirectory, name)] : [])]),
+				...(yield* projects.list).flatMap((project) => [project.repo, ...(project.labelReposDirectory === null ? [] : [join(project.labelReposDirectory, name)])]),
 				...runs.map((run) => run.repo),
 			]);
 
@@ -100,9 +102,11 @@ export const commandsRule = Effect.gen(function* () {
 			return env.stateDirectory;
 		});
 
-	// The workspace of the team whose repo the command runs in, or workspaceLabel for a repo of no team.
+	// The workspace of the project whose repo the command runs in, or workspaceLabel for a repo of no project.
 	const workspaceOf = (cwd: string) =>
-		Object.entries(config.teams).find(([, team]) => team.repo === cwd || team.labelReposDirectory === dirname(cwd))?.[0] ?? config.workspaceLabel;
+		projects.list.pipe(
+			Effect.map((found) => found.find((project) => project.repo === cwd || project.labelReposDirectory === dirname(cwd))?.team ?? config.workspaceLabel),
+		);
 
 	// The notice goes first, keyed by the claim, so a crash before the journal records it never posts it twice.
 	const fail = (command: Command, reason: string, tail: Option.Option<string>) =>
@@ -155,7 +159,7 @@ export const commandsRule = Effect.gen(function* () {
 					// The observation is from the start of the tick; an earlier rule may have closed the tab since.
 					const live = Option.isSome(found) && Option.isSome(yield* herdr.pane(found.value.paneId)) ? found : Option.none();
 					const tab = yield* Option.match(live, {
-						onNone: () => herdr.openTab(workspaceOf(cwd), label, cwd, tabEnv),
+						onNone: () => workspaceOf(cwd).pipe(Effect.flatMap((workspace) => herdr.openTab(workspace, label, cwd, tabEnv))),
 						onSome: (adopted) => Effect.log(`adopting tab ${adopted.tabId}`).pipe(Effect.as(adopted)),
 					});
 

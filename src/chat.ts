@@ -46,8 +46,8 @@ export const SliceProgress = Schema.Literals(['started', 'done']);
 
 export type SliceProgress = typeof SliceProgress.Type;
 
-// What core asks the platform to show; the platform decides how it looks. Every intent but `reply` may be sent again
-// after a crash, so the platform shows each once.
+// What core asks the platform to show; the platform decides how it looks. Every intent but `reply` and `notice` may be
+// sent again after a crash, so the platform shows each once.
 export const Intent = Schema.Union([
 	Schema.TaggedStruct('reply', { to: MessageRef, text: Schema.String }),
 	Schema.TaggedStruct('epicState', { thread: ThreadRef, epic: EpicHeading, state: EpicState }),
@@ -62,6 +62,8 @@ export const Intent = Schema.Union([
 	Schema.TaggedStruct('phaseStarted', { thread: ThreadRef, phase: Phase, startedAt: Schema.Int }),
 	// The run waits for input, and shows what it last printed. When it went quiet tells its questions apart.
 	Schema.TaggedStruct('question', { thread: ThreadRef, text: Schema.String, askedAt: Schema.Int }),
+	// A line for the user, in the thread, or in the main chat without one.
+	Schema.TaggedStruct('notice', { thread: Schema.NullOr(ThreadRef), text: Schema.String }),
 ]);
 
 export type Intent = typeof Intent.Type;

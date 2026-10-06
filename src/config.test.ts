@@ -160,9 +160,16 @@ describe('loadAppConfig', () => {
 		}),
 	);
 
-	it.effect('rejects an empty team map, an unknown team key, a missing or incomplete bot, no allowed users and invalid JSON', () =>
+	it.effect('loads a config without teams, which the journal holds instead', () =>
 		Effect.gen(function* () {
-			const noTeams = yield* load(fullEnv, { config: (directory) => ({ teams: {}, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const { app: config } = yield* load(fullEnv, { config: (directory) => ({ linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret });
+
+			assert.isUndefined(config.teams);
+		}),
+	);
+
+	it.effect('rejects an unknown team key, a missing or incomplete bot, no allowed users and invalid JSON', () =>
+		Effect.gen(function* () {
 			const unknownKey = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound', repos: '~/x' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: bot(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 			const noBot = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 			const noBotLogin = yield* load(fullEnv, { config: (directory) => ({ teams: { Unbound: { repo: '~/unbound' } }, linearWebhookSecretFile: linearWebhookSecretFile(directory), bot: { ...bot(directory), login: '' }, telegram: telegram(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
@@ -182,7 +189,6 @@ describe('loadAppConfig', () => {
 			);
 			const badJson = yield* load(fullEnv, { config: () => '{ "teams": ', key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
 
-			assert.match(noTeams.message, /no teams configured/);
 			assert.match(unknownKey.message, /repos/);
 			assert.match(noBot.message, /config\.json bot: Missing key/);
 			assert.match(noBotLogin.message, /config\.json bot\.login: /);

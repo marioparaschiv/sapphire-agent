@@ -118,6 +118,24 @@ export type Command = typeof Command.Type;
 
 export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${command.id}`;
 
+// A Linear team sapphire-agent watches, by its exact name, and the local clone its epics run in.
+export const ProjectSettings = Schema.Struct({
+	team: Schema.String,
+	repo: Schema.String,
+	// An epic labelled `<repoPrefix><name>` runs in `<labelReposDirectory>/<name>` instead of `repo`.
+	labelReposDirectory: Schema.NullOr(Schema.String),
+});
+
+export type ProjectSettings = typeof ProjectSettings.Type;
+
+export const Project = Schema.Struct({
+	...ProjectSettings.fields,
+	// The project's own chat thread, once one is opened for it.
+	thread: Schema.NullOr(ThreadRef),
+});
+
+export type Project = typeof Project.Type;
+
 // What `scripts/ctl.sh` and the agent event server ask the reconciler to do on its next tick. Both only append these,
 // so they never race a rule over a row; the rule that acts on one deletes it.
 export const Request = Schema.Union([
@@ -131,6 +149,10 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
 	// Recorded by the agent event server when a run's agent starts a phase.
 	Schema.TaggedStruct('phase', { identifier: Schema.String, phase: Phase }),
+	// `sapphire project add`, `edit` and `remove`, checked by the CLI before they are recorded.
+	Schema.TaggedStruct('project-add', { project: ProjectSettings }),
+	Schema.TaggedStruct('project-edit', { project: ProjectSettings }),
+	Schema.TaggedStruct('project-remove', { team: Schema.String }),
 ]);
 
 export type Request = typeof Request.Type;
@@ -298,6 +320,18 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0009_create_projects': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`
+				CREATE TABLE projects (
+					team TEXT PRIMARY KEY,
+					repo TEXT NOT NULL,
+					label_repos_directory TEXT,
+					thread TEXT
+				)
+			`;
+		}),
 	}),
 });
 
@@ -342,6 +376,11 @@ export class Journal extends Context.Service<
 		readonly deleteTopic: (epicId: string) => Effect.Effect<void, JournalError>;
 		readonly archiveThread: Effect.Effect<Option.Option<ThreadRef>, JournalError>;
 		readonly setArchiveThread: (thread: ThreadRef) => Effect.Effect<void, JournalError>;
+		// By team name.
+		readonly listProjects: Effect.Effect<ReadonlyArray<Project>, JournalError>;
+		// Inserts each project or replaces the one of the same team, all in one transaction.
+		readonly putProjects: (projects: ReadonlyArray<Project>) => Effect.Effect<void, JournalError>;
+		readonly deleteProject: (team: string) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -501,6 +540,24 @@ export class Journal extends Context.Service<
 					execute: (thread) => sql`INSERT OR REPLACE INTO archive_thread (id, thread) VALUES (1, ${thread})`,
 				});
 
+				const listProjects = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: Project,
+					execute: () => sql`SELECT * FROM projects ORDER BY team`,
+				})(undefined);
+
+				const putProject = SqlSchema.void({
+					Request: Project,
+					execute: (row) => sql`INSERT OR REPLACE INTO projects ${sql.insert(row)}`,
+				});
+
+				const putProjects = (projects: ReadonlyArray<Project>) => sql.withTransaction(Effect.forEach(projects, putProject, { discard: true }));
+
+				const deleteProject = SqlSchema.void({
+					Request: Schema.String,
+					execute: (team) => sql`DELETE FROM projects WHERE team = ${team}`,
+				});
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -525,6 +582,9 @@ export class Journal extends Context.Service<
 					deleteTopic,
 					archiveThread,
 					setArchiveThread,
+					listProjects,
+					putProjects,
+					deleteProject,
 				});
 			}),
 		).pipe(

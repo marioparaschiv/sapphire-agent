@@ -10,6 +10,7 @@ import { Journal, newSession, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
 import { epicWithIdentifier, hasRole, identifierOfBranch, isAgentWorking, isFinished, type Observation } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
+import { Projects } from './projects.ts';
 import { makeTabActions } from './run-actions.ts';
 
 // Everything cleanup found for one epic this tick.
@@ -26,6 +27,7 @@ const isTrackedWorktree = (runs: ReadonlyArray<Run>, worktree: Worktree) =>
 // tabs and worktrees that no run tracks.
 export const cleanupRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
+	const projects = yield* Projects;
 	const journal = yield* Journal;
 	const git = yield* Git;
 	const github = yield* GitHub;
@@ -103,7 +105,7 @@ export const cleanupRule = Effect.gen(function* () {
 
 			if (Option.isNone(run) && hasRole(observation, epic, ['ready', 'implementing', 'inReview'])) {
 				const [first, ...others] = tabs;
-				const repo = yield* repoOf(config, epic);
+				const repo = yield* repoOf(config, projects, epic);
 				// Claude already in the tab runs in a session sapphire-agent never recorded. Without Claude, the start rule starts
 				// it in the new one.
 				const session = runsClaude(Option.some(first)) ? null : yield* newSession(epic.identifier);

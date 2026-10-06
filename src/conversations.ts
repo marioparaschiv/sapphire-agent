@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Effect, Option, Schedule, Stream } from 'effect';
 import { Chat, type InboundMessage } from './chat.ts';
 import { ClaudeChat } from './claude-chat.ts';
+import { describeMismatch, readClaudeSettings, settingsMismatches } from './claude-settings.ts';
 import { Journal } from './journal.ts';
 import { acceptsMessages } from './observation.ts';
 import { Reconciler } from './reconciler.ts';
@@ -82,4 +83,20 @@ export const keepChatSessionWarm = Effect.gen(function* () {
 
 	// Fixed, not spaced: a slow keep-alive turn does not push the next one back.
 	return yield* Effect.schedule(warm, Schedule.fixed(keepAliveInterval));
+});
+
+// Starts one chat turn's Claude, kills it once it said what it runs with, and compares that with the user's settings.
+// Each mismatch is logged, and they are posted in the main chat together.
+export const checkChatSettings = Effect.gen(function* () {
+	const claude = yield* ClaudeChat;
+	const chat = yield* Chat;
+	const { settings, mcpServers } = yield* readClaudeSettings;
+	const mismatches = settingsMismatches(settings, mcpServers, yield* claude.init);
+
+	if (mismatches.length === 0) {
+		return yield* Effect.log("chat turns run with the user's Claude settings");
+	}
+
+	yield* Effect.forEach(mismatches, (mismatch) => Effect.logWarning(describeMismatch(mismatch)), { discard: true });
+	yield* chat.send({ _tag: 'notice', thread: null, text: mismatches.map(describeMismatch).join('\n') });
 });

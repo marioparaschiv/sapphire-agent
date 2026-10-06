@@ -65,4 +65,20 @@ describe('ClaudeChat', () => {
 			assert.deepStrictEqual([existsSync(transcript(newTurn.sessionId)), existsSync(transcript(fork))], [true, false]);
 		}).pipe(Effect.scoped),
 	);
+
+	it.effect('reads what a turn runs with from its system/init event and kills Claude before it answers', () =>
+		Effect.gen(function* () {
+			const { claude, fake } = yield* makeClaude(() => ({ text: ['pong'], hang: true }));
+			const init = yield* claude.init;
+			const [run] = fake.runs;
+
+			assert.deepStrictEqual(
+				{ model: init.model, outputStyle: init.output_style, permissionMode: init.permissionMode },
+				{ model: 'claude-opus-5-5[1m]', outputStyle: 'ADHD', permissionMode: 'bypassPermissions' },
+			);
+			assert.isTrue(run.killed);
+			assert.strictEqual(flagValue(run.args, '--setting-sources'), 'user,project,local');
+			assert.notInclude(run.args, '--bare');
+		}).pipe(Effect.scoped),
+	);
 });

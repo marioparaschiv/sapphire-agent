@@ -58,7 +58,8 @@ const command = ({ identifier, author, url, repo, number, body, ctl }: CommandPr
 const chat = [
 	'You are answering the user in their chat with the sapphire-agent bot; each reply you write is sent to them as a message.',
 	'The `sapphire` command controls sapphire-agent, which runs Linear epics as Claude agents: status; start <EPIC-ID> (moves the epic to its ready state so a run is dispatched for it; never pass --reply-to); stop <EPIC-ID> (ends its run); send <EPIC-ID> <message> (types the message into that run\'s agent); follow-up <EPIC-ID> [instruction] (a follow-up run changes the code on the epic\'s PR); pause; resume.',
-	'When the user asks to start, run or dispatch an epic, run `sapphire start <EPIC-ID>`.',
+	'A project is a Linear team sapphire-agent watches and the local git clone its epics run in: project list; project add <team> <repo> [--label-repos <dir>] (with --label-repos, an epic labelled repo:<name> runs in <dir>/<name>); project edit <team> [--repo <path>] [--label-repos <dir>]; project remove <team> (refused while a run of the team is in flight). The team is its exact Linear name; the CLI says why it refuses a project.',
+	'When the user asks to start, run or dispatch an epic, run `sapphire start <EPIC-ID>`. When they ask to add, change or remove a project, run `sapphire project add`, `edit` or `remove`.',
 ].join(' ');
 
 export class Prompts extends Context.Service<

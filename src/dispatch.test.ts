@@ -107,8 +107,8 @@ describe('dispatch', () => {
 
 			const status = yield* h.ctl('status');
 
-			assert.include(status[0], 'session test-10, reply-to planning, ');
-			assert.notInclude(status[2], 'reply-to');
+			assert.include(status[1], 'session test-10, reply-to planning, ');
+			assert.notInclude(status[3], 'reply-to');
 			assert.deepStrictEqual(
 				status.filter((line) => line.startsWith('request')),
 				[],

@@ -3,8 +3,8 @@ import { Context, Duration, Effect, Layer, Option, Result, Schedule, Schema, Str
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { Socket } from 'effect/socket';
 import { type CallError, callTimeouts, Permanent, Transient, withCallPolicy, withWritePolicy } from './call-policy.ts';
-import { AppConfig, type AppConfigShape } from './config.ts';
-import { AgentStatus } from './journal.ts';
+import { AppConfig } from './config.ts';
+import { AgentStatus, type Project } from './journal.ts';
 
 export const HerdrAgentStatus = AgentStatus.pick(['working', 'idle', 'done', 'blocked', 'unknown']);
 
@@ -95,8 +95,8 @@ export type TabEnv = Readonly<Record<string, string>>;
 // What the commands below need to find owned tabs and open new ones; both the live and the fake herdr provide it.
 type Commands = Pick<Herdr['Service'], 'workspaces' | 'createWorkspace' | 'createTab' | 'renameTab' | 'tabs' | 'panes'>;
 
-// A workspace per team for its runs, and workspaceLabel for command agents whose repo belongs to no team.
-export const agentWorkspaceLabels = (config: Pick<AppConfigShape, 'teams' | 'workspaceLabel'>) => [...Object.keys(config.teams), config.workspaceLabel];
+// A workspace per project's team for its runs, and workspaceLabel for command agents whose repo belongs to no project.
+export const agentWorkspaceLabels = (projects: ReadonlyArray<Pick<Project, 'team'>>, workspaceLabel: string) => [...projects.map(({ team }) => team), workspaceLabel];
 
 const findWorkspace = (commands: Commands, workspaceLabel: string) =>
 	commands.workspaces.pipe(Effect.map((workspaces) => Option.fromNullishOr(workspaces.find((workspace) => workspace.label === workspaceLabel))));
@@ -189,20 +189,19 @@ export class Herdr extends Context.Service<
 		readonly startClaude: (paneId: string, name: string, prompt: string, args?: ReadonlyArray<string>) => Effect.Effect<StartOutcome, CallError>;
 		// A new tab in the workspace labelled workspaceLabel, creating the workspace when there is none.
 		readonly openTab: (workspaceLabel: string, label: string, cwd: string, env?: TabEnv) => Effect.Effect<OpenedTab, CallError>;
-		// The tabs of every agent workspace (agentWorkspaceLabels).
-		readonly workspaceTabs: Effect.Effect<ReadonlyArray<WorkspaceTab>, CallError>;
-		// Status, exit and close events of owned panes and tabs. Never fails: reconnects with backoff. Events are not
-		// durable, so they only make a tick come sooner; the poll stays authoritative.
-		readonly events: Stream.Stream<HerdrEvent>;
+		// The tabs of the workspaces with these labels (agentWorkspaceLabels).
+		readonly workspaceTabs: (workspaceLabels: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<WorkspaceTab>, CallError>;
+		// Status, exit and close events of owned panes and tabs, in the workspaces with these labels as each connection
+		// reads them. Never fails: reconnects with backoff. Events are not durable, so they only make a tick come sooner;
+		// the poll stays authoritative.
+		readonly events: (workspaceLabels: Effect.Effect<ReadonlyArray<string>>) => Stream.Stream<HerdrEvent>;
 	}
 >()('sapphire-agent/Herdr') {
 	static readonly layer = Layer.effect(
 		Herdr,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-			const config = yield* AppConfig;
-			const { env } = config;
-			const labels = agentWorkspaceLabels(config);
+			const { env } = yield* AppConfig;
 
 			const exec = (args: ReadonlyArray<string>) => {
 				const command = `herdr ${args.join(' ')}`;
@@ -288,10 +287,10 @@ export class Herdr extends Context.Service<
 					call(Schema.Struct({ panes: Schema.Array(Pane) }), ['pane', 'list', '--workspace', workspaceId]).pipe(Effect.map(({ panes }) => panes)),
 			};
 
-			const connect = Stream.unwrap(
+			const connect = (workspaceLabels: Effect.Effect<ReadonlyArray<string>>) => Stream.unwrap(
 				Effect.gen(function* () {
 					const workspaces = yield* commands.workspaces;
-					const agentWorkspaces = agentWorkspacesIn(workspaces, labels);
+					const agentWorkspaces = agentWorkspacesIn(workspaces, yield* workspaceLabels);
 					const owned = ownedOf(yield* tabsIn(commands, agentWorkspaces));
 					const paneIds = new Set(owned.map(({ paneId }) => paneId));
 					const tabIds = new Set(owned.map(({ tabId }) => tabId));
@@ -352,8 +351,8 @@ export class Herdr extends Context.Service<
 						withWritePolicy(Duration.sum(callTimeouts.herdr, startWait)),
 					).pipe(Effect.map(Option.match({ onNone: (): StartOutcome => 'starting', onSome: (): StartOutcome => 'ready' }))),
 				openTab: openTabWith(commands),
-				workspaceTabs: workspaceTabsOf(commands, labels),
-				events: reconnecting(connect),
+				workspaceTabs: (workspaceLabels) => workspaceTabsOf(commands, workspaceLabels),
+				events: (workspaceLabels) => reconnecting(connect(workspaceLabels)),
 			});
 		}),
 	);

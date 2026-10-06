@@ -92,7 +92,7 @@ describe('ctl', () => {
 		}),
 	);
 
-	it.effect('status prints each run with its epic state, the commands in flight and the requests waiting', () =>
+	it.effect('status prints the projects, each run with its epic state, the commands in flight and the requests waiting', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { epic, run: started } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
@@ -105,6 +105,7 @@ describe('ctl', () => {
 			yield* h.ctl('follow-up', 'TEST-10', '--threads', 'PRRT_1', 'Rename', 'it.');
 
 			assert.deepStrictEqual(yield* h.ctl('status'), [
+				`project Test: ${h.repo}`,
 				`TEST-10 running (orchestrate), epic in Implementing, claimed 1970-01-01T00:00:00.000Z, tab ${started.tabId}, session test-10, ${started.worktreePath}`,
 				`CMD-1 running, @marioparaschiv in ${mention.url}`,
 				'request 1: send TEST-10: Wrap up.',

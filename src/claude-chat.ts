@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Context, Effect, Fiber, FileSystem, Layer, Option, type PlatformError, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
+import { InitEvent } from './claude-settings.ts';
 import { projectSlug } from './claude-transcript.ts';
 import { AppConfig } from './config.ts';
 import { Prompts } from './prompts.ts';
@@ -25,6 +26,13 @@ const OutputLine = Schema.Union([
 
 const decodeOutputLine = Schema.decodeUnknownOption(Schema.fromJsonString(OutputLine));
 
+// Told apart from the hook events printed before it, then decoded in full, so a changed event fails before the model is called.
+const decodeAnyInitLine = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({ type: Schema.Literal('system'), subtype: Schema.Literal('init') })));
+
+const isInitLine = (line: string) => Option.isSome(decodeAnyInitLine(line));
+
+const decodeInitLine = Schema.decodeUnknownEffect(Schema.fromJsonString(InitEvent));
+
 type Output = { readonly _tag: 'blockStart' } | { readonly _tag: 'text'; readonly text: string };
 
 const outputOf = (line: string): Effect.Effect<ReadonlyArray<Output>, ClaudeError> =>
@@ -41,8 +49,11 @@ const outputOf = (line: string): Effect.Effect<ReadonlyArray<Output>, ClaudeErro
 
 const lastLine = (text: string) => text.trim().split('\n').at(-1) ?? '';
 
-// One-word prompt of the keep-alive turn.
-const keepAlivePrompt = 'ping';
+// One-word prompt of the keep-alive turn, and of the settings check, which is killed before it is answered.
+const pingPrompt = 'ping';
+
+// The user's, the project's and the local settings, named so that no default leaves one of them out.
+const settingSources = 'user,project,local';
 
 // The main chat's Claude: the user's own `claude`, with their settings, CLAUDE.md, hooks and MCP servers, run once per
 // message. Every turn gets a session of its own: a new one, or a fork of the session it continues (`--resume
@@ -50,6 +61,8 @@ const keepAlivePrompt = 'ping';
 export class ClaudeChat extends Context.Service<
 	ClaudeChat,
 	{
+		// What a turn runs with, read from its `system/init` event; Claude is killed before it calls the model.
+		readonly init: Effect.Effect<InitEvent, ClaudeError>;
 		// The reply's text, in pieces as Claude writes it. Interrupting the stream kills Claude, which ends the turn.
 		readonly turn: (options: { readonly sessionId: string; readonly parent: Option.Option<string>; readonly prompt: string }) => Stream.Stream<string, ClaudeError>;
 		// Resumes the session into a throwaway fork for one short turn, so the prompt cache of the session stays warm, then
@@ -74,6 +87,8 @@ export class ClaudeChat extends Context.Service<
 					[
 						'-p',
 						...outputArgs,
+						'--setting-sources',
+						settingSources,
 						'--append-system-prompt',
 						prompts.chat,
 						'--session-id',
@@ -94,6 +109,23 @@ export class ClaudeChat extends Context.Service<
 						return yield* new ClaudeError({ message: `claude exited with ${exitCode}: ${lastLine(yield* Fiber.join(stderr))}` });
 					}
 				}).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail(failure('run claude')(error))));
+
+			// The scope closing kills Claude once the event is read. Nothing is kept of the session.
+			const init = Effect.scoped(
+				Effect.gen(function* () {
+					const handle = yield* spawner.spawn(command(randomUUID(), Option.none(), pingPrompt, ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
+
+					return yield* handle.stdout.pipe(
+						Stream.decodeText(),
+						Stream.splitLines,
+						Stream.filter(isInitLine),
+						Stream.runHead,
+						Effect.mapError(failure('read claude')),
+						Effect.flatMap(Option.match({ onNone: () => Effect.fail(new ClaudeError({ message: 'claude ended without a system/init event' })), onSome: Effect.succeed })),
+						Effect.flatMap((line) => decodeInitLine(line).pipe(Effect.mapError(failure('read the system/init event')))),
+					);
+				}),
+			);
 
 			const turn = ({ sessionId, parent, prompt }: { readonly sessionId: string; readonly parent: Option.Option<string>; readonly prompt: string }) =>
 				Stream.unwrap(
@@ -127,7 +159,7 @@ export class ClaudeChat extends Context.Service<
 				Effect.gen(function* () {
 					const fork = randomUUID();
 					const exitCode = yield* Effect.scoped(
-						spawner.spawn(command(fork, Option.some(sessionId), keepAlivePrompt, [])).pipe(
+						spawner.spawn(command(fork, Option.some(sessionId), pingPrompt, [])).pipe(
 							Effect.flatMap((handle) => Effect.all([handle.stdout.pipe(Stream.runDrain), handle.stderr.pipe(Stream.runDrain), handle.exitCode], { concurrency: 'unbounded' })),
 							Effect.map(([, , code]) => code),
 						),
@@ -140,7 +172,7 @@ export class ClaudeChat extends Context.Service<
 					}
 				});
 
-			return ClaudeChat.of({ turn, keepAlive });
+			return ClaudeChat.of({ init, turn, keepAlive });
 		}),
 	);
 }

@@ -1,12 +1,13 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Console, Effect, FileSystem, Layer, Option, Schema } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
-import { AppConfig } from './config.ts';
-import { type Command as CommandRow, commandIdentifier, Journal, type Request, type Run } from './journal.ts';
+import { AppConfig, toPath } from './config.ts';
+import { Git } from './git.ts';
+import { type Command as CommandRow, commandIdentifier, Journal, type Project, type ProjectSettings, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { acceptsMessages, isInFlight, isOver } from './observation.ts';
+import { acceptsMessages, hasRunInFlight, isInFlight, isOver } from './observation.ts';
 import { wakeFileName } from './reconciler.ts';
 
 // What the CLI refuses, said to whoever ran it: a person, or a command's agent.
@@ -22,6 +23,9 @@ const describeRun = (run: Run, epicState: string) =>
 		...(run.replyTo === null ? [] : [`reply-to ${run.replyTo}`]),
 		run.worktreePath ?? 'no worktree',
 	].join(', ');
+
+const describeProject = ({ team, repo, labelReposDirectory }: Project) =>
+	`project ${team}: ${repo}${labelReposDirectory === null ? '' : `, label repos in ${labelReposDirectory}`}`;
 
 const describeCommand = (command: CommandRow) => `${commandIdentifier(command)} ${command.status}, @${command.author} in ${command.url}`;
 
@@ -43,6 +47,12 @@ const describeRequest = (request: Request) => {
 			return `session ${request.identifier}: ${request.sessionId}`;
 		case 'phase':
 			return `phase ${request.identifier}: /${request.phase}`;
+		case 'project-add':
+			return `add project ${request.project.team}`;
+		case 'project-edit':
+			return `edit project ${request.project.team}`;
+		case 'project-remove':
+			return `remove project ${request.team}`;
 	}
 };
 
@@ -80,7 +90,9 @@ const status = Command.make('status', {}, () =>
 				: Option.match(Option.fromUndefinedOr(epics.success.find((epic) => epic.id === run.epicId)), { onNone: () => 'epic gone', onSome: (epic) => `epic in ${epic.state.name}` });
 		const commands = (yield* journal.listCommands).filter((command) => command.status === 'queued' || command.status === 'claimed' || command.status === 'running');
 		const requests = yield* journal.listRequests;
+		const projects = yield* journal.listProjects;
 
+		yield* Console.log(projects.length === 0 ? 'no projects' : projects.map(describeProject).join('\n'));
 		yield* Console.log(runs.length === 0 ? 'no runs' : runs.map((run) => describeRun(run, stateOf(run))).join('\n'));
 
 		if (epics._tag === 'Failure') {
@@ -93,7 +105,7 @@ const status = Command.make('status', {}, () =>
 			yield* Console.log(requests.map(({ id, request }) => `request ${id}: ${describeRequest(request)}`).join('\n'));
 		}
 	}),
-).pipe(Command.withDescription('The runs with their epics, the commands in flight and the requests not acted on yet'));
+).pipe(Command.withDescription('The projects, the runs with their epics, the commands in flight and the requests not acted on yet'));
 
 const start = Command.make(
 	'start',
@@ -120,7 +132,7 @@ const start = Command.make(
 				return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
 			}
 
-			if (!config.teams[epic.team.name]) {
+			if (!(yield* Journal.use((journal) => journal.listProjects)).some((project) => project.team === epic.team.name)) {
 				return yield* new Refused({ message: `${identifier} is in team ${epic.team.name}, which sapphire-agent does not watch` });
 			}
 
@@ -235,13 +247,120 @@ const done = Command.make('done', { command: Argument.String('command').pipe(Arg
 	}),
 ).pipe(Command.withDescription('Says the command is done, so its tab is closed'));
 
-const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, session, reply, done]));
+const projectOf = (team: string) =>
+	Journal.use((journal) => journal.listProjects).pipe(Effect.map((projects) => Option.fromUndefinedOr(projects.find((project) => project.team === team))));
+
+const teamArgument = Argument.String('team').pipe(Argument.withDescription('The exact name of a Linear team, e.g. Unbound'));
+
+// `~` expanded, relative to where the CLI runs.
+const absolutePath = (path: string) => resolve(toPath(path));
+
+const linearTeam = (name: string) => Linear.use((linear) => linear.teams([name])).pipe(Effect.map((teams) => Option.fromUndefinedOr(teams.find((team) => team.name === name))));
+
+const checkDirectory = (path: string) =>
+	Effect.gen(function* () {
+		const info = yield* (yield* FileSystem.FileSystem).stat(path).pipe(
+			Effect.catchTag('PlatformError', (error) => new Refused({ message: error.reason._tag === 'NotFound' ? `${path} does not exist` : `cannot read ${path}: ${error.message}` })),
+		);
+
+		if (info.type !== 'Directory') {
+			return yield* new Refused({ message: `${path} is not a directory` });
+		}
+	});
+
+const checkRepo = (path: string) =>
+	checkDirectory(path).pipe(
+		Effect.andThen(
+			Git.use((git) => git.githubRepo(path)).pipe(Effect.mapError((error) => new Refused({ message: `${path} is not a git repo with a GitHub origin: ${error.message}` }))),
+		),
+	);
+
+// Checked before the request is recorded, so a project the service applies can be dispatched from.
+const checkProject = ({ repo, labelReposDirectory }: ProjectSettings) =>
+	checkRepo(repo).pipe(Effect.andThen(labelReposDirectory === null ? Effect.void : checkDirectory(labelReposDirectory)));
+
+const projectList = Command.make('list', {}, () =>
+	Effect.gen(function* () {
+		const projects = yield* Journal.use((journal) => journal.listProjects);
+
+		yield* Console.log(projects.length === 0 ? 'no projects' : projects.map(describeProject).join('\n'));
+	}),
+).pipe(Command.withDescription('The projects: each Linear team sapphire-agent watches and the local clone its epics run in'));
+
+const labelReposFlag = Flag.String('label-repos').pipe(Flag.withDescription('The directory an epic labelled repo:<name> runs in <name> of'), Flag.optional);
+
+const projectAdd = Command.make('add', { team: teamArgument, repo: Argument.String('repo').pipe(Argument.withDescription('The local clone the epics run in')), labelRepos: labelReposFlag }, ({ team, repo, labelRepos }) =>
+	Effect.gen(function* () {
+		if (Option.isSome(yield* projectOf(team))) {
+			return yield* new Refused({ message: `project ${team} exists already; change it with project edit` });
+		}
+
+		if (Option.isNone(yield* linearTeam(team))) {
+			return yield* new Refused({ message: `there is no team ${team} in Linear` });
+		}
+
+		const project = { team, repo: absolutePath(repo), labelReposDirectory: Option.getOrNull(Option.map(labelRepos, absolutePath)) };
+
+		yield* checkProject(project);
+		yield* record({ _tag: 'project-add', project }, `project ${team} is added on the next tick`);
+	}),
+).pipe(Command.withDescription('Watches the Linear team, whose epics run in the repo'));
+
+const projectEdit = Command.make(
+	'edit',
+	{ team: teamArgument, repo: Flag.String('repo').pipe(Flag.withDescription('The local clone the epics run in'), Flag.optional), labelRepos: labelReposFlag },
+	({ team, repo, labelRepos }) =>
+		Effect.gen(function* () {
+			const current = yield* projectOf(team);
+
+			if (Option.isNone(current)) {
+				return yield* new Refused({ message: `there is no project ${team}` });
+			}
+
+			if (Option.isNone(repo) && Option.isNone(labelRepos)) {
+				return yield* new Refused({ message: 'give --repo, --label-repos, or both' });
+			}
+
+			const project = {
+				team,
+				repo: Option.getOrElse(Option.map(repo, absolutePath), () => current.value.repo),
+				labelReposDirectory: Option.getOrElse(Option.map(labelRepos, absolutePath), () => current.value.labelReposDirectory),
+			};
+
+			yield* checkProject(project);
+			yield* record({ _tag: 'project-edit', project }, `project ${team} is changed on the next tick`);
+		}),
+).pipe(Command.withDescription("Changes the project's repo or label repos directory"));
+
+const projectRemove = Command.make('remove', { team: teamArgument }, ({ team }) =>
+	Effect.gen(function* () {
+		if (Option.isNone(yield* projectOf(team))) {
+			return yield* new Refused({ message: `there is no project ${team}` });
+		}
+
+		const linear = yield* linearTeam(team);
+		const runs = yield* Journal.use((journal) => journal.listRuns);
+
+		if (Option.exists(linear, ({ id }) => hasRunInFlight(runs, id))) {
+			return yield* new Refused({ message: `project ${team} has a run in flight; stop it first` });
+		}
+
+		yield* record({ _tag: 'project-remove', team }, `project ${team} is removed on the next tick`);
+	}),
+).pipe(Command.withDescription('Stops watching the Linear team'));
+
+const project = Command.make('project').pipe(
+	Command.withSubcommands([projectList, projectAdd, projectEdit, projectRemove]),
+	Command.withDescription('Lists, adds, changes and removes the projects'),
+);
+
+const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, session, reply, done, project]));
 
 export const runCtl = Command.runWith(ctl, { version: '0.1.0' });
 
 if (import.meta.main) {
 	const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
-	const CtlLive = Layer.mergeAll(JournalLive, Linear.layer()).pipe(Layer.provideMerge(AppConfig.layer), Layer.provide(FetchHttpClient.layer), Layer.provideMerge(NodeServices.layer));
+	const CtlLive = Layer.mergeAll(JournalLive, Linear.layer(), Git.layer).pipe(Layer.provideMerge(AppConfig.layer), Layer.provide(FetchHttpClient.layer), Layer.provideMerge(NodeServices.layer));
 
 	NodeRuntime.runMain(
 		Effect.suspend(() => runCtl(process.argv.slice(2))).pipe(

@@ -76,4 +76,12 @@ describe('Prompts', () => {
 			assert.strictEqual(prompts.tabLabel({ identifier: 'HL-9', title: 'Add the foundation for the new orchestr ator' }), 'HL-9 Add the foundation for the new orchestr…');
 		}),
 	);
+
+	it.effect("tells the main chat's Claude to manage projects with the project subcommands", () =>
+		withPrompts((prompts) => {
+			for (const subcommand of ['project list', 'project add <team> <repo> [--label-repos <dir>]', 'project edit <team> [--repo <path>] [--label-repos <dir>]', 'project remove <team>']) {
+				assert.include(prompts.chat, subcommand);
+			}
+		}),
+	);
 });

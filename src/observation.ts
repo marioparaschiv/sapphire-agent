@@ -2,18 +2,19 @@ import { Context, Effect, Layer, Option, Record, Struct } from 'effect';
 import type { CallError } from './call-policy.ts';
 import { AppConfig, type AppConfigShape, type StateRole } from './config.ts';
 import { Git, type Worktree } from './git.ts';
-import { Herdr, type WorkspaceTab } from './herdr.ts';
-import { type AgentStatus, Journal, type JournalError, type Run, type RunStatus } from './journal.ts';
+import { agentWorkspaceLabels, Herdr, type WorkspaceTab } from './herdr.ts';
+import { type AgentStatus, Journal, type JournalError, type Project, type Run, type RunStatus } from './journal.ts';
 import { type Epic, Linear, type Team } from './linear.ts';
+import { Projects } from './projects.ts';
 
-// A configured team found in Linear with every configured workflow state.
+// A project's team found in Linear with every configured workflow state.
 export type ResolvedTeam = { readonly team: Team; readonly stateIds: Readonly<Record<StateRole, string>> };
 
 // What one tick sees of the world outside the journal, read once at its start and shared by every rule. Rules read the
 // journal themselves when they plan: it is local and cheap, and so each rule sees what the rules before it wrote this
 // tick. A rule that takes over a tab checks herdr first, since a rule before it may have closed that tab this tick.
 export type Observation = {
-	// By team id. A configured team missing from Linear, or missing a state, is left out: its epics are not touched.
+	// By team id. A project's team missing from Linear, or missing a state, is left out: its epics are not touched.
 	readonly teams: ReadonlyMap<string, ResolvedTeam>;
 	// By epic id: every epic the journal tracks (a run or a chat thread), every ready epic, and the epics of owned tabs and worktrees.
 	readonly epics: ReadonlyMap<string, Epic>;
@@ -29,6 +30,9 @@ export type Observation = {
 const inFlightStatuses: ReadonlyArray<RunStatus> = ['claimed', 'running', 'awaitingInput', 'stale'];
 
 export const isInFlight = (run: Run) => inFlightStatuses.includes(run.status);
+
+// A project is not removed while a run of its team is in flight.
+export const hasRunInFlight = (runs: ReadonlyArray<Run>, teamId: string) => runs.some((run) => run.teamId === teamId && isInFlight(run));
 
 // A finished run's row is replaced by a new claim, and so is a run that never started once its label is removed.
 export const isOver = (run: Run) => run.status === 'ended' || run.status === 'kept' || (run.status === 'error' && run.startedAt === null);
@@ -112,11 +116,11 @@ export const makeWarnOnce = () => {
 		});
 };
 
-const resolveTeams = (config: AppConfigShape, teams: ReadonlyArray<Team>, warn: (message: string) => Effect.Effect<void>) =>
+const resolveTeams = (config: AppConfigShape, projects: ReadonlyArray<Project>, teams: ReadonlyArray<Team>, warn: (message: string) => Effect.Effect<void>) =>
 	Effect.gen(function* () {
 		const resolved = new Map<string, ResolvedTeam>();
 
-		for (const name of Object.keys(config.teams)) {
+		for (const { team: name } of projects) {
 			const team = teams.find((candidate) => candidate.name === name);
 
 			if (!team) {
@@ -149,6 +153,7 @@ export class Observer extends Context.Service<Observer, { readonly observe: Effe
 			const herdr = yield* Herdr;
 			const git = yield* Git;
 			const journal = yield* Journal;
+			const projects = yield* Projects;
 			const warnOnce = makeWarnOnce();
 
 			// A repo that cannot be listed only skips its orphan worktrees; everything else goes on.
@@ -156,15 +161,16 @@ export class Observer extends Context.Service<Observer, { readonly observe: Effe
 				git.listWorktrees(repo).pipe(Effect.catch((error) => warnOnce(`cannot list the worktrees of ${repo}: ${error.message}`).pipe(Effect.as([]))));
 
 			const observe = Effect.gen(function* () {
-				const teams = yield* resolveTeams(config, yield* linear.teams(Object.keys(config.teams)), warnOnce);
+				const watched = yield* projects.list;
+				const teams = yield* resolveTeams(config, watched, yield* linear.teams(watched.map(({ team }) => team)), warnOnce);
 				const runs = yield* journal.listRuns;
 				const topics = yield* journal.listTopics;
-				const repos = [...new Set([...Object.values(config.teams).map((team) => team.repo), ...runs.map((run) => run.repo)])];
+				const repos = [...new Set([...watched.map(({ repo }) => repo), ...runs.map((run) => run.repo)])];
 				const [ready, tracked, tabs, worktrees] = yield* Effect.all(
 					[
 						linear.readyEpics([...teams.values()].map(({ stateIds }) => stateIds.ready)),
 						linear.epics([...new Set([...runs, ...topics].map(({ epicId }) => epicId))]),
-						herdr.workspaceTabs,
+						herdr.workspaceTabs(agentWorkspaceLabels(watched, config.workspaceLabel)),
 						Effect.forEach(repos, listWorktrees, { concurrency: 'unbounded' }).pipe(Effect.map((lists) => lists.flat())),
 					],
 					{ concurrency: 'unbounded' },

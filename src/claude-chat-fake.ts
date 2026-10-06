@@ -1,6 +1,6 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Effect, Layer, Sink, Stream, SubscriptionRef } from 'effect';
+import { Effect, Layer, Schema, Sink, Stream, SubscriptionRef } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 import { projectSlug } from './claude-transcript.ts';
 
@@ -41,8 +41,13 @@ const textBlock = (sessionId: string, pieces: ReadonlyArray<string>) => [
 	event(sessionId, { type: 'content_block_stop', index: 0 }),
 ];
 
+// The `system/init` event Claude Code 2.1 printed for a chat turn, recorded with the user's settings.
+export const recordedInit = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(
+	readFileSync(join(import.meta.dirname, 'fixtures', 'claude', 'system-init.json'), 'utf8'),
+);
+
 const outputLines = (sessionId: string, { text = [], afterToolCall, failure }: FakeClaudeAnswer) => [
-	{ type: 'system', subtype: 'init', session_id: sessionId, cwd: '/home/dev', tools: ['Bash', 'Read', 'Task'], model: 'claude-opus-5-5' },
+	{ ...recordedInit, session_id: sessionId },
 	...textBlock(sessionId, text),
 	...(afterToolCall === undefined
 		? []

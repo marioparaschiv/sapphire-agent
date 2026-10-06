@@ -227,6 +227,16 @@ export const telegramChat = Layer.effect(
 
 							return yield* bot.sendOnce(chatId, text, `question:${intent.thread}:${intent.askedAt}`, { topicId });
 						}
+
+						case 'notice': {
+							if (intent.thread === null) {
+								return yield* bot.sendText(userChat, intent.text).pipe(Effect.asVoid);
+							}
+
+							const { chatId, topicId } = yield* parseThreadRef(intent.thread);
+
+							return yield* bot.sendText(chatId, intent.text, { topicId }).pipe(Effect.asVoid);
+						}
 					}
 				}),
 			streamReply,

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -9,7 +9,7 @@ import { TestClock } from 'effect/testing';
 import { ClaudeChat } from './claude-chat.ts';
 import { type FakeClaudeAnswer, type FakeClaudeRun, fakeClaude, flagValue } from './claude-chat-fake.ts';
 import { AppConfig } from './config.ts';
-import { answerChatMessages, keepChatSessionWarm, unknownContext } from './conversations.ts';
+import { answerChatMessages, checkChatSettings, keepChatSessionWarm, unknownContext } from './conversations.ts';
 import { Journal } from './journal.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
@@ -66,7 +66,7 @@ const makeChat = (answer: (run: FakeClaudeRun) => FakeClaudeAnswer = () => ({ te
 				Stream.runDrain,
 			);
 
-		return { dir, claudeConfigDirectory, claude, telegram: controls, start, user, journalFile: join(dir, 'journal.db'), awaitRecorded };
+		return { dir, claudeConfigDirectory, claude, telegram: controls, start, services, user, journalFile: join(dir, 'journal.db'), awaitRecorded };
 	});
 
 const sessionOf = (run: FakeClaudeRun) => flagValue(run.args, '--session-id');
@@ -91,10 +91,20 @@ describe('answerChatMessages', () => {
 				{ text: sent.text, replyTo: sent.replyToMessageId, prompt: run.prompt, cwd: run.cwd, parent: parentOf(run) },
 				{ text: 'Hello there.', replyTo: message, prompt: 'hi, who are you?', cwd: homedir(), parent: null },
 			);
-			assert.deepStrictEqual(run.args.slice(0, 7), ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', '--append-system-prompt', (yield* Prompts.pipe(Effect.provide(Prompts.layer))).chat]);
-			assert.include(run.args[6], 'sapphire start <EPIC-ID>');
+			assert.deepStrictEqual(run.args.slice(0, 9), [
+				'-p',
+				'--output-format',
+				'stream-json',
+				'--include-partial-messages',
+				'--verbose',
+				'--setting-sources',
+				'user,project,local',
+				'--append-system-prompt',
+				(yield* Prompts.pipe(Effect.provide(Prompts.layer))).chat,
+			]);
+			assert.include(run.args[8], 'sapphire start <EPIC-ID>');
 
-			for (const isolating of ['--bare', '--setting-sources', '--strict-mcp-config', '--system-prompt', '--reply-to']) {
+			for (const isolating of ['--bare', '--strict-mcp-config', '--system-prompt', '--reply-to']) {
 				assert.notInclude(run.args, isolating);
 			}
 
@@ -292,3 +302,48 @@ describe('answerChatMessages', () => {
 		}).pipe(Effect.scoped),
 	);
 });
+
+describe('checkChatSettings', () => {
+	// The recorded system/init event runs with outputStyle ADHD and model claude-opus-5-5[1m].
+	const check = (settings: Record<string, unknown>) =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat(() => ({ text: ['pong'], hang: true }));
+
+			// Telegram lets the bot write only to a user who wrote to it.
+			chat.telegram.write({ from: chat.user, text: 'hi' });
+			mkdirSync(chat.claudeConfigDirectory, { recursive: true });
+			writeFileSync(join(chat.claudeConfigDirectory, 'settings.json'), JSON.stringify({ theme: 'dark', ...settings }));
+			writeFileSync(join(chat.dir, 'claude.json'), JSON.stringify({ mcpServers: { linear: { type: 'http' } } }));
+			yield* checkChatSettings.pipe(Effect.provide(chat.services), Effect.provide(NodeFileSystem.layer));
+
+			return chat;
+		});
+
+	it.effect('posts one line in the main chat naming each key settings.json sets but a chat turn does not run with, before Claude answers', () =>
+		Effect.gen(function* () {
+			const chat = yield* check({ outputStyle: 'Explanatory', model: 'sonnet' });
+			const [run] = chat.claude.runs;
+
+			assert.deepStrictEqual(
+				chat.telegram.sent.map(({ chatId, topicId, text }) => ({ chatId, topicId, text })),
+				[
+					{
+						chatId: chat.user,
+						topicId: null,
+						text: '⚠️ Chat Claude runs with model claude-opus-5-5[1m], but your settings say sonnet\n⚠️ Chat Claude runs with outputStyle ADHD, but your settings say Explanatory',
+					},
+				],
+			);
+			assert.isTrue(run.killed);
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect('posts nothing when a chat turn runs with every checked setting', () =>
+		Effect.gen(function* () {
+			const chat = yield* check({ outputStyle: 'ADHD', model: 'opus[1m]', permissions: { defaultMode: 'bypassPermissions' } });
+
+			assert.deepStrictEqual(chat.telegram.sent, []);
+		}).pipe(Effect.scoped),
+	);
+});
+
