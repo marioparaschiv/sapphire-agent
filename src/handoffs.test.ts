@@ -196,8 +196,8 @@ describe('handoffs', () => {
 			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
 			const session: TranscriptSession = { id: run.session.id, cwd: run.worktreePath };
 			const agentId = 'a4f29c81d03e5b7a6';
+			const path = docPath('TEST-10', agentId);
 
-			docPath('TEST-10', agentId);
 			h.writeSubagentTranscript(session, agentId, [...entries.prompt(session, 'Implement slice 2 of TEST-10.'), ...entries.toolCall(session, 254_000)]);
 			yield* h.stop;
 			assert.deepStrictEqual(yield* h.hook('claude', bashHook(session.id, agentId), run.paneId), ok);
@@ -206,7 +206,7 @@ describe('handoffs', () => {
 
 			const told = yield* h.hook('claude', bashHook(session.id, agentId), run.paneId);
 
-			assert.include(told.stdout, `HANDOFF ${join(tmpdir(), `sapphire-agent-handoff-TEST-10-${agentId}.md`)}`);
+			assert.include(told.stdout, `HANDOFF ${path}`);
 		}),
 	);
 
@@ -218,8 +218,8 @@ describe('handoffs', () => {
 			const agentId = 'a4f29c81d03e5b7a6';
 			const transcriptEntries = [...entries.prompt(session, 'Implement slice 2 of TEST-10.'), ...entries.toolCall(session, 254_000)];
 			const transcript = h.writeSubagentTranscript(session, agentId, transcriptEntries);
+			const path = docPath('TEST-10', agentId);
 
-			docPath('TEST-10', agentId);
 			rmSync(transcript);
 			mkdirSync(transcript);
 			assert.deepStrictEqual(yield* h.hook('claude', bashHook(session.id, agentId), run.paneId), ok);
@@ -229,7 +229,7 @@ describe('handoffs', () => {
 
 			const told = yield* h.hook('claude', bashHook(session.id, agentId), run.paneId);
 
-			assert.include(told.stdout, `HANDOFF ${join(tmpdir(), `sapphire-agent-handoff-TEST-10-${agentId}.md`)}`);
+			assert.include(told.stdout, `HANDOFF ${path}`);
 		}),
 	);
 });
