@@ -225,6 +225,28 @@ describe('telegramChat', () => {
 		}).pipe(Effect.provide(layer)),
 	);
 
+	it.effect('keeps flags, dunder names and backslashes as written, and sends a reply cut inside a code block unformatted', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			const message = telegram.write({ from: allowed, text: 'hello' });
+			const flags = 'Run sapphire project edit Foo --repo /x --label-repos /y, then edit __init__.py in C:\\src.';
+			const cut = 'The diff:\n```\n**not bold**';
+
+			yield* chat.send({ _tag: 'reply', to: `${allowed}:${message}`, text: flags });
+			yield* chat.send({ _tag: 'reply', to: `${allowed}:${message}`, text: cut });
+
+			assert.deepStrictEqual(
+				telegram.sent.map(({ text, entities }) => [text, entities.length]),
+				[
+					[flags, 0],
+					[cut, 0],
+				],
+			);
+		}).pipe(Effect.provide(layer)),
+	);
+
 	it.effect('shows a keyed notice once, also when it is sent again after a crash', () =>
 		Effect.gen(function* () {
 			const telegram = yield* FakeTelegram;

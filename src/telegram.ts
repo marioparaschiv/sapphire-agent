@@ -52,6 +52,17 @@ const startOf = (text: string, length: number) => (text.length > length ? `${tex
 // As much of the end of the text as one message shows.
 const draftOf = (text: string) => endOf(text, messageLength);
 
+// Text is markdown as Chat documents it. mtcute also reads `--` as underline, `__` as italic and a backslash as an
+// escape, which turn up as plain text in commands, names and paths, so those are kept literal. A cut that leaves a code
+// block open makes mtcute throw; that text goes out unformatted.
+const markdown = (text: string): TextWithEntities => {
+	try {
+		return md(text.replaceAll('\\', '\\\\').replaceAll('--', '\\-\\-').replaceAll('__', '\\_\\_'));
+	} catch {
+		return { text, entities: [] };
+	}
+};
+
 // The code block holds the question, cut to what one message shows besides the rest.
 const questionText = (question: string) => md`⏸ **The agent waits for input**\n\`\`\`\n${endOf(question, messageLength - 100)}\n\`\`\`\nWrite here to answer; it is typed into the agent.`;
 
@@ -145,7 +156,7 @@ export const telegramChat = Layer.effect(
 					}
 
 					yield* Ref.set(shown, current);
-					yield* bot.sendDraft(chatId, topicId, draftId, md(draftOf(current))).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
+					yield* bot.sendDraft(chatId, topicId, draftId, markdown(draftOf(current))).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
 				});
 
 				const stopped = bot.draftStops.pipe(
@@ -163,7 +174,7 @@ export const telegramChat = Layer.effect(
 				const sent: Array<string> = [];
 
 				for (const [index, chunk] of chunks((yield* Ref.get(written)).trim()).entries()) {
-					const id = yield* bot.sendText(chatId, md(chunk), { replyTo: index === 0 ? messageId : undefined, topicId: topicId ?? undefined });
+					const id = yield* bot.sendText(chatId, markdown(chunk), { replyTo: index === 0 ? messageId : undefined, topicId: topicId ?? undefined });
 
 					sent.push(messageRef(chatId, id, topicId));
 				}
@@ -181,7 +192,7 @@ export const telegramChat = Layer.effect(
 						case 'reply': {
 							const { chatId, messageId, topicId } = yield* parseMessageRef(intent.to);
 
-							return yield* bot.sendText(chatId, md(intent.text), { replyTo: messageId, topicId: topicId ?? undefined }).pipe(Effect.asVoid);
+							return yield* bot.sendText(chatId, markdown(intent.text), { replyTo: messageId, topicId: topicId ?? undefined }).pipe(Effect.asVoid);
 						}
 
 						case 'epicState': {
@@ -232,7 +243,7 @@ export const telegramChat = Layer.effect(
 
 						case 'notice': {
 							const { chatId, topicId } = intent.thread === null ? { chatId: userChat, topicId: undefined } : yield* parseThreadRef(intent.thread);
-							const text = md(startOf(intent.text, messageLength));
+							const text = markdown(startOf(intent.text, messageLength));
 
 							return yield* intent.key === null ? bot.sendText(chatId, text, { topicId }).pipe(Effect.asVoid) : bot.sendOnce(chatId, text, `notice:${intent.key}`, { topicId });
 						}
