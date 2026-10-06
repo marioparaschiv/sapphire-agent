@@ -25,6 +25,7 @@ export const Epic = Schema.Struct({
 	url: Schema.String,
 	branchName: Schema.String,
 	sortOrder: Schema.Number,
+	createdAt: Schema.String,
 	team: Schema.Struct({ id: Schema.String, name: Schema.String }),
 	state: Schema.Struct({ id: Schema.String, name: Schema.String }),
 	labels: nodes(Label),
@@ -52,7 +53,7 @@ export const Reply = Schema.Struct({ ...Comment.fields, parent: Schema.Struct({ 
 export type Reply = typeof Reply.Type;
 
 const EPIC_FIELDS = `
-	id identifier title url branchName sortOrder
+	id identifier title url branchName sortOrder createdAt
 	team { id name }
 	state { id name }
 	labels { nodes { id name parent { name } } }

@@ -25,6 +25,9 @@ const Team = Schema.Struct({
 const Settings = Schema.Struct({
 	pollSeconds: IntAtLeast(5, 30),
 	maxInFlight: IntAtLeast(1, 1),
+	// How old an epic must be before it is claimed. An epic is often created before its sub-issues, and a claim in
+	// between starts it inline.
+	dispatchSettleSeconds: IntAtLeast(0, 60),
 	// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
 	awaitingInputAfterSeconds: IntAtLeast(30, 180),
 	// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
