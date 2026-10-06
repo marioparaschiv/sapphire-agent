@@ -35,6 +35,8 @@ export type SentMessage = {
 
 export type Draft = { readonly chatId: number; readonly topicId: number | null; readonly draftId: string; readonly text: string };
 
+export type Typing = { readonly chatId: number; readonly topicId: number | null };
+
 export type Topic = { readonly chatId: number; readonly topicId: number; readonly title: string };
 
 export type FakeTelegramControls = {
@@ -46,6 +48,10 @@ export type FakeTelegramControls = {
 	readonly sent: ReadonlyArray<SentMessage>;
 	// Every draft update the bot made, in order.
 	readonly drafts: ReadonlyArray<Draft>;
+	// Every typing action the bot sent, in order.
+	readonly typings: ReadonlyArray<Typing>;
+	// From now on, every typing action fails with the error.
+	readonly failTyping: (error: CallError) => void;
 	// The topics that exist, in the order they were made, with their current titles.
 	readonly topics: () => ReadonlyArray<Topic>;
 	// As the user deletes a topic.
@@ -56,6 +62,8 @@ export type FakeTelegramControls = {
 	readonly awaitSent: (n: number) => Effect.Effect<void>;
 	// Completes once the bot has made n draft updates in total.
 	readonly awaitDrafts: (n: number) => Effect.Effect<void>;
+	// Completes once the bot has sent n typing actions in total, failed ones included.
+	readonly awaitTypings: (n: number) => Effect.Effect<void>;
 	// Counted from this call: the nth write (send, topic or draft) after it is applied, then fails, as if the process
 	// died before recording it.
 	readonly crashAfterWrite: (nth: number, error: CallError) => void;
@@ -71,16 +79,19 @@ const make = Effect.gen(function* () {
 	const chats = new Set<number>();
 	const sent: Array<SentMessage> = [];
 	const drafts: Array<Draft> = [];
+	const typings: Array<Typing> = [];
 	const topics = new Map<number, Topic>();
 	const usedRandomIds = new Set<string>();
 	const sentCount = yield* SubscriptionRef.make(0);
 	const draftCount = yield* SubscriptionRef.make(0);
+	const typingCount = yield* SubscriptionRef.make(0);
 	const stops = yield* PubSub.unbounded<DraftStop>();
 	let dispatched = 0;
 	let connected: Queue.Queue<TelegramMessage> | null = null;
 	let nextMessageId = 1;
 	let topicsCreated = 0;
 	let writes = 0;
+	let typingError: CallError | null = null;
 	const crashes = new Map<number, CallError>();
 
 	const addMessage = (chatId: number) => {
@@ -160,6 +171,12 @@ const make = Effect.gen(function* () {
 							return SubscriptionRef.update(draftCount, (count) => count + 1);
 						}),
 					),
+				sendTyping: (chatId, topicId) =>
+					knownChat(chatId, 'show that the bot is typing', () => {
+						typings.push({ chatId, topicId });
+
+						return SubscriptionRef.update(typingCount, (count) => count + 1).pipe(Effect.andThen(typingError === null ? Effect.void : Effect.fail(typingError)));
+					}),
 				createTopic: (chatId, title) =>
 					write(() =>
 						knownChat(chatId, 'create a topic', () =>
@@ -240,6 +257,10 @@ const make = Effect.gen(function* () {
 		}),
 		sent,
 		drafts,
+		typings,
+		failTyping: (error) => {
+			typingError = error;
+		},
 		topics: () => [...topics.values()],
 		deleteTopic: (topicId) => {
 			topics.delete(topicId);
@@ -247,6 +268,7 @@ const make = Effect.gen(function* () {
 		topicsCreated: () => topicsCreated,
 		awaitSent: (n) => awaitCount(sentCount, n),
 		awaitDrafts: (n) => awaitCount(draftCount, n),
+		awaitTypings: (n) => awaitCount(typingCount, n),
 		crashAfterWrite: (nth, error) => {
 			crashes.set(writes + nth, error);
 		},

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Long, md, type TextWithEntities } from '@mtcute/node';
-import { Effect, Fiber, Layer, Option, Ref, Result, Schedule, Stream } from 'effect';
+import { Clock, Duration, Effect, Fiber, Layer, Option, Ref, Result, Stream } from 'effect';
 import { Permanent } from './call-policy.ts';
 import { Chat, type EpicHeading, type EpicState, type InboundMessage, type SliceProgress } from './chat.ts';
 import { AppConfig } from './config.ts';
@@ -31,6 +31,9 @@ const titleLength = 128;
 // setTyping allows 20 calls in 5 s and 40 in 30 s per chat; this leaves room for two replies streaming at once.
 const draftInterval = '1500 millis';
 
+// A typing action, a draft included, shows for a few seconds; one sent again by then keeps it up.
+const refreshAfter = Duration.seconds(4);
+
 const stateIcons: Record<EpicState, string> = { working: '🟢', awaitingInput: '⏸', error: '🔴', review: '👀' };
 
 const topicTitle = ({ identifier, title }: EpicHeading, state: EpicState) => `${stateIcons[state]} ${identifier} ${title}`.slice(0, titleLength);
@@ -40,6 +43,36 @@ const archiveTitle = '✅ Done';
 const projectTitle = (name: string) => `📁 ${name}`.slice(0, titleLength);
 
 const sliceIcons: Record<SliceProgress, string> = { started: '▶️', done: '✔️' };
+
+// Shows what the bot writes, until interrupted: at once, then on each tick when it changed, or again once
+// `refreshAfter` passed since it was last shown.
+const keepShowing = (written: Effect.Effect<string>, show: (text: string) => Effect.Effect<void>) =>
+	Effect.gen(function* () {
+		const shown = yield* Ref.make({ text: '', at: 0 });
+
+		const showNow = (text: string) =>
+			Clock.currentTimeMillis.pipe(
+				Effect.flatMap((at) => Ref.set(shown, { text, at })),
+				Effect.andThen(show(text)),
+			);
+
+		yield* showNow(yield* written);
+
+		return yield* Effect.forever(
+			Effect.sleep(draftInterval).pipe(
+				Effect.andThen(
+					Effect.gen(function* () {
+						const text = yield* written;
+						const last = yield* Ref.get(shown);
+
+						if (text !== last.text || (yield* Clock.currentTimeMillis) - last.at >= Duration.toMillis(refreshAfter)) {
+							yield* showNow(text);
+						}
+					}),
+				),
+			),
+		);
+	});
 
 const chunks = (text: string) => Array.from({ length: Math.ceil(text.length / messageLength) }, (_, index) => text.slice(index * messageLength, (index + 1) * messageLength));
 
@@ -94,6 +127,8 @@ export const telegramChat = Layer.effect(
 		const transcriber = yield* Transcriber;
 		const [userChat] = telegram.allowedUserIds;
 
+		const showTyping = (chatId: number, topicId: number | null) => bot.sendTyping(chatId, topicId).pipe(Effect.catch((error) => Effect.logWarning('cannot show that the bot is typing', error)));
+
 		const answerVoiceNote = (message: TelegramMessage, text: TextWithEntities) =>
 			bot.sendText(message.chatId, text, { replyTo: message.messageId, topicId: message.topicId ?? undefined }).pipe(
 				Effect.catch((error) => Effect.logError('cannot answer a voice note', error)),
@@ -105,8 +140,10 @@ export const telegramChat = Layer.effect(
 				return Effect.succeed(Option.some(message.text));
 			}
 
-			return bot.download(voiceFileId).pipe(
-				Effect.flatMap((audio) => transcriber.transcribe(audio)),
+			return Effect.raceFirst(
+				bot.download(voiceFileId).pipe(Effect.flatMap((audio) => transcriber.transcribe(audio))),
+				keepShowing(Effect.succeed(''), () => showTyping(message.chatId, message.topicId)),
+			).pipe(
 				Effect.matchEffect({
 					onFailure: (error) =>
 						Effect.logWarning('cannot transcribe a voice note', error).pipe(
@@ -146,30 +183,23 @@ export const telegramChat = Layer.effect(
 				const { chatId, messageId, topicId } = yield* parseMessageRef(to);
 				const draftId = Long.fromBytesBE([...randomBytes(8)]);
 				const written = yield* Ref.make('');
-				const shown = yield* Ref.make('');
 
-				const showDraft = Effect.gen(function* () {
-					const current = yield* Ref.get(written);
-
-					if (current === '' || current === (yield* Ref.get(shown))) {
-						return;
-					}
-
-					yield* Ref.set(shown, current);
-					yield* bot.sendDraft(chatId, topicId, draftId, markdown(draftOf(current))).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
-				});
+				const show = (current: string) =>
+					current === ''
+						? showTyping(chatId, topicId)
+						: bot.sendDraft(chatId, topicId, draftId, markdown(draftOf(current))).pipe(Effect.catch((error) => Effect.logWarning('cannot show a draft reply', error)));
 
 				const stopped = bot.draftStops.pipe(
 					Stream.filter((stop) => stop.chatId === chatId && stop.topicId === topicId && stop.draftId.equals(draftId)),
 					Stream.runHead,
 				);
-				const drafts = yield* Effect.forkChild(Effect.repeat(Effect.sleep(draftInterval).pipe(Effect.andThen(showDraft)), Schedule.forever));
+				const showing = yield* Effect.forkChild(keepShowing(Ref.get(written), show));
 
 				yield* Effect.raceFirst(
 					Stream.runForEach(text, (piece) => Ref.update(written, (current) => current + piece)),
 					stopped,
 				);
-				yield* Fiber.interrupt(drafts);
+				yield* Fiber.interrupt(showing);
 
 				const sent: Array<string> = [];
 

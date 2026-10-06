@@ -77,8 +77,9 @@ export class Chat extends Context.Service<
 		// else are dropped and logged. One consumer only.
 		readonly inbound: Stream.Stream<InboundMessage>;
 		readonly send: (intent: Intent) => Effect.Effect<void, CallError>;
-		// Shows the text as it streams in, as an answer to the message, and keeps it once the stream ends or the user stops
-		// it, which interrupts the stream. Returns the messages it was kept as; none when nothing was written.
+		// Shows that the bot is typing until text arrives, then the text as it streams in, as an answer to the message, and
+		// keeps it once the stream ends or the user stops it, which interrupts the stream. Returns the messages it was kept
+		// as; none when nothing was written.
 		readonly streamReply: (to: MessageRef, text: Stream.Stream<string>) => Effect.Effect<ReadonlyArray<MessageRef>, CallError>;
 		// A new thread for the epic, showing the state.
 		readonly openEpic: (epic: EpicHeading, state: EpicState) => Effect.Effect<ThreadRef, CallError>;

@@ -2,15 +2,16 @@ import { assert, describe, it } from '@effect/vitest';
 import { type Cause, Effect, Exit, Fiber, Layer, Logger, Queue, Stream } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Chat } from './chat.ts';
+import { Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { telegramChat } from './telegram.ts';
 import { FakeTelegram } from './telegram-fake.ts';
 import { Transcriber } from './transcription.ts';
 
-const chatWith = (config: Layer.Layer<AppConfig>) =>
+const chatWith = (config: Layer.Layer<AppConfig>, transcriber: Layer.Layer<Transcriber> = Transcriber.layerTest) =>
 	telegramChat.pipe(
 		Layer.provide(FakeTelegram.bot),
-		Layer.provide(Transcriber.layerTest),
+		Layer.provide(transcriber),
 		Layer.provideMerge(FakeTelegram.layer),
 		Layer.provideMerge(config),
 	);
@@ -28,7 +29,22 @@ const twoUsersLayer = chatWith(
 	}),
 );
 
+// Transcribes as Transcriber.layerTest does, after five seconds.
+const slowTranscriber = Layer.effect(
+	Transcriber,
+	Effect.gen(function* () {
+		const { transcribe } = yield* Transcriber;
+
+		return Transcriber.of({ transcribe: (audio) => Effect.sleep('5 seconds').pipe(Effect.andThen(transcribe(audio))) });
+	}),
+).pipe(Layer.provide(Transcriber.layerTest));
+
+const slowTranscriptionLayer = chatWith(AppConfig.layerTest('/tmp/sapphire-agent-test'), slowTranscriber);
+
 const stranger = 6_200_300_400;
+
+// Moves the clock one draft tick at a time, so each tick runs before the next.
+const ticks = (n: number) => Effect.repeat(TestClock.adjust('1500 millis'), { times: n - 1 });
 
 const encode = (text: string) => new TextEncoder().encode(text);
 
@@ -71,6 +87,7 @@ describe('telegramChat', () => {
 				{ level: 'WARN', message: 'dropped a Telegram message in group -1001234; only the private chat with the bot is read' },
 				{ level: 'WARN', message: 'dropped a Telegram message without text' },
 			]);
+			assert.deepStrictEqual(telegram.typings, []);
 		}).pipe(Effect.provide(layer)),
 	);
 
@@ -101,6 +118,42 @@ describe('telegramChat', () => {
 				],
 			);
 		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('shows that the bot is typing while it downloads and transcribes a voice note, whether or not that works', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			const received = yield* Effect.forkChild(chat.inbound.pipe(Stream.take(1), Stream.runCollect));
+
+			telegram.write({ from: allowed, voice: new Uint8Array() });
+			yield* telegram.awaitTypings(1);
+			// Typing again at 4.5 s; the transcription fails at 5 s.
+			yield* ticks(4);
+			yield* telegram.awaitSent(1);
+
+			const topicId = Number((yield* chat.openEpic({ identifier: 'HL-12', title: 'Voice notes' }, 'working')).split(':')[1]);
+
+			telegram.write({ from: allowed, voice: encode('Start HL-12, please.'), topicId });
+			yield* telegram.awaitTypings(3);
+			yield* ticks(4);
+
+			const [message] = yield* Fiber.join(received);
+
+			yield* ticks(4);
+			assert.strictEqual(message.text, 'Start HL-12, please.');
+			assert.deepStrictEqual(telegram.typings, [
+				{ chatId: allowed, topicId: null },
+				{ chatId: allowed, topicId: null },
+				{ chatId: allowed, topicId },
+				{ chatId: allowed, topicId },
+			]);
+			assert.deepStrictEqual(
+				telegram.sent.map(({ text }) => text),
+				["Couldn't transcribe the voice note: no speech recognized\nSend it again, or type it.", '🎙 Start HL-12, please.'],
+			);
+		}).pipe(Effect.provide(slowTranscriptionLayer)),
 	);
 
 	it.effect('answers a voice note it cannot transcribe with the cause, and passes nothing on', () =>
@@ -302,6 +355,100 @@ describe('telegramChat', () => {
 		}).pipe(Effect.provide(layer)),
 	);
 
+	it.effect('shows that the bot is typing in the topic until text arrives, then the draft, showing each again before it expires, and nothing once the reply lands', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+
+			telegram.write({ from: allowed, text: 'hello' });
+
+			const topicId = Number((yield* chat.openEpic({ identifier: 'HL-59', title: 'Typing' }, 'working')).split(':')[1]);
+			const message = telegram.write({ from: allowed, text: 'what changed?', topicId });
+			const pieces = yield* Queue.unbounded<string, Cause.Done>();
+			const reply = yield* Effect.forkChild(chat.streamReply(`${allowed}:${message}:${topicId}`, Stream.fromQueue(pieces)));
+
+			yield* telegram.awaitTypings(1);
+			// Typing again at 4.5 s and 9 s.
+			yield* ticks(6);
+			yield* telegram.awaitTypings(3);
+			yield* Queue.offer(pieces, 'Hel');
+			yield* ticks(1);
+			yield* telegram.awaitDrafts(1);
+			// The same draft again 4.5 s later.
+			yield* ticks(3);
+			yield* telegram.awaitDrafts(2);
+			yield* Queue.offer(pieces, 'lo');
+			yield* ticks(1);
+			yield* telegram.awaitDrafts(3);
+			yield* Queue.end(pieces);
+			yield* Fiber.join(reply);
+			yield* ticks(4);
+
+			assert.deepStrictEqual(telegram.typings, Array.from({ length: 3 }, () => ({ chatId: allowed, topicId })));
+			assert.deepStrictEqual(
+				telegram.drafts.map(({ topicId, text }) => ({ topicId, text })),
+				[
+					{ topicId, text: 'Hel' },
+					{ topicId, text: 'Hel' },
+					{ topicId, text: 'Hello' },
+				],
+			);
+			assert.deepStrictEqual(
+				telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
+				[{ text: 'Hello', topicId }],
+			);
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('shows nothing more once the turn is interrupted', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			const message = telegram.write({ from: allowed, text: 'hello' });
+			const reply = yield* Effect.forkChild(chat.streamReply(`${allowed}:${message}`, Stream.never));
+
+			yield* telegram.awaitTypings(1);
+			yield* Fiber.interrupt(reply);
+			yield* ticks(4);
+
+			assert.deepStrictEqual(telegram.typings, [{ chatId: allowed, topicId: null }]);
+			assert.deepStrictEqual(telegram.drafts, []);
+			assert.deepStrictEqual(telegram.sent, []);
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('logs a typing action that fails and streams the reply all the same', () =>
+		Effect.gen(function* () {
+			const telegram = yield* FakeTelegram;
+			const chat = yield* Chat;
+			const allowed = yield* allowedUser;
+			const message = telegram.write({ from: allowed, text: 'hello' });
+			const pieces = yield* Queue.unbounded<string, Cause.Done>();
+			const { logs, layer: logged } = collectLogs();
+
+			const refused = 'Telegram refused to show that the bot is typing: 400 CHAT_WRITE_FORBIDDEN';
+
+			telegram.failTyping(new Permanent({ message: refused }));
+
+			const reply = yield* Effect.forkChild(chat.streamReply(`${allowed}:${message}`, Stream.fromQueue(pieces)).pipe(Effect.provide(logged)));
+
+			yield* telegram.awaitTypings(1);
+			yield* Queue.offer(pieces, 'Hi.');
+			yield* ticks(1);
+			yield* telegram.awaitDrafts(1);
+			yield* Queue.end(pieces);
+			yield* Fiber.join(reply);
+
+			assert.deepStrictEqual(logs, [{ level: 'WARN', message: ['cannot show that the bot is typing', { _tag: 'Permanent', message: refused }] }]);
+			assert.deepStrictEqual(
+				telegram.sent.map(({ text }) => text),
+				['Hi.'],
+			);
+		}).pipe(Effect.provide(layer)),
+	);
+
 	it.effect('stops streaming when the user presses stop, ending the text, and keeps what was written', () =>
 		Effect.gen(function* () {
 			const telegram = yield* FakeTelegram;
@@ -323,7 +470,10 @@ describe('telegramChat', () => {
 			yield* telegram.stopDraft;
 
 			const refs = yield* Fiber.join(reply);
+			const shown = [telegram.typings.length, telegram.drafts.length];
 
+			yield* ticks(4);
+			assert.deepStrictEqual([telegram.typings.length, telegram.drafts.length], shown);
 			assert.isTrue(ended !== null && Exit.hasInterrupts(ended));
 			assert.deepStrictEqual(
 				telegram.sent.map(({ text }) => text),
