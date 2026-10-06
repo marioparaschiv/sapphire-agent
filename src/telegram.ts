@@ -79,7 +79,7 @@ export const telegramChat = Layer.effect(
 		const transcriber = yield* Transcriber;
 		const [userChat] = telegram.allowedUserIds;
 
-		const answer = (message: TelegramMessage, text: string) =>
+		const answerVoiceNote = (message: TelegramMessage, text: string) =>
 			bot.sendText(message.chatId, text, { replyTo: message.messageId, topicId: message.topicId ?? undefined }).pipe(
 				Effect.catch((error) => Effect.logError('cannot answer a voice note', error)),
 			);
@@ -95,10 +95,10 @@ export const telegramChat = Layer.effect(
 				Effect.matchEffect({
 					onFailure: (error) =>
 						Effect.logWarning('cannot transcribe a voice note', error).pipe(
-							Effect.andThen(answer(message, `Could not transcribe the voice note: ${error.message}`)),
+							Effect.andThen(answerVoiceNote(message, `Could not transcribe the voice note: ${error.message}`)),
 							Effect.as(Option.none()),
 						),
-					onSuccess: (transcript) => answer(message, `🎙 ${transcript}`).pipe(Effect.as(Option.some(transcript))),
+					onSuccess: (transcript) => answerVoiceNote(message, `🎙 ${transcript}`).pipe(Effect.as(Option.some(transcript))),
 				}),
 			);
 		};
