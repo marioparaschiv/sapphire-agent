@@ -209,9 +209,10 @@ describe('topics', () => {
 
 			const topic = h.telegram.topics().find(({ title }) => title.includes('TEST-10'));
 
+			assert.isDefined(topic);
 			assert.deepStrictEqual(
 				h.telegram.sent.map(({ text, topicId }) => [text, topicId]),
-				['🔎 /sreview started', '🔎 /review-verify started', '🔎 /pr started'].map((text) => [text, topic?.topicId ?? null]),
+				['🔎 /sreview started', '🔎 /review-verify started', '🔎 /pr started'].map((text) => [text, topic.topicId]),
 			);
 		}),
 	);

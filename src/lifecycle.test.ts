@@ -195,8 +195,8 @@ const currentRun = (h: Harness) =>
 
 // The whole life of one epic: dispatch, a slice and a phase posted in its chat topic, a question asked and answered
 // there, the result posted to the PR, a review thread that mentions the bot, whose command hands it to a follow-up, the
-// cleanup once the PR is merged, and its chat topic, summed up once it ships. Returns everything the run left behind in Linear, GitHub, herdr, git, Telegram and the
-// journal.
+// cleanup once the PR is merged, and its chat topic, summed up once it ships. Returns everything the run left behind in
+// Linear, GitHub, herdr, git, Telegram and the journal.
 const lifecycle = (crash: Option.Option<CrashPoint>) =>
 	Effect.gen(function* () {
 		const h = yield* makeHarness({}, { answerChat: true });
@@ -224,7 +224,8 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 		yield* tickUntil('the started slice', () => sentTexts(h).includes('▶️ TEST-101 Slice 1 started'));
 		h.moveEpic(slice.id, 'Done');
 		yield* tickUntil('the done slice', () => sentTexts(h).includes('✔️ TEST-101 Slice 1 done'));
-		yield* hook(skillHook(session?.id ?? '', 'sreview'), paneId);
+		assert.isNotNull(session);
+		yield* hook(skillHook(session.id, 'sreview'), paneId);
 		yield* tickUntil('the review phase', () => sentTexts(h).includes('🔎 /sreview started'));
 
 		// Monitoring: the agent stops to ask, the question goes to the epic's topic, the user's answer there is typed into
@@ -237,8 +238,9 @@ const lifecycle = (crash: Option.Option<CrashPoint>) =>
 
 		const asked = h.telegram.sent.find((message) => message.text.startsWith('⏸ '));
 
-		assert.isNotNull(asked?.topicId);
-		yield* writeInTopic(asked?.topicId ?? 0, 'Remote wins.\nKeep a backup of local.');
+		assert.isDefined(asked);
+		assert.isNotNull(asked.topicId);
+		yield* writeInTopic(asked.topicId, 'Remote wins.\nKeep a backup of local.');
 		yield* tickUntil('the typed answer', () => h.herdr.prompts().length > 0);
 		h.herdr.setAgentStatus(paneId, 'working');
 		h.herdr.setTail(paneId, '⏺ Wrote src/sync/merge.ts');

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit, Layer, Logger, Option, Scope, Stream, SubscriptionRef } from 'effect';
+import { Effect, Exit, Layer, Logger, Scope, Stream, SubscriptionRef } from 'effect';
 import { TestClock } from 'effect/testing';
 import { ClaudeChat } from './claude-chat.ts';
 import { type FakeClaudeAnswer, type FakeClaudeRun, fakeClaude, flagValue } from './claude-chat-fake.ts';
@@ -284,7 +284,7 @@ describe('answerChatMessages', () => {
 				chat.claude.runs.map(({ prompt }) => prompt),
 				['hello'],
 			);
-			assert.isTrue(Option.isNone(Option.fromUndefinedOr(chat.telegram.sent.find(({ topicId }) => topicId === 4242))));
+			assert.isUndefined(chat.telegram.sent.find(({ topicId }) => topicId === 4242));
 		}).pipe(Effect.scoped),
 	);
 });
