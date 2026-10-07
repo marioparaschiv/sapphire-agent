@@ -223,7 +223,7 @@ describe('Journal', () => {
 			const journal = yield* Layer.build(Journal.layer(filename)).pipe(Effect.map(Context.get(Journal)));
 
 			assert.deepStrictEqual(yield* journal.chatSession('7100200300:12'), Option.some({ sessionId: 'session-a', cwd: homedir() }));
-			assert.deepStrictEqual(yield* journal.latestChatSession, Option.some({ sessionId: 'session-b', cwd: homedir() }));
+			assert.deepStrictEqual(yield* journal.chatSession('7100200300:14'), Option.some({ sessionId: 'session-b', cwd: homedir() }));
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);
 
@@ -265,18 +265,16 @@ describe('Journal', () => {
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
 
-	it.effect("keeps the main chat's newest session apart from a project thread's newest bot message", () =>
+	it.effect("finds a project thread's newest bot message apart from another thread's", () =>
 		Effect.gen(function* () {
 			const journal = yield* Journal;
 
-			yield* journal.addChatSession(['1:2'], { sessionId: 'main', cwd: '/home/dev', thread: null, kind: 'turn' });
-			yield* TestClock.setTime(5_000);
 			yield* journal.addChatSession(['1:4:3', '1:5:3'], { sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' });
-
-			assert.deepStrictEqual(yield* journal.latestChatSession, Option.some({ sessionId: 'main', cwd: '/home/dev' }));
+			yield* TestClock.setTime(5_000);
+			yield* journal.addChatSession(['1:7:6'], { sessionId: 'other', cwd: '/home/dev/other', thread: '1:6', kind: 'reminder' });
 			assert.deepStrictEqual(
 				yield* journal.lastChatMessage('1:3'),
-				Option.some({ messageRef: '1:5:3', sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' as const, createdAt: 5_000 }),
+				Option.some({ messageRef: '1:5:3', sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' as const, createdAt: 0 }),
 			);
 			assert.deepStrictEqual(yield* journal.lastChatMessage('1:9'), Option.none());
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),

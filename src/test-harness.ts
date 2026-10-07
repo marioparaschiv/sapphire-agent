@@ -8,6 +8,7 @@ import { Console, Context, Effect, Exit, Layer, Option, Scope, Stream, Subscript
 import { TestConsole } from 'effect/testing';
 import { AgentEventServer } from './agent-event-server.ts';
 import type { CallError } from './call-policy.ts';
+import { type FakeClaudeAgentControls, fakeClaudeAgent } from './claude-agent-fake.ts';
 import { ClaudeChat } from './claude-chat.ts';
 import { fakeClaude } from './claude-chat-fake.ts';
 import { writeTranscript } from './claude-transcript-fixture.ts';
@@ -26,6 +27,7 @@ import { type Command, Journal, type JournalError, newSession, type Run, type Se
 import { type Epic, Linear } from './linear.ts';
 import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
+import { ManagerInbox, runManager } from './manager.ts';
 import { MissedDeliveries } from './missed-deliveries.ts';
 import { type Observation, Observer, type StartedRun } from './observation.ts';
 import { Pause } from './pause.ts';
@@ -130,6 +132,8 @@ export type Harness = {
 	readonly telegram: FakeTelegramControls;
 	// The Telegram id of the user, the first of telegram.allowedUserIds.
 	readonly telegramUser: number;
+	// The main chat's manager, faked at the Agent SDK's query; it runs only with answerChat.
+	readonly manager: FakeClaudeAgentControls;
 	// Sends the delivery to the current webhook server, as postDelivery does with the configured secret; returns the HTTP
 	// status.
 	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
@@ -223,8 +227,8 @@ const makeRepos = (dir: string) => {
 };
 
 export type HarnessOptions = {
-	// Answers the chat's messages as the service does, again after every restart; main-chat turns go to a fake `claude`
-	// that answers `OK.`.
+	// Answers the chat's messages as the service does, again after every restart: main-chat messages go to the manager,
+	// whose faked SDK session answers each with `OK.`, and project-topic turns to a fake `claude` that answers `OK.`.
 	readonly answerChat?: boolean;
 };
 
@@ -291,7 +295,15 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
 			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
 			Layer.provideMerge(
-				Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer, telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest))),
+				Layer.mergeAll(
+					Git.layer,
+					ClaudeTrust.layer,
+					ClaudeTranscript.layer,
+					Comments.layer,
+					Prompts.layer,
+					ManagerInbox.layer,
+					telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest)),
+				),
 			),
 			Layer.provideMerge(Projects.layer),
 			Layer.provideMerge(CrashingJournal),
@@ -300,7 +312,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		);
 
 		const claude = yield* fakeClaude(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, () => ({ text: ['OK.'] }));
-		const claudeChat = ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer, NodeFileSystem.layer]), Layer.provide(Layer.succeedContext(fixtures)));
+		const claudeChat = ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer]), Layer.provide(Layer.succeedContext(fixtures)));
+		const manager = yield* fakeClaudeAgent((text) => (text.startsWith('Message ') ? { text: 'OK.' } : null));
 
 		const build = Effect.gen(function* () {
 			const scope = yield* Scope.make();
@@ -310,6 +323,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 			if (answerChat) {
 				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.provide(fixtures), Effect.provide(NodeFileSystem.layer), Effect.forkIn(scope));
+				yield* runManager.pipe(Effect.provide(manager.layer), Effect.provide(context), Effect.provide(fixtures), Effect.forkIn(scope));
 			}
 
 			return { scope, context };
@@ -384,6 +398,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			herdr,
 			telegram: Context.get(fixtures, FakeTelegram),
 			telegramUser: Context.get(fixtures, AppConfig).telegram.allowedUserIds[0],
+			manager,
 			deliver: (delivery: WebhookDelivery, signature?: string | null) => services.pipe(Effect.flatMap((context) => postDelivery(Context.get(context, WebhookServer).url, webhookSecret, delivery, signature))),
 			scanDeliveries: services.pipe(Effect.flatMap((context) => Context.get(context, MissedDeliveries).scan)),
 			tick: tick(false),

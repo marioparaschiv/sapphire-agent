@@ -1,12 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { Context, Effect, Fiber, FileSystem, Layer, Option, type PlatformError, Schema, Stream } from 'effect';
+import { Context, Effect, Fiber, Layer, Option, type PlatformError, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { InitEvent } from './claude-settings.ts';
-import { projectSlug } from './claude-transcript.ts';
-import { AppConfig } from './config.ts';
-import type { ChatSession, ProjectSettings } from './journal.ts';
+import type { ProjectSettings } from './journal.ts';
 import { Prompts } from './prompts.ts';
 
 export class ClaudeError extends Schema.TaggedError<ClaudeError>()('ClaudeError', { message: Schema.String }) {}
@@ -56,18 +53,18 @@ export type ChatTurn = {
 	readonly prompt: string;
 	// Claude keeps sessions per directory, so a fork runs in its parent's.
 	readonly cwd: string;
-	// The project whose topic the turn is in; none in the main chat.
-	readonly project: ProjectSettings | null;
+	// The project whose topic the turn is in.
+	readonly project: ProjectSettings;
 };
 
-// One-word prompt of the keep-alive turn, and of the settings check, which is killed before it is answered.
+// One-word prompt of the settings check, which is killed before it is answered.
 const pingPrompt = 'ping';
 
 // The user's, the project's and the local settings, named so that no default leaves one of them out.
 const settingSources = 'user,project,local';
 
 // The chat's Claude: the user's own `claude`, with their settings, CLAUDE.md, hooks and MCP servers, run once per
-// message in the main chat or a project's topic. Every turn gets a session of its own: a new one, or a fork of the
+// message in a project's topic. Every turn gets a session of its own: a new one, or a fork of the
 // session it continues (`--resume --fork-session`), which stays as it was, so any earlier message can be continued again.
 export class ClaudeChat extends Context.Service<
 	ClaudeChat,
@@ -76,21 +73,16 @@ export class ClaudeChat extends Context.Service<
 		readonly init: Effect.Effect<InitEvent, ClaudeError>;
 		// The reply's text, in pieces as Claude writes it. Interrupting the stream kills Claude, which ends the turn.
 		readonly turn: (turn: ChatTurn) => Stream.Stream<string, ClaudeError>;
-		// Resumes the session into a throwaway fork for one short turn, so the prompt cache of the session stays warm, then
-		// deletes the fork's transcript.
-		readonly keepAlive: (session: ChatSession) => Effect.Effect<void, ClaudeError>;
 	}
 >()('sapphire-agent/ClaudeChat') {
 	static readonly layer = Layer.effect(
 		ClaudeChat,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-			const fs = yield* FileSystem.FileSystem;
-			const { env } = yield* AppConfig;
 			const prompts = yield* Prompts;
 			const encoder = new TextEncoder();
 
-			const command = ({ sessionId, parent, prompt, cwd, project }: ChatTurn, outputArgs: ReadonlyArray<string>) =>
+			const command = ({ sessionId, parent, prompt, cwd }: Omit<ChatTurn, 'project'>, systemPrompt: string, outputArgs: ReadonlyArray<string>) =>
 				ChildProcess.make(
 					'claude',
 					[
@@ -99,7 +91,7 @@ export class ClaudeChat extends Context.Service<
 						'--setting-sources',
 						settingSources,
 						'--append-system-prompt',
-						project === null ? prompts.chat : prompts.projectChat(project),
+						systemPrompt,
 						'--session-id',
 						sessionId,
 						...Option.match(parent, { onNone: () => [], onSome: (id) => ['--resume', id, '--fork-session'] }),
@@ -122,7 +114,7 @@ export class ClaudeChat extends Context.Service<
 			// The scope closing kills Claude once the event is read. Nothing is kept of the session.
 			const init = Effect.scoped(
 				Effect.gen(function* () {
-					const handle = yield* spawner.spawn(command({ sessionId: randomUUID(), parent: Option.none(), prompt: pingPrompt, cwd: homedir(), project: null }, ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
+					const handle = yield* spawner.spawn(command({ sessionId: randomUUID(), parent: Option.none(), prompt: pingPrompt, cwd: homedir() }, prompts.chat, ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
 
 					return yield* handle.stdout.pipe(
 						Stream.decodeText(),
@@ -139,7 +131,7 @@ export class ClaudeChat extends Context.Service<
 			const turn = (chatTurn: ChatTurn) =>
 				Stream.unwrap(
 					Effect.gen(function* () {
-						const handle = yield* spawner.spawn(command(chatTurn, ['--output-format', 'stream-json', '--include-partial-messages', '--verbose'])).pipe(Effect.mapError(failure('start claude')));
+						const handle = yield* spawner.spawn(command(chatTurn, prompts.projectChat(chatTurn.project), ['--output-format', 'stream-json', '--include-partial-messages', '--verbose'])).pipe(Effect.mapError(failure('start claude')));
 						const stderr = yield* handle.stderr.pipe(Stream.decodeText(), Stream.mkString, Effect.forkScoped);
 
 						return handle.stdout.pipe(
@@ -164,24 +156,7 @@ export class ClaudeChat extends Context.Service<
 					}),
 				);
 
-			const keepAlive = ({ sessionId, cwd }: ChatSession) =>
-				Effect.gen(function* () {
-					const fork = randomUUID();
-					const exitCode = yield* Effect.scoped(
-						spawner.spawn(command({ sessionId: fork, parent: Option.some(sessionId), prompt: pingPrompt, cwd, project: null }, [])).pipe(
-							Effect.flatMap((handle) => Effect.all([handle.stdout.pipe(Stream.runDrain), handle.stderr.pipe(Stream.runDrain), handle.exitCode], { concurrency: 'unbounded' })),
-							Effect.map(([, , code]) => code),
-						),
-					).pipe(Effect.mapError(failure('keep the chat session warm')));
-
-					yield* fs.remove(join(env.claudeConfigDirectory, 'projects', projectSlug(cwd), `${fork}.jsonl`), { force: true }).pipe(Effect.mapError(failure('delete the keep-alive fork')));
-
-					if (exitCode !== 0) {
-						return yield* new ClaudeError({ message: `claude exited with ${exitCode} keeping the chat session warm` });
-					}
-				});
-
-			return ClaudeChat.of({ init, turn, keepAlive });
+			return ClaudeChat.of({ init, turn });
 		}),
 	);
 }

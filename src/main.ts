@@ -8,7 +8,7 @@ import { ClaudeTranscript } from './claude-transcript.ts';
 import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig, TelegramConfig } from './config.ts';
-import { answerChatMessages, checkChatSettings, keepChatSessionWarm } from './conversations.ts';
+import { answerChatMessages, checkChatSettings } from './conversations.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { GitHubApp } from './github-app.ts';
@@ -16,6 +16,7 @@ import { agentWorkspaceLabels, Herdr } from './herdr.ts';
 import { Journal } from './journal.ts';
 import { refuseUndrainedClaims } from './legacy-claims.ts';
 import { Linear } from './linear.ts';
+import { ClaudeAgent, ManagerInbox, runManager } from './manager.ts';
 import { MissedDeliveries } from './missed-deliveries.ts';
 import { Observer } from './observation.ts';
 import { Pause } from './pause.ts';
@@ -33,7 +34,7 @@ const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(jo
 
 const ChatLive = telegramChat.pipe(Layer.provide(TelegramBot.layer), Layer.provide(Transcriber.layer));
 
-const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, ChatLive, ClaudeChat.layer).pipe(
+const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, ChatLive, ClaudeChat.layer, ClaudeAgent.layer, ManagerInbox.layer).pipe(
 	Layer.provideMerge(Prompts.layer),
 	Layer.provideMerge(GitHubApp.layer()),
 );
@@ -63,7 +64,7 @@ const program = Effect.gen(function* () {
 	yield* Effect.forkChild(checkChatSettings.pipe(Effect.catch((error) => Effect.logWarning("cannot check that chat turns run with the user's Claude settings", error))));
 	yield* Effect.forkChild(missedDeliveries.run);
 	yield* Effect.forkChild(answerChatMessages);
-	yield* Effect.forkChild(keepChatSessionWarm);
+	yield* Effect.forkChild(runManager);
 	yield* Effect.forkChild(
 		fs.watch(config.env.stateDirectory).pipe(
 			Stream.filter((event) => basename(event.path) === wakeFileName),

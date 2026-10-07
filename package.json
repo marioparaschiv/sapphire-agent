@@ -9,17 +9,20 @@
 		"typecheck": "tsc"
 	},
 	"dependencies": {
+		"@anthropic-ai/claude-agent-sdk": "0.3.292",
 		"@effect/platform-node": "4.0.0",
 		"@effect/sql-sqlite-node": "4.0.0",
 		"@mtcute/node": "0.32.4",
 		"effect": "4.0.0",
-		"sherpa-onnx-node": "1.13.8"
+		"sherpa-onnx-node": "1.13.8",
+		"zod": "4.6.5"
 	},
 	"engines": {
 		"node": ">=24"
 	},
 	"devDependencies": {
 		"@effect/vitest": "4.0.0",
+		"@modelcontextprotocol/sdk": "1.32.1",
 		"@types/node": "^24.19.1",
 		"typescript": "^7.0.2",
 		"vitest": "^5.0.3"

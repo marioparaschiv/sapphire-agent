@@ -66,7 +66,7 @@ At most one row: `delivered_at` (ms), when the newest App webhook delivery the l
 
 ### `chat_sessions`
 
-One row per bot message of the main chat or a project's thread (`message_ref`, the platform's ref, e.g. `<chat id>:<message id>`), with the Claude `session_id` it was written in, the `cwd` that session ran in (Claude keeps sessions per directory, so a fork runs there too), its `thread` (null for the main chat), its `kind` (`turn`, an answer, or `reminder`, the cache expiry reminder) and `created_at`. A reply to the message forks that session in that directory; the main chat's newest row's session is kept warm, and a project thread's newest row arms its reminder. Written once the reply is kept, so a reply cut short by a crash is not there and a reply to it gets the short explanation.
+One row per bot message of a project's thread (rows of the main chat from before its manager have no thread) (`message_ref`, the platform's ref, e.g. `<chat id>:<message id>`), with the Claude `session_id` it was written in, the `cwd` that session ran in (Claude keeps sessions per directory, so a fork runs there too), its `thread`, its `kind` (`turn`, an answer, or `reminder`, the cache expiry reminder) and `created_at`. A reply to the message forks that session in that directory, and a project thread's newest row arms its reminder. Written once the reply is kept, so a reply cut short by a crash is not there and a reply to it gets the short explanation.
 
 ### `topics` and `archive_thread`
 

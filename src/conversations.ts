@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { Clock, Duration, Effect, FiberMap, Option, Schedule, Stream } from 'effect';
+import { Clock, Duration, Effect, FiberMap, Option, Stream } from 'effect';
 import { Chat, type InboundMessage, type ThreadRef } from './chat.ts';
 import { ClaudeChat } from './claude-chat.ts';
 import { cacheExpiryNotice, readCacheRefreshDelay, readClaudeSettings, type SettingsMismatch, settingsMismatches } from './claude-settings.ts';
 import { itemList } from './comments.ts';
 import { type ChatSession, Journal, type ProjectSettings } from './journal.ts';
+import { ManagerInbox } from './manager.ts';
 import { acceptsMessages } from './observation.ts';
 import { Projects } from './projects.ts';
 import { Reconciler } from './reconciler.ts';
@@ -20,19 +20,20 @@ export const cacheReminder = `⏳ This chat's cache expires in ${Duration.toMinu
 
 // How long after a session's last turn its prompt cache is about to expire; none, with a warning, when that is not
 // known or too short to act on.
-const cacheRefreshDelay = (without: string) =>
-	readCacheRefreshDelay.pipe(
-		Effect.tap(Option.match({ onNone: () => Effect.logWarning(`settings.json's promptCacheTtl is not 1h, so ${without}`), onSome: () => Effect.void })),
-		Effect.catch((error) => Effect.logWarning(`cannot read promptCacheTtl from settings.json, so ${without}`, error).pipe(Effect.as(Option.none<Duration.Duration>()))),
-	);
+const cacheRefreshDelay = readCacheRefreshDelay.pipe(
+	Effect.tap(Option.match({ onNone: () => Effect.logWarning("settings.json's promptCacheTtl is not 1h, so project threads get no reminder before their cache expires"), onSome: () => Effect.void })),
+	Effect.catch((error) =>
+		Effect.logWarning('cannot read promptCacheTtl from settings.json, so project threads get no reminder before their cache expires', error).pipe(Effect.as(Option.none<Duration.Duration>())),
+	),
+);
 
 type ProjectTopic = { readonly thread: ThreadRef; readonly project: ProjectSettings };
 
-// Core's side of the chat, until interrupted. Each message in the main chat or in a project's thread is one Claude
-// turn, its reply streamed back; turns run concurrently. A reply continues the session of the bot message it replies
-// to, forked, so every bot message keeps its own context; a message that replies to nothing starts a new session, in
-// the home directory or the project's repo. A message in an epic's thread is typed into its run's agent, as `ctl.sh
-// send` does; with no run to take it, it gets a one-line answer. A failed turn or answer is logged.
+// Core's side of the chat, until interrupted. A message in the main chat goes to the manager's inbox (`manager.ts`).
+// Each message in a project's thread is one Claude turn, its reply streamed back; turns run concurrently. A reply
+// continues the session of the bot message it replies to, forked, so every bot message keeps its own context; a message
+// that replies to nothing starts a new session in the project's repo. A message in an epic's thread is typed into its
+// run's agent, as `ctl.sh send` does; with no run to take it, it gets a one-line answer. A failed turn or answer is logged.
 //
 // A project's thread gets no keep-alive: shortly before the prompt cache of its newest session expires, the bot says so
 // once, in a reply that continues the session. A new turn in the thread starts the wait again.
@@ -43,7 +44,8 @@ export const answerChatMessages = Effect.scoped(
 		const claude = yield* ClaudeChat;
 		const reconciler = yield* Reconciler;
 		const projects = yield* Projects;
-		const refreshDelay = yield* cacheRefreshDelay('project threads get no reminder before their cache expires');
+		const inbox = yield* ManagerInbox;
+		const refreshDelay = yield* cacheRefreshDelay;
 		const reminders = yield* FiberMap.make<ThreadRef>();
 
 		// Nothing when the thread's newest bot message is a reminder already, or its cache expired, e.g. while the service
@@ -75,7 +77,7 @@ export const answerChatMessages = Effect.scoped(
 		const scheduleReminder = (thread: ThreadRef) =>
 			Option.match(refreshDelay, { onNone: () => Effect.void, onSome: (delay) => FiberMap.run(reminders, thread, remind(thread, delay)).pipe(Effect.asVoid) });
 
-		const turn = (message: InboundMessage, topic: ProjectTopic | null) =>
+		const turn = (message: InboundMessage, topic: ProjectTopic) =>
 			Effect.gen(function* () {
 				const parent = message.replyTo === null ? Option.none<ChatSession>() : yield* journal.chatSession(message.replyTo);
 
@@ -84,14 +86,12 @@ export const answerChatMessages = Effect.scoped(
 				}
 
 				// A turn in the thread takes the place of its waiting reminder, which must not interrupt the turn's reply.
-				if (topic !== null) {
-					yield* FiberMap.remove(reminders, topic.thread);
-				}
+				yield* FiberMap.remove(reminders, topic.thread);
 
 				const sessionId = randomUUID();
-				const cwd = Option.match(parent, { onNone: () => topic?.project.repo ?? homedir(), onSome: (session) => session.cwd });
+				const cwd = Option.match(parent, { onNone: () => topic.project.repo, onSome: (session) => session.cwd });
 				// A session continues in the directory it ran in, also once its project moved to another repo.
-				const project = topic === null ? null : { ...topic.project, repo: cwd };
+				const project = { ...topic.project, repo: cwd };
 				const text = claude
 					.turn({ sessionId, parent: Option.map(parent, (session) => session.sessionId), prompt: message.text, cwd, project })
 					.pipe(
@@ -100,9 +100,9 @@ export const answerChatMessages = Effect.scoped(
 					);
 				const sent = yield* chat.streamReply(message.ref, text);
 
-				yield* journal.addChatSession(sent, { sessionId, cwd, thread: topic?.thread ?? null, kind: 'turn' });
+				yield* journal.addChatSession(sent, { sessionId, cwd, thread: topic.thread, kind: 'turn' });
 			}).pipe(
-				Effect.ensuring(topic === null ? Effect.void : scheduleReminder(topic.thread)),
+				Effect.ensuring(scheduleReminder(topic.thread)),
 				Effect.catch((error) => Effect.logError('cannot answer a chat message', error)),
 			);
 
@@ -126,7 +126,7 @@ export const answerChatMessages = Effect.scoped(
 		const answer = (message: InboundMessage) =>
 			Effect.gen(function* () {
 				if (message.conversation._tag === 'main') {
-					return yield* turn(message, null);
+					return yield* inbox.offer({ _tag: 'message', ref: message.ref, text: message.text });
 				}
 
 				const { thread } = message.conversation;
@@ -143,26 +143,6 @@ export const answerChatMessages = Effect.scoped(
 		);
 	}),
 );
-
-// Keeps the prompt cache of the main chat's newest bot message's session warm, shortly before it would expire, for as
-// long as the service runs, so a reply to it after a pause does not pay for its whole context again.
-export const keepChatSessionWarm = Effect.gen(function* () {
-	const journal = yield* Journal;
-	const claude = yield* ClaudeChat;
-	const refreshDelay = yield* cacheRefreshDelay('the main chat gets no keep-alive');
-
-	if (Option.isNone(refreshDelay)) {
-		return;
-	}
-
-	const warm = journal.latestChatSession.pipe(
-		Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: claude.keepAlive })),
-		Effect.catch((error) => Effect.logWarning('cannot keep the chat session warm; trying again later', error)),
-	);
-
-	// Fixed, not spaced: a slow keep-alive turn does not push the next one back.
-	return yield* Effect.schedule(warm, Schedule.fixed(refreshDelay.value));
-});
 
 const describeMismatch = ({ key, configured, reported }: SettingsMismatch) => `${key}: \`${reported}\`, settings say \`${configured}\``;
 

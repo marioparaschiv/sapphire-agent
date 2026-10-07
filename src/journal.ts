@@ -196,8 +196,8 @@ export type ChatSession = typeof ChatSession.Type;
 // turn: the bot's answer to a message. reminder: the bot said the session's prompt cache is about to expire.
 export const ChatMessageKind = Schema.Literals(['turn', 'reminder']);
 
-// Bot messages written in one session: in the main chat (no thread) or in a project's thread.
-export const ChatPost = Schema.Struct({ ...ChatSession.fields, thread: Schema.NullOr(ThreadRef), kind: ChatMessageKind });
+// Bot messages written in one session in a project's thread.
+export const ChatPost = Schema.Struct({ ...ChatSession.fields, thread: ThreadRef, kind: ChatMessageKind });
 
 export type ChatPost = typeof ChatPost.Type;
 
@@ -459,8 +459,6 @@ export class Journal extends Context.Service<
 		// Records that the bot messages were written in the Claude session.
 		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) => Effect.Effect<void, JournalError>;
 		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<ChatSession>, JournalError>;
-		// The session of the main chat's newest bot message.
-		readonly latestChatSession: Effect.Effect<Option.Option<ChatSession>, JournalError>;
 		// The newest bot message in the thread.
 		readonly lastChatMessage: (thread: ThreadRef) => Effect.Effect<Option.Option<ChatMessage>, JournalError>;
 		readonly listTopics: Effect.Effect<ReadonlyArray<Topic>, JournalError>;
@@ -607,12 +605,6 @@ export class Journal extends Context.Service<
 					execute: (ref) => sql`SELECT session_id, cwd FROM chat_sessions WHERE message_ref = ${ref}`,
 				});
 
-				const latestChatSession = SqlSchema.findOneOption({
-					Request: Schema.Void,
-					Result: ChatSession,
-					execute: () => sql`SELECT session_id, cwd FROM chat_sessions WHERE thread IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-				})(undefined);
-
 				const lastChatMessage = SqlSchema.findOneOption({
 					Request: ThreadRef,
 					Result: ChatMessage,
@@ -727,7 +719,6 @@ export class Journal extends Context.Service<
 					setDeliveryMark,
 					addChatSession,
 					chatSession,
-					latestChatSession,
 					lastChatMessage,
 					listTopics,
 					putTopic,

@@ -2,13 +2,14 @@ import { join } from 'node:path';
 import { NodeSocketServer } from '@effect/platform-node';
 import { Cause, Context, Effect, FileSystem, Layer, Option, Schema, Struct } from 'effect';
 import { Socket } from 'effect/socket';
-import type { AgentAdapter } from './agent-event.ts';
+import type { AgentAdapter, AgentEvent } from './agent-event.ts';
 import { eventSocketName } from './agent-hook.ts';
 import { Phase } from './chat.ts';
 import { claudeAdapter } from './claude-hooks.ts';
 import { AppConfig } from './config.ts';
 import { makeContextCheck } from './handoffs.ts';
-import { Journal } from './journal.ts';
+import { commandIdentifier, Journal } from './journal.ts';
+import { ManagerInbox } from './manager.ts';
 import { isInFlight, isStarted } from './observation.ts';
 import { Reconciler } from './reconciler.ts';
 
@@ -17,12 +18,27 @@ const adapters = { claude: claudeAdapter } satisfies Record<string, AgentAdapter
 
 const EventEnvelope = Schema.fromJsonString(Schema.Struct({ agent: Schema.Literals(Struct.keys(adapters)), paneId: Schema.NullOr(Schema.String), payload: Schema.String }));
 
+// What the manager hears of an event, in one line: that the agent finished its turn, needs something, or ended.
+const managerLine = (owner: string, event: AgentEvent): Option.Option<string> => {
+	switch (event._tag) {
+		case 'TurnEnded':
+			return Option.some(`${owner}: finished its turn`);
+		case 'Notified':
+			return Option.some(`${owner}: ${event.message.replace(/\s+/g, ' ').trim()}`);
+		case 'SessionEnded':
+			return Option.some(`${owner}: session ended (${event.reason})`);
+		default:
+			return Option.none();
+	}
+};
+
 // Session events from the coding agents' hooks, on `<state dir>/events.sock` while the service runs. An event from the
 // pane of a run or command in flight wakes the reconciler, and a session start that changes a run's session (a resume
 // of another, a clear, a fork) records a `session` request, which the requests rule applies to the run. A run's skill
 // that starts a phase records a `phase` request, which the topics rule posts in the epic's thread. A tool call or a
 // turn's end of a run's agent or its subagents checks their context for a handoff (`handoffs.ts`); what the subagent is
-// told goes back in the answer. Events from any other pane are answered and dropped.
+// told goes back in the answer. Its turn's end, a notification and its session's end reach the manager as one line
+// each. Events from any other pane are answered and dropped.
 export class AgentEventServer extends Context.Service<
 	AgentEventServer,
 	{
@@ -35,6 +51,7 @@ export class AgentEventServer extends Context.Service<
 			const { env } = yield* AppConfig;
 			const journal = yield* Journal;
 			const reconciler = yield* Reconciler;
+			const inbox = yield* ManagerInbox;
 			const checkContext = yield* makeContextCheck;
 			const fs = yield* FileSystem.FileSystem;
 			const path = join(env.stateDirectory, eventSocketName);
@@ -54,11 +71,19 @@ export class AgentEventServer extends Context.Service<
 					const run = (yield* journal.listRuns).find((candidate) => isInFlight(candidate) && candidate.paneId === paneId);
 					const command = (yield* journal.listCommands).find((candidate) => (candidate.status === 'claimed' || candidate.status === 'running') && candidate.paneId === paneId);
 
-					if (run === undefined && command === undefined) {
+					const owner = run !== undefined ? `${run.identifier} ${run.job._tag} run` : command !== undefined ? `${commandIdentifier(command)} command` : null;
+
+					if (owner === null) {
 						return Option.none<string>();
 					}
 
 					yield* Effect.logDebug(`${agent} ${event._tag} in ${paneId}`);
+
+					const forManager = managerLine(owner, event);
+
+					if (Option.isSome(forManager)) {
+						yield* inbox.offer({ _tag: 'agentEvent', line: forManager.value });
+					}
 
 					if (run !== undefined && event._tag === 'SessionStarted' && run.session?.id !== event.sessionId) {
 						yield* journal.addRequest({ _tag: 'session', identifier: run.identifier, sessionId: event.sessionId });

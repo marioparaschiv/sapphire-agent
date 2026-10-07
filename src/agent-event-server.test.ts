@@ -59,6 +59,38 @@ describe('agent events', () => {
 		}),
 	);
 
+	it.effect("tells the manager in one line when a run's agent needs something, finished its turn or ended, and nothing of its other events, its pane's output or other panes", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({}, { answerChat: true });
+			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'working' });
+			const own = run.session.id;
+
+			h.herdr.setTail(run.paneId, '⏺ Bash(npm test)\n  ⎿  12 passed');
+
+			for (const [payload, paneId] of [
+				[claudeHook('UserPromptSubmit', own, { prompt: 'continue' }), run.paneId],
+				[claudeHook('PostToolUse', own, { tool_name: 'Bash', tool_input: { command: 'npm test' } }), run.paneId],
+				[claudeHook('Notification', own, { message: 'Claude needs your permission\n  to use Bash' }), run.paneId],
+				[claudeHook('Stop', resumedSession, { stop_hook_active: false }), 'w9:p9'],
+				[claudeHook('Stop', own, { stop_hook_active: false }), run.paneId],
+				[claudeHook('SessionEnd', own, { reason: 'prompt_input_exit' }), run.paneId],
+			] as const) {
+				yield* h.hook('claude', payload, paneId);
+			}
+
+			yield* h.manager.awaitInputs(3);
+
+			assert.deepStrictEqual(
+				h.manager.sessions.flatMap(({ inputs }) => inputs.map(({ text }) => text)),
+				[
+					'Agent event: TEST-10 orchestrate run: Claude needs your permission to use Bash',
+					'Agent event: TEST-10 orchestrate run: finished its turn',
+					'Agent event: TEST-10 orchestrate run: session ended (prompt_input_exit)',
+				],
+			);
+		}),
+	);
+
 	it.effect('an event that does not match its agent, or from an unknown agent, fails the hook with the reason', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
