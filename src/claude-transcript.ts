@@ -3,14 +3,6 @@ import { Context, Effect, FileSystem, Layer, Option, type PlatformError, Schema 
 import { fileSystemFailure, type Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 
-// Only the entries that tell whether the agent still waits on a message; every other entry is skipped.
-const Entry = Schema.fromJsonString(
-	Schema.Union([
-		Schema.Struct({ type: Schema.Literal('assistant'), message: Schema.Struct({ content: Schema.Array(Schema.Unknown) }) }),
-		Schema.Struct({ type: Schema.Literal('user'), message: Schema.Struct({ content: Schema.Union([Schema.String, Schema.Array(Schema.Unknown)]) }) }),
-	]),
-);
-
 // What the request behind an assistant entry put in the model's context.
 const UsageEntry = Schema.fromJsonString(
 	Schema.Struct({
@@ -23,23 +15,7 @@ const UsageEntry = Schema.fromJsonString(
 	}),
 );
 
-const SentMessage = Schema.Struct({ type: Schema.Literal('tool_use'), name: Schema.Literal('SendMessage'), input: Schema.Struct({ to: Schema.String, message: Schema.String }) });
-
-const TextBlock = Schema.Struct({ type: Schema.Literal('text'), text: Schema.String });
-
-const decodeEntry = Schema.decodeUnknownOption(Entry);
 const decodeUsageEntry = Schema.decodeUnknownOption(UsageEntry);
-const decodeSentMessage = Schema.decodeUnknownOption(SentMessage);
-const decodeTextBlock = Schema.decodeUnknownOption(TextBlock);
-
-// A prompt, a message from another session or an interrupt; not a tool result. A background task finishing wakes the
-// agent too, but answers nothing it asked.
-const isInput = (content: string | ReadonlyArray<unknown>) => {
-	const texts = typeof content === 'string' ? [content] : content.flatMap((block) => Option.toArray(Option.map(decodeTextBlock(block), (text) => text.text)));
-
-	return texts.some((text) => !text.startsWith('<task-notification>'));
-};
-
 // Claude Code names a project's directory after its path, shortened past 200 characters with a hash of the path appended.
 export const maxSlugLength = 200;
 
@@ -69,9 +45,6 @@ type ReadContext = { readonly offset: number; readonly tokens: Option.Option<num
 export class ClaudeTranscript extends Context.Service<
 	ClaudeTranscript,
 	{
-		// The last message the session sent `to` with no input since: the question it ended its turn on. None when it got
-		// input after it, never sent one, or has no transcript.
-		readonly pendingMessage: (session: TranscriptSession, to: string) => Effect.Effect<Option.Option<string>, Permanent>;
 		// The context of the session's latest assistant entry, or of its subagent `agentId`'s: its input, cache read and
 		// cache creation tokens. None before the first, or without a transcript. Each call reads only what was appended
 		// since the call before.
@@ -95,32 +68,6 @@ export class ClaudeTranscript extends Context.Service<
 
 					return Option.fromUndefinedOr((yield* fs.readDirectory(projects)).find((name) => name.startsWith(`${slug.slice(0, maxSlugLength)}-`)));
 				});
-
-			const pendingIn = (lines: ReadonlyArray<string>, to: string): Option.Option<string> => {
-				for (const line of lines.toReversed()) {
-					const entry = decodeEntry(line);
-
-					if (Option.isNone(entry)) {
-						continue;
-					}
-
-					if (entry.value.type === 'user') {
-						if (isInput(entry.value.message.content)) {
-							return Option.none();
-						}
-
-						continue;
-					}
-
-					const sent = entry.value.message.content.flatMap((block) => Option.toArray(decodeSentMessage(block))).findLast((block) => block.input.to === to);
-
-					if (sent) {
-						return Option.some(sent.input.message);
-					}
-				}
-
-				return Option.none();
-			};
 
 			const notFoundAsNone = <A>(effect: Effect.Effect<Option.Option<A>, PlatformError.PlatformError>) =>
 				effect.pipe(Effect.catchTag('PlatformError', (error) => (error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(fileSystemFailure(error)))));
@@ -150,19 +97,6 @@ export class ClaudeTranscript extends Context.Service<
 			const readContexts = new Map<string, ReadContext>();
 
 			return ClaudeTranscript.of({
-				pendingMessage: (session, to) =>
-					Effect.gen(function* () {
-						const directory = yield* projectDirectory(session.cwd);
-
-						if (Option.isNone(directory)) {
-							return Option.none();
-						}
-
-						const text = yield* fs.readFileString(join(projects, directory.value, `${session.id}.jsonl`));
-
-						return pendingIn(text.split('\n'), to);
-					}).pipe(notFoundAsNone),
-
 				contextTokens: (session, agentId) =>
 					Effect.gen(function* () {
 						const path = yield* transcriptPath(session, agentId);

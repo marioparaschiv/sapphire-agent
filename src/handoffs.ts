@@ -1,24 +1,21 @@
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Clock, Effect, FileSystem, Option } from 'effect';
 import { fileSystemFailure } from './call-policy.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
-import { Herdr } from './herdr.ts';
-import { type AgentStatus, type Handoff, Journal } from './journal.ts';
-import { isInFlight, isStarted, type Observation, observedAgentStatus, type StartedRun } from './observation.ts';
+import { handoffPath } from './directories.ts';
+import { type Handoff, Journal, type Run } from './journal.ts';
+import { isAgentWorking, isInFlight, isThreaded, type Observation, type ThreadedRun } from './observation.ts';
 import type { Rule, Work } from './planner.ts';
-import { Prompts } from './prompts.ts';
+import { Prompts, threadOrdinal } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
-
-// The doc a run's session, or one of its subagents, hands its work over in.
-export const handoffPath = (identifier: string, sessionOrAgentId: string) => join(tmpdir(), `sapphire-agent-handoff-${identifier}-${sessionOrAgentId}.md`);
+import { makeSend, makeSettle } from './run-actions.ts';
+import { T3 } from './t3.ts';
+import { T3Projects } from './t3-projects.ts';
 
 // A subagent that goes on this far past the threshold after it was told to hand off gets a notice.
 const subagentOverRatio = 1.2;
-
-const turnEndedStatuses: ReadonlyArray<AgentStatus> = ['idle', 'done'];
 
 // Checks a run's context after a tool call or the end of a turn. The run's own session at handoffAtTokens records a
 // `handoff` request, which the handoff rule acts on. A subagent at handoffAtTokens is told once, by what its hook
@@ -33,7 +30,7 @@ export const makeContextCheck = Effect.gen(function* () {
 	const reconciler = yield* Reconciler;
 	const handoffSkill = join(config.env.claudeConfigDirectory, 'skills', 'handoff', 'SKILL.md');
 
-	const orchestrator = (run: StartedRun, sessionId: string) =>
+	const orchestrator = (run: ThreadedRun, sessionId: string) =>
 		Effect.gen(function* () {
 			if (run.session?.id !== sessionId || run.handoff?.sessionId === sessionId) {
 				return;
@@ -54,7 +51,7 @@ export const makeContextCheck = Effect.gen(function* () {
 			yield* reconciler.wake;
 		});
 
-	const subagent = (run: StartedRun, sessionId: string, agentId: string) =>
+	const subagent = (run: ThreadedRun, sessionId: string, agentId: string) =>
 		Effect.gen(function* () {
 			const tokens = Option.getOrElse(yield* transcript.contextTokens({ id: sessionId, cwd: run.worktreePath }, agentId), () => 0);
 
@@ -78,76 +75,106 @@ export const makeContextCheck = Effect.gen(function* () {
 			return Option.none();
 		});
 
-	return (run: StartedRun, sessionId: string, agentId: string | null) =>
+	return (run: ThreadedRun, sessionId: string, agentId: string | null) =>
 		agentId === null ? orchestrator(run, sessionId).pipe(Effect.as(Option.none<string>())) : subagent(run, sessionId, agentId);
 });
 
-// Hands a run's session over to a fresh one: types `/handoff` with the doc's path, `/clear` once the doc exists and
-// the turn ended, then tells the new session to read the doc. Each step is recorded on the run before it is typed, so
-// a crash or restart never types one twice. A doc still missing startTimeoutSeconds after the turn ended gets a
-// notice, and the session is not cleared. Not paused: it only keeps runs in flight going.
+// Hands a run's agent over to a fresh thread once its context filled up, as a thread cannot be cleared: sends the
+// thread `/handoff` with the doc's path, and once the doc exists and the thread stopped, settles it and launches the
+// run's next thread on the same worktree and branch (`<ID> (2) ...`, counting up) to read the doc; the run moves to that
+// thread. Each step is recorded on the run before it is sent, so a crash or restart never sends one twice; a thread
+// launched just before a crash is found by its title. A doc still missing startTimeoutSeconds after the turn ended gets
+// a notice, and nothing goes on. Not paused: it only keeps runs in flight going.
 export const handoffRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
-	const herdr = yield* Herdr;
+	const t3 = yield* T3;
+	const t3Projects = yield* T3Projects;
 	const comments = yield* Comments;
 	const prompts = yield* Prompts;
 	const fs = yield* FileSystem.FileSystem;
+	const send = yield* makeSend;
+	const settle = yield* makeSettle;
 
-	// e.g. the agent sits at a dialog; the notice for a missing doc tells the user.
-	const typeInto = (run: StartedRun, text: string) =>
-		herdr.prompt(run.paneId, text).pipe(
-			Effect.andThen(Effect.log(`typed "${text}" into ${run.paneId}`)),
-			Effect.catchTag('Permanent', (error) => Effect.logWarning(`typing "${text}" into ${run.paneId} failed: ${error.message}`)),
-		);
-
-	const request = (run: StartedRun, requestId: number, sessionId: string) =>
+	// The request goes once the send landed, so a crash or a failed send before that sends it again on a later tick,
+	// under the same key.
+	const request = (run: ThreadedRun, requestId: number, sessionId: string) =>
 		Effect.gen(function* () {
-			if (run.session?.id !== sessionId || run.handoff?.sessionId === sessionId) {
+			if (run.session?.id !== sessionId || (run.handoff?.sessionId === sessionId && run.handoff.step === 'resumed')) {
 				yield* journal.deleteRequest(requestId);
-				yield* Effect.log(`session ${sessionId} is no longer the run's or hands off already; dropped request ${requestId}`);
+				yield* Effect.log(`session ${sessionId} is no longer the run's or handed off already; dropped request ${requestId}`);
 
 				return;
 			}
 
-			yield* journal.putRun({ ...run, handoff: { sessionId, step: 'requested' } });
+			const requested: ThreadedRun = { ...run, handoff: { sessionId, step: 'requested' } };
+
+			if (run.handoff?.sessionId !== sessionId) {
+				yield* journal.putRun(requested);
+			}
+
+			yield* send(requested, prompts.handoff(handoffPath(run.identifier, sessionId)), { mode: 'auto', clientRequestId: `handoff-${sessionId}` });
 			yield* journal.deleteRequest(requestId);
-			yield* typeInto(run, prompts.handoff(handoffPath(run.identifier, sessionId)));
 		});
 
-	const advance = (observation: Observation, run: StartedRun, handoff: Handoff) =>
+	// Once its turn ended without the doc for startTimeoutSeconds.
+	const noticeMissing = (run: Run, handoff: Handoff, path: string) =>
 		Effect.gen(function* () {
-			const path = handoffPath(run.identifier, handoff.sessionId);
-
-			if (handoff.step === 'cleared' && run.session !== null && run.session.id !== handoff.sessionId) {
-				yield* journal.putRun({ ...run, handoff: { ...handoff, step: 'resumed' } });
-				yield* typeInto(run, prompts.resumeHandoff(path));
-
-				return;
-			}
-
-			if (handoff.step !== 'requested' || !turnEndedStatuses.includes(observedAgentStatus(observation, run))) {
-				return;
-			}
-
-			if (yield* fs.exists(path).pipe(Effect.mapError(fileSystemFailure))) {
-				yield* journal.putRun({ ...run, handoff: { ...handoff, step: 'cleared' } });
-				yield* typeInto(run, '/clear');
-
-				return;
-			}
-
 			const now = yield* Clock.currentTimeMillis;
 			const notice = comments.handoffMissing({ identifier: run.identifier, sessionId: handoff.sessionId, path });
 
 			if (now - (run.agentStatusSince ?? now) >= config.startTimeoutSeconds * 1000 && (yield* journal.addNotice(notice))) {
-				yield* Effect.log(`no handoff doc at ${path}; the session stays`);
+				yield* Effect.log(`no handoff doc at ${path}; the thread stays`);
 			}
+		});
+
+	const docExists = (path: string) => fs.exists(path).pipe(Effect.mapError(fileSystemFailure));
+
+	// The thread launched for this handoff before a crash, by its title.
+	const launchedBefore = (projectId: string, run: ThreadedRun, ordinal: number) =>
+		t3.listThreads({ projectId, titleContains: `${run.identifier} (${ordinal})`, includeSubagents: false }).pipe(
+			Effect.map((threads) => Option.fromUndefinedOr(threads.find((thread) => thread.title.startsWith(`${run.identifier} (${ordinal}) `)))),
+		);
+
+	const advance = (observation: Observation, run: ThreadedRun, handoff: Handoff) =>
+		Effect.gen(function* () {
+			const path = handoffPath(run.identifier, handoff.sessionId);
+			const thread = observation.threads.get(run.threadId);
+			const epic = observation.epics.get(run.epicId);
+
+			if (handoff.step !== 'requested' || thread === undefined || epic === undefined || isAgentWorking(observation, run)) {
+				return;
+			}
+
+			if (!(yield* docExists(path))) {
+				return yield* noticeMissing(run, handoff, path);
+			}
+
+			const ordinal = threadOrdinal(run.identifier, thread.title ?? '') + 1;
+
+			yield* settle(run.threadId);
+
+			const projectId = yield* t3Projects.projectFor(run.repo);
+			const found = yield* launchedBefore(projectId, run, ordinal);
+			const next = yield* Option.match(found, {
+				onSome: (summary) => Effect.log(`adopting T3 thread ${summary.threadId}`).pipe(Effect.as({ threadId: summary.threadId, runId: summary.latestRunId })),
+				onNone: () =>
+					t3.launchThread({
+						projectId,
+						title: prompts.threadTitle(epic, ordinal),
+						message: prompts.resumeHandoff(path),
+						workspaceStrategy: { type: 'existing_worktree', worktreePath: run.worktreePath, branch: run.branch },
+						runtimeMode: 'full-access',
+					}),
+			});
+
+			yield* journal.putRun({ ...run, threadId: next.threadId, threadRunId: next.runId, handoff: { ...handoff, step: 'resumed' } });
+			yield* Effect.log(`the run goes on in T3 thread ${next.threadId}`);
 		});
 
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
-			const runs = (yield* journal.listRuns).filter((run): run is StartedRun => isInFlight(run) && isStarted(run));
+			const runs = (yield* journal.listRuns).filter((run): run is ThreadedRun => isInFlight(run) && isThreaded(run));
 			const requests = (yield* journal.listRequests).flatMap(({ id, request }) => (request._tag === 'handoff' ? [{ id, ...request }] : []));
 
 			const dropped = requests
@@ -162,7 +189,11 @@ export const handoffRule = Effect.gen(function* () {
 					return [{ ...work, apply: request(run, pending.id, pending.sessionId) }];
 				}
 
-				return run.handoff === null || run.handoff.step === 'resumed' ? [] : [{ ...work, apply: advance(observation, run, run.handoff) }];
+				if (run.handoff === null || run.handoff.step === 'resumed') {
+					return [];
+				}
+
+				return [{ ...work, apply: advance(observation, run, run.handoff) }];
 			});
 
 			return [...dropped, ...moved];

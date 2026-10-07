@@ -3,40 +3,32 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { NodeFileSystem, NodeServices } from '@effect/platform-node';
-import { Console, Context, Effect, Exit, Layer, Option, Scope, Stream, SubscriptionRef } from 'effect';
+import { NodeServices } from '@effect/platform-node';
+import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { TestConsole } from 'effect/testing';
+import { AgentActivity } from './agent-activity.ts';
 import { AgentEventServer } from './agent-event-server.ts';
-import type { CallError } from './call-policy.ts';
-import { ClaudeChat } from './claude-chat.ts';
-import { fakeClaude } from './claude-chat-fake.ts';
 import { writeTranscript } from './claude-transcript-fixture.ts';
 import { ClaudeTranscript, type TranscriptSession } from './claude-transcript.ts';
-import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
-import { AppConfig } from './config.ts';
-import { answerChatMessages } from './conversations.ts';
+import { AppConfig, T3Config, testSettings } from './config.ts';
 import { runCtl } from './ctl.ts';
-import { GitHubAppFixture, type GitHubAppFixtureShape, postDelivery, type WebhookDelivery } from './github-app-fixture.ts';
+import { GitHubAppFixture, postDelivery, type WebhookDelivery } from './github-app-fixture.ts';
 import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
 import { Git } from './git.ts';
-import { Herdr, type HerdrAgentStatus } from './herdr.ts';
-import { FakeHerdr, type FakeHerdrControls } from './herdr-fake.ts';
-import { type Command, Journal, type JournalError, newSession, type Run, type Session } from './journal.ts';
-import { type Epic, Linear } from './linear.ts';
-import { type EpicSeed, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
+import { type Command, Journal, type Run } from './journal.ts';
+import { type EpicSeed, type FixtureIssue, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
-import { MissedDeliveries } from './missed-deliveries.ts';
-import { type Observation, Observer, type StartedRun } from './observation.ts';
+import { isThreaded, type Observation, Observer, type ThreadedRun } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
+import { FakePushover, type FakePushoverControls } from './pushover-fake.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
-import { telegramChat } from './telegram.ts';
-import { FakeTelegram, type FakeTelegramControls } from './telegram-fake.ts';
-import { Transcriber } from './transcription.ts';
+import { FakeT3, type FakeT3Controls } from './t3-fake.ts';
+import { T3Projects } from './t3-projects.ts';
 import { WebhookServer } from './webhook-server.ts';
 
 // `<purpose>:<key>` of each marked body, in order; unmarked bodies are left out.
@@ -111,10 +103,8 @@ export const linearIssueMoved = {
 	webhookId: 'webhook-1',
 };
 
-export type StartedRunSeed = EpicSeed & { readonly agentStatus?: HerdrAgentStatus; readonly tail?: string; readonly replyTo?: string | null };
-
 export type Harness = {
-	// Holds the config's paths: repo, worktrees, claude.json, journal.db.
+	// Holds the config's paths: repo, worktrees, journal.db.
 	readonly dir: string;
 	// The Test team's clone, with origin a bare repo whose path ends in github.com/test/repo.git.
 	readonly repo: string;
@@ -122,49 +112,40 @@ export type Harness = {
 	// What Git.githubRepo reads from the clone's origin.
 	readonly githubRepo: string;
 	readonly linear: LinearFixtureShape;
-	// Sends deliveries to the current webhook server, as GitHub does, and keeps the App's delivery log.
-	readonly app: GitHubAppFixtureShape;
 	readonly github: FakeGitHubControls;
-	readonly herdr: FakeHerdrControls;
-	// The user's private chat with the bot.
-	readonly telegram: FakeTelegramControls;
-	// The Telegram id of the user, the first of telegram.allowedUserIds.
-	readonly telegramUser: number;
+	// What the service sent to Pushover.
+	readonly pushover: FakePushoverControls;
+	readonly t3: FakeT3Controls;
 	// Sends the delivery to the current webhook server, as postDelivery does with the configured secret; returns the HTTP
 	// status.
 	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
-	// One scan of the current MissedDeliveries for failed deliveries in the App fixture's log.
-	readonly scanDeliveries: Effect.Effect<void, CallError | JournalError>;
 	// One tick of the current planner, with every rule in production order.
 	readonly tick: Effect.Effect<void>;
 	readonly pausedTick: Effect.Effect<void>;
-	// A process restart: the planner, its rules, the webhook server, the delivery scan and the journal connection are
-	// built again on the same journal file, while Linear, GitHub, herdr and the repos keep their state.
+	// A process restart: the planner, its rules, the webhook server and the journal connection are built again on the
+	// same journal file, while Linear, GitHub, T3 and the repos keep their state.
 	readonly restart: Effect.Effect<void>;
-	// The first half of a restart: the service is down, so deliveries the App fixture sends fail.
+	// The first half of a restart: the service is down.
 	readonly stop: Effect.Effect<void>;
-	// Counted from this call: the nth journal write the reconciler, the webhook server or the delivery scan makes dies
+	// Counted from this call: the nth journal write the reconciler or the webhook server makes dies
 	// without being applied, as if the process crashed right before recording what it had just done.
 	readonly crashAtJournalWrite: (nth: number) => void;
-	// As the user renames a tab in herdr.
-	readonly renameTab: (tabId: string, label: string) => Effect.Effect<void>;
 	// Moves the epic in Linear as the user does.
 	readonly moveEpic: (epicId: string, state: string) => void;
 	// Whether the injected journal crash happened.
 	readonly crashed: () => boolean;
 	// Journal writes of the reconciler so far, the crashed one included.
 	readonly journalWrites: () => number;
-	// Completes once journalWrites reached n, e.g. once the chat recorded what a message asked for.
-	readonly awaitJournalWrites: (n: number) => Effect.Effect<void>;
 	readonly runs: Effect.Effect<ReadonlyArray<Run>>;
 	readonly commands: Effect.Effect<ReadonlyArray<Command>>;
 	// markerKeys of the issue's comments.
 	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
-	// The notices written for the epic or command, oldest first, with `<purpose>:<key>` and whether the chat got them.
+	// The notices written for the epic, oldest first, with `<purpose>:<key>` and whether they were posted.
 	readonly notices: (identifier: string) => ReadonlyArray<JournalNotice>;
-	// An epic in Implementing with a run as the start rule leaves it: a real worktree, a tab running Claude, a running
-	// row claimed at the current TestClock time.
-	readonly startedRun: (seed: StartedRunSeed) => Effect.Effect<{ readonly epic: Epic; readonly run: StartedRun & { readonly session: Session } }>;
+	// The worktree T3 makes for a thread launched on a new one: the epic's branch from origin's default branch.
+	readonly makeT3Worktree: (branch: string) => string;
+	// A ready epic dispatched as the reconciler does, its thread's worktree made by T3 and recorded.
+	readonly threadRun: (seed: EpicSeed) => Effect.Effect<{ readonly epic: FixtureIssue; readonly run: ThreadedRun }>;
 	// Writes the run's result file where the agent writes it.
 	readonly writeResultFile: (run: Run, contents: string) => void;
 	// Writes the Claude session's transcript where Claude Code writes it.
@@ -177,22 +158,21 @@ export type Harness = {
 	// Runs `scripts/ctl.sh <args>` as a command's agent does, through its own journal connection, and returns the lines
 	// it printed.
 	readonly ctl: (...args: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<string>, unknown>;
-	// Runs `scripts/ctl.sh hook <agent>` as an agent's hook does in a herdr pane, with the payload on stdin; returns its
-	// exit code, stdout and stderr once the service answered.
-	readonly hook: (agent: string, payload: string, paneId: string | null) => Effect.Effect<HookOutcome>;
+	// Runs `scripts/ctl.sh hook <agent>` as an agent's hook does, with the payload on stdin; returns its exit code,
+	// stdout and stderr once the service answered.
+	readonly hook: (agent: string, payload: string) => Effect.Effect<HookOutcome>;
 };
 
-export type JournalNotice = { readonly marker: string; readonly text: string; readonly sent: boolean };
+type JournalNotice = { readonly marker: string; readonly text: string; readonly sent: boolean };
 
-export type HookOutcome = { readonly code: number | null; readonly stdout: string; readonly stderr: string };
+type HookOutcome = { readonly code: number | null; readonly stdout: string; readonly stderr: string };
 
 const ctlScript = join(import.meta.dirname, '..', 'scripts', 'ctl.sh');
 
-const runHook = (stateDirectory: string, agent: string, payload: string, paneId: string | null) =>
+const runHook = (stateDirectory: string, agent: string, payload: string) =>
 	Effect.callback<HookOutcome>((resume) => {
-		const { HERDR_PANE_ID: _, ...env } = process.env;
 		const child = spawn('sh', [ctlScript, 'hook', agent], {
-			env: { ...env, HERDR_PLUGIN_STATE_DIR: stateDirectory, ...(paneId === null ? {} : { HERDR_PANE_ID: paneId }) },
+			env: { ...process.env, SAPPHIRE_AGENT_CONFIG_DIR: stateDirectory, SAPPHIRE_AGENT_STATE_DIR: stateDirectory },
 		});
 		let stdout = '';
 		let stderr = '';
@@ -222,15 +202,9 @@ const makeRepos = (dir: string) => {
 	return { origin, repo };
 };
 
-export type HarnessOptions = {
-	// Answers the chat's messages as the service does, again after every restart; main-chat turns go to a fake `claude`
-	// that answers `OK.`.
-	readonly answerChat?: boolean;
-};
-
-// Real temp git repos, the Linear and GitHub App fixture servers, the GitHub and herdr fakes and a temp-file SQLite
+// Real temp git repos, the Linear and GitHub App fixture servers, the GitHub and T3 fakes and a temp-file SQLite
 // journal, wired to the production rules and the webhook server. Needs a Scope; everything is removed when it closes.
-export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}, { answerChat = false }: HarnessOptions = {}) =>
+export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
 	Effect.gen(function* () {
 		const dir = yield* Effect.acquireRelease(
 			Effect.sync(() => mkdtempSync(join(tmpdir(), 'sapphire-agent-harness-'))),
@@ -238,16 +212,15 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		);
 		const { origin, repo } = makeRepos(dir);
 
-		writeFileSync(join(dir, 'claude.json'), '{}\n');
+		writeFileSync(join(dir, 'config.json'), JSON.stringify(testSettings(dir, settings)));
 
 		const config = AppConfig.layerTest(dir, settings);
 		const fixtures = yield* Layer.build(
-			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakeHerdr.layer, FakeTelegram.layer).pipe(Layer.provideMerge(config)),
+			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakePushover.layer, FakeT3.layer).pipe(Layer.provideMerge(config)),
 		);
 		let journalWrites = 0;
 		let crashAt = Option.none<number>();
 		let crashed = false;
-		const writesSeen = yield* SubscriptionRef.make(0);
 
 		const crashPoint = Effect.suspend(() => {
 			journalWrites += 1;
@@ -255,10 +228,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			if (Option.contains(crashAt, journalWrites)) {
 				crashed = true;
 
-				return SubscriptionRef.set(writesSeen, journalWrites).pipe(Effect.andThen(Effect.die(new Error(`injected crash before journal write ${journalWrites}`))));
+				return Effect.die(new Error(`injected crash before journal write ${journalWrites}`));
 			}
 
-			return SubscriptionRef.set(writesSeen, journalWrites);
+			return Effect.void;
 		});
 
 		const CrashingJournal = Layer.effect(
@@ -275,11 +248,6 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					addRequest: (request) => crashPoint.pipe(Effect.andThen(journal.addRequest(request))),
 					deleteRequest: (id) => crashPoint.pipe(Effect.andThen(journal.deleteRequest(id))),
 					claimRun: (run, requestIds) => crashPoint.pipe(Effect.andThen(journal.claimRun(run, requestIds))),
-					setDeliveryMark: (deliveredAt) => crashPoint.pipe(Effect.andThen(journal.setDeliveryMark(deliveredAt))),
-					putTopic: (topic) => crashPoint.pipe(Effect.andThen(journal.putTopic(topic))),
-					deleteTopic: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteTopic(epicId))),
-					setArchiveThread: (thread) => crashPoint.pipe(Effect.andThen(journal.setArchiveThread(thread))),
-					addChatSession: (messageRefs, post) => crashPoint.pipe(Effect.andThen(journal.addChatSession(messageRefs, post))),
 					addNotice: (notice) => crashPoint.pipe(Effect.andThen(journal.addNotice(notice))),
 					addSubagentHandoff: (handoff) => crashPoint.pipe(Effect.andThen(journal.addSubagentHandoff(handoff))),
 					markNoticeSent: (id) => crashPoint.pipe(Effect.andThen(journal.markNoticeSent(id))),
@@ -287,30 +255,19 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
 
-		const stack = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
+		const stack = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer).pipe(
 			Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Pause.layer))),
 			Layer.provideMerge(Planner.layer(rules).pipe(Layer.provide(Observer.layer))),
-			Layer.provideMerge(
-				Layer.mergeAll(Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer, telegramChat.pipe(Layer.provide(FakeTelegram.bot), Layer.provide(Transcriber.layerTest))),
-			),
-			Layer.provideMerge(Projects.layer),
+			Layer.provideMerge(Layer.mergeAll(Git.layer, ClaudeTranscript.layer, Comments.layer, Prompts.layer)),
+			Layer.provideMerge(Layer.mergeAll(Projects.layer, T3Projects.layer, AgentActivity.layer)),
 			Layer.provideMerge(CrashingJournal),
 			Layer.provide(Layer.succeedContext(fixtures)),
 			Layer.provide(NodeServices.layer),
 		);
 
-		const claude = yield* fakeClaude(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, () => ({ text: ['OK.'] }));
-		const claudeChat = ClaudeChat.layer.pipe(Layer.provide([claude.layer, Prompts.layer, NodeFileSystem.layer]), Layer.provide(Layer.succeedContext(fixtures)));
-
 		const build = Effect.gen(function* () {
 			const scope = yield* Scope.make();
 			const context = yield* Layer.buildWithScope(stack, scope);
-
-			Context.get(fixtures, GitHubAppFixture).setWebhookUrl(Context.get(context, WebhookServer).url);
-
-			if (answerChat) {
-				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.provide(fixtures), Effect.provide(NodeFileSystem.layer), Effect.forkIn(scope));
-			}
 
 			return { scope, context };
 		}).pipe(Effect.orDie);
@@ -331,46 +288,35 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 		const tick = (paused: boolean) => services.pipe(Effect.flatMap((context) => Context.get(context, Planner).tick({ paused })));
 
 		const linear = Context.get(fixtures, LinearFixture);
-		const herdr = Context.get(fixtures, FakeHerdr);
 		const { webhookSecret } = Context.get(fixtures, AppConfig);
 		const journal = Effect.map(services, Context.get(Journal));
 
-		const startedRun = ({ agentStatus, tail, replyTo = null, ...seed }: StartedRunSeed) =>
+		const makeT3Worktree = (branch: string) => {
+			const path = join(dir, 'worktrees', 'repo', branch.replace(/[^A-Za-z0-9._-]+/g, '-'));
+
+			git(repo, 'worktree', 'add', '--quiet', '--no-track', '-b', branch, path, 'origin/main');
+
+			return path;
+		};
+
+		const threadRun = (seed: EpicSeed) =>
 			Effect.gen(function* () {
-				const [epic] = yield* Context.get(fixtures, Linear)
-					.epics([linear.addEpic({ state: 'Implementing', ...seed }).id])
-					.pipe(Effect.orDie);
-				const context = yield* services;
-				const path = yield* Context.get(context, Git).prepareWorktree(repo, epic.branchName).pipe(Effect.orDie);
-				const prompts = Context.get(context, Prompts);
-				const tab = herdr.addTab({ label: prompts.tabLabel(epic), workspace: epic.team.name, agentStatus, tail });
-				const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
-				const run: StartedRun & { readonly session: Session } = {
-					epicId: epic.id,
-					identifier: epic.identifier,
-					teamId: epic.team.id,
-					status: 'running',
-					job: { _tag: 'orchestrate' },
-					repo,
-					branch: epic.branchName,
-					worktreePath: path,
-					tabId: tab.tabId,
-					paneId: tab.paneId,
-					session: yield* newSession(epic.identifier),
-					replyTo,
-					claimedAt: now,
-					startedAt: now,
-					agentStatus: null,
-					agentStatusSince: null,
-					nudgedAt: null,
-					tailHash: null,
-					result: null,
-					handoff: null,
-				};
+				const epic = linear.addEpic(seed);
 
-				yield* (yield* journal).putRun(run).pipe(Effect.orDie);
+				yield* tick(false);
 
-				return { epic, run };
+				const claimed = yield* journal.pipe(Effect.flatMap((found) => found.getRun(epic.id)), Effect.orDie);
+
+				if (Option.isNone(claimed) || claimed.value.threadId === null) {
+					return yield* Effect.die(new Error(`${seed.identifier} was not dispatched to T3`));
+				}
+
+				yield* Context.get(fixtures, FakeT3).setWorktreePath(claimed.value.threadId, makeT3Worktree(claimed.value.branch));
+				yield* tick(false);
+
+				const run = Option.filter(yield* journal.pipe(Effect.flatMap((found) => found.getRun(epic.id)), Effect.orDie), isThreaded);
+
+				return Option.isSome(run) ? { epic, run: run.value } : yield* Effect.die(new Error(`${seed.identifier} has no worktree recorded`));
 			});
 
 		return {
@@ -379,13 +325,10 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			origin,
 			githubRepo: 'test/repo',
 			linear,
-			app: Context.get(fixtures, GitHubAppFixture),
 			github: Context.get(fixtures, FakeGitHub),
-			herdr,
-			telegram: Context.get(fixtures, FakeTelegram),
-			telegramUser: Context.get(fixtures, AppConfig).telegram.allowedUserIds[0],
+			pushover: Context.get(fixtures, FakePushover),
+			t3: Context.get(fixtures, FakeT3),
 			deliver: (delivery: WebhookDelivery, signature?: string | null) => services.pipe(Effect.flatMap((context) => postDelivery(Context.get(context, WebhookServer).url, webhookSecret, delivery, signature))),
-			scanDeliveries: services.pipe(Effect.flatMap((context) => Context.get(context, MissedDeliveries).scan)),
 			tick: tick(false),
 			pausedTick: tick(true),
 			restart,
@@ -396,12 +339,6 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			},
 			crashed: () => crashed,
 			journalWrites: () => journalWrites,
-			awaitJournalWrites: (n) =>
-				SubscriptionRef.changes(writesSeen).pipe(
-					Stream.takeUntil((count) => count >= n),
-					Stream.runDrain,
-				),
-			renameTab: (tabId, label) => Context.get(fixtures, Herdr).renameTab(tabId, label).pipe(Effect.orDie),
 			moveEpic: (epicId, state) => {
 				const issue = linear.issue(epicId);
 				const found = testTeam.states.nodes.find((candidate) => candidate.name === state);
@@ -423,13 +360,14 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 				return rows.map(({ purpose, key, text, sent_at }) => ({ marker: `${String(purpose)}:${String(key)}`, text: String(text), sent: sent_at !== null }));
 			},
-			startedRun,
+			makeT3Worktree,
+			threadRun,
 			writeResultFile: (run, contents) => {
 				if (run.worktreePath === null) {
 					throw new Error(`${run.identifier} has no worktree`);
 				}
 
-				writeFileSync(join(git(run.worktreePath, 'rev-parse', '--absolute-git-dir'), 'herdr-result.json'), contents);
+				writeFileSync(join(git(run.worktreePath, 'rev-parse', '--absolute-git-dir'), 'sapphire-agent-result.json'), contents);
 			},
 			writeTranscript: (session, entries) => {
 				writeTranscript(Context.get(fixtures, AppConfig).env.claudeConfigDirectory, session, entries);
@@ -447,20 +385,25 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 					yield* runCtl(args).pipe(
 						Effect.provideService(Console.Console, output),
-						Effect.provide(Layer.mergeAll(Journal.layer(join(dir, 'journal.db')), Git.layer).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(Layer.succeedContext(fixtures)))),
+						Effect.provide(
+								Layer.mergeAll(T3Projects.layer.pipe(Layer.provideMerge(Journal.layer(join(dir, 'journal.db')))), Git.layer, Pause.layer, T3Config.layerTest).pipe(
+									Layer.provideMerge(NodeServices.layer),
+									Layer.provideMerge(Layer.succeedContext(fixtures)),
+								),
+							),
 					);
 
 					return (yield* output.logLines).flatMap((line) => String(line).split('\n'));
 				}),
-			hook: (agent, payload, paneId) => runHook(dir, agent, payload, paneId),
+			hook: (agent, payload) => runHook(dir, agent, payload),
 		} satisfies Harness;
 	});
 
 // Nothing observed: for planner and reconciler tests whose rules do not look at the world.
-const emptyObservation: Observation = { teams: new Map(), epics: new Map(), ready: [], tabs: [], worktrees: [] };
+export const emptyObservation: Observation = { teams: new Map(), epics: new Map(), ready: [], worktrees: [], threads: new Map() };
 
 // What Planner.layer needs besides its rules, with an observer that sees nothing and an in-memory journal.
 export const plannerDependencies = (dir: string, settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
-	Layer.mergeAll(Layer.succeed(Observer, { observe: Effect.succeed(emptyObservation) }), Journal.layer(':memory:'), Comments.layer, LinearFixture.layer).pipe(
+	Layer.mergeAll(Layer.succeed(Observer, { observe: Effect.succeed(emptyObservation) }), Journal.layer(':memory:'), Comments.layer, LinearFixture.layer, FakePushover.layer, FakeT3.layer).pipe(
 		Layer.provideMerge(AppConfig.layerTest(dir, settings)),
 	);

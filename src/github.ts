@@ -13,6 +13,8 @@ export const PullRequest = Schema.Struct({
 	url: Schema.String,
 	state: PullRequestState,
 	author: Schema.Struct({ login: Schema.String }),
+	// The commit the PR's branch pointed at last, kept by GitHub after a squash merge deleted the branch.
+	headRefOid: Schema.String,
 });
 
 export type PullRequest = typeof PullRequest.Type;
@@ -62,7 +64,7 @@ export class GitHub extends Context.Service<
 		readonly findPullRequest: (repo: string, branch: string) => Effect.Effect<Option.Option<PullRequest>, CallError>;
 		readonly replyToThread: (repo: string, threadId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
 		readonly resolveThread: (repo: string, threadId: string) => Effect.Effect<void, CallError>;
-		// A conversation comment on the PR.
+		// A conversation comment on the issue or PR.
 		readonly postComment: (repo: string, number: number, comment: MarkedComment) => Effect.Effect<void, CallError>;
 		// A thumbs-up on a comment or review, by its node id. Adding one it already has changes nothing.
 		readonly addThumbsUp: (repo: string, subjectId: string) => Effect.Effect<void, CallError>;
@@ -130,14 +132,23 @@ export class GitHub extends Context.Service<
 
 			const conversationBodies = (repo: string, number: number) =>
 				graphql(
-					Schema.Struct({ repository: Schema.Struct({ pullRequest: Schema.Struct({ comments: Bodies }) }) }),
+					Schema.Struct({ repository: Schema.Struct({ issueOrPullRequest: Schema.NullOr(Schema.Struct({ comments: Bodies })) }) }),
 					`query ConversationBodies($owner: String!, $name: String!, $number: Int!) {
 						repository(owner: $owner, name: $name) {
-							pullRequest(number: $number) { comments(last: ${maxNodes}) { totalCount nodes { body } } }
+							issueOrPullRequest(number: $number) {
+								... on Issue { comments(last: ${maxNodes}) { totalCount nodes { body } } }
+								... on PullRequest { comments(last: ${maxNodes}) { totalCount nodes { body } } }
+							}
 						}
 					}`,
 					{ ...ownerAndName(repo), number },
-				).pipe(Effect.map(({ repository }) => repository.pullRequest.comments));
+				).pipe(
+					Effect.flatMap(({ repository }) =>
+						repository.issueOrPullRequest === null
+							? Effect.fail(new Permanent({ message: `${repo}#${number} is no issue or PR` }))
+							: Effect.succeed(repository.issueOrPullRequest.comments),
+					),
+				);
 
 			// Each method is one unit under the call policy, so a retry repeats the marker or resolved check before
 			// writing again.
@@ -152,7 +163,7 @@ export class GitHub extends Context.Service<
 
 			return GitHub.of({
 				findPullRequest: (repo, branch) =>
-					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author']).pipe(
+					gh(Schema.Array(PullRequest), ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--json', 'number,url,state,author,headRefOid']).pipe(
 						Effect.map(preferredPullRequest),
 						withPolicy,
 					),

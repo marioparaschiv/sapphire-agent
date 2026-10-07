@@ -1,0 +1,14 @@
+{
+	"protocolVersion": "2025-06-18",
+	"capabilities": {
+		"logging": {},
+		"tools": {
+			"listChanged": true
+		},
+		"completions": {}
+	},
+	"serverInfo": {
+		"name": "T3 Code",
+		"version": "0.0.46-nightly.20261007.2761"
+	}
+}

@@ -1,9 +1,0 @@
-
-dev in 🌐 vps in /tmp via C v13.3.0-gcc via  v24.21.0 via 🐍 v3.12.3
-➜  printf "a\n\n\n\nb   \n\n"
-a
-
-
-
-b
-

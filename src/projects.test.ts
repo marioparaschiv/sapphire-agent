@@ -52,8 +52,8 @@ describe('Projects', () => {
 			};
 
 			assert.deepStrictEqual(first.projects, [
-				{ team: 'Telecord', repo: join(homedir(), 'telecord'), labelReposDirectory: null, thread: null },
-				{ team: 'Unbound', repo: join(homedir(), 'unbound'), labelReposDirectory: join(homedir(), 'unbound-app'), thread: null },
+				{ team: 'Telecord', repo: join(homedir(), 'telecord'), labelReposDirectory: null },
+				{ team: 'Unbound', repo: join(homedir(), 'unbound'), labelReposDirectory: join(homedir(), 'unbound-app') },
 			]);
 			assert.deepStrictEqual(first.logs, [{ level: 'INFO', message: "imported the projects Unbound, Telecord from config.json's teams" }, warning]);
 			assert.deepStrictEqual(second.projects, first.projects);
@@ -129,8 +129,9 @@ describe('sapphire project', () => {
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 
-			yield* h.ctl('project', 'remove', 'Test');
-			yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			// As the CLI recorded it before the run was claimed.
+			yield* Journal.use((journal) => journal.addRequest({ _tag: 'project-remove', team: 'Test' })).pipe(Effect.provide(Journal.layer(join(h.dir, 'journal.db'))));
 
 			assert.strictEqual(yield* refusal(h, 'project', 'remove', 'Test'), 'project Test has a run in flight; stop it first');
 

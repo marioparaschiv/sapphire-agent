@@ -29,6 +29,8 @@ export const Epic = Schema.Struct({
 	team: Schema.Struct({ id: Schema.String, name: Schema.String }),
 	state: Schema.Struct({ id: Schema.String, name: Schema.String }),
 	labels: nodes(Label),
+	// Set for a sub-issue, which is never dispatched on its own.
+	parent: Schema.NullOr(Schema.Struct({ identifier: Schema.String })),
 	// At most one sub-issue, only to know whether the epic has any.
 	children: nodes(Schema.Struct({ id: Schema.String })),
 });
@@ -39,21 +41,12 @@ export const Comment = Schema.Struct({ body: Schema.String });
 
 export type Comment = typeof Comment.Type;
 
-export const SubIssue = Schema.Struct({
-	id: Schema.String,
-	identifier: Schema.String,
-	title: Schema.String,
-	parent: Schema.Struct({ id: Schema.String }),
-	state: State,
-});
-
-export type SubIssue = typeof SubIssue.Type;
-
 const EPIC_FIELDS = `
 	id identifier title url branchName sortOrder createdAt
 	team { id name }
 	state { id name }
 	labels { nodes { id name parent { name } } }
+	parent { identifier }
 	children(first: 1) { nodes { id } }
 `;
 
@@ -80,8 +73,6 @@ const PageInfo = Schema.Struct({ hasNextPage: Schema.Boolean, endCursor: Schema.
 
 const CommentsPage = Schema.Struct({ comments: Schema.Struct({ nodes: Schema.Array(Comment), pageInfo: PageInfo }) });
 
-const SubIssuesPage = Schema.Struct({ issues: Schema.Struct({ nodes: Schema.Array(SubIssue), pageInfo: PageInfo }) });
-
 const IssueLabels = Schema.Struct({ issueLabels: nodes(Schema.Struct({ id: Schema.String, team: Schema.NullOr(Schema.Struct({ id: Schema.String })) })) });
 
 const retryAfter = (response: HttpClientResponse.HttpClientResponse) =>
@@ -106,8 +97,6 @@ export type LinearShape = {
 	readonly epics: (ids: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
 	// The issues with the given identifiers (e.g. HL-8) wherever they are now; fails Permanent for more than 250.
 	readonly epicsByIdentifier: (identifiers: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
-	// The sub-issues of every given issue.
-	readonly subIssues: (parentIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<SubIssue>, CallError>;
 	readonly moveIssue: (issueId: string, stateId: string) => Effect.Effect<void, CallError>;
 	// Posts the comment unless one on the issue carries its marker already.
 	readonly comment: (issueId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
@@ -182,29 +171,6 @@ const make = (endpoint: string) =>
 			} while (after !== null);
 
 			return comments;
-		});
-
-		const readSubIssues = Effect.fn(function* (parentIds: ReadonlyArray<string>) {
-			const subIssues: Array<SubIssue> = [];
-			let after: string | null = null;
-
-			do {
-				const { issues: page }: typeof SubIssuesPage.Type = yield* request(
-					SubIssuesPage,
-					`query SubIssues($parentIds: [ID!], $after: String) {
-						issues(first: ${MAX_PAGE_SIZE}, after: $after, filter: { parent: { id: { in: $parentIds } } }) {
-							nodes { id identifier title parent { id } state { id name type } }
-							pageInfo { hasNextPage endCursor }
-						}
-					}`,
-					{ parentIds, after },
-				);
-
-				subIssues.push(...page.nodes);
-				after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
-			} while (after !== null);
-
-			return subIssues;
 		});
 
 		const labelId = Effect.fn(function* (teamId: string, name: string) {
@@ -319,8 +285,6 @@ const make = (endpoint: string) =>
 					withPolicy,
 				);
 			},
-
-			subIssues: (parentIds) => (parentIds.length === 0 ? Effect.succeed([]) : readSubIssues(parentIds).pipe(withPolicy)),
 
 			moveIssue: (issueId, stateId) =>
 				request(

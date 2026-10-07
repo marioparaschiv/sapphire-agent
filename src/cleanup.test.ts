@@ -2,12 +2,9 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
-import { Transient } from './call-policy.ts';
 import { git, type Harness, makeHarness } from './test-harness.ts';
 
-const open = (h: Harness, tabId: string) => Option.isSome(h.herdr.tab(tabId));
-
-// A worktree as sapphire-agent (or herdr) lays it out, on a new branch from origin/main, with no run tracking it.
+// A worktree as T3 lays it out for sapphire-agent, on a new branch from origin/main, with no run tracking it.
 const untrackedWorktree = (h: Harness, branch: string) => {
 	const path = join(h.dir, 'worktrees', 'repo', branch.replace(/[^A-Za-z0-9._-]+/g, '-'));
 
@@ -16,40 +13,24 @@ const untrackedWorktree = (h: Harness, branch: string) => {
 	return path;
 };
 
+const settled = (h: Harness, threadId: string) => h.t3.thread(threadId).pipe(Effect.map(Option.map((thread) => thread.settled)));
+
 describe('cleanup', () => {
-	it.effect('once the PR is merged, closes the tab, removes the worktree and local branch, and drops the run', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness();
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle' });
-			const pullRequest = h.github.addPullRequest({ repo: h.githubRepo, branch: epic.branchName });
-
-			yield* h.tick;
-			assert.isTrue(open(h, run.tabId));
-
-			h.github.setPullRequestState(h.githubRepo, pullRequest.number, 'MERGED');
-			yield* h.tick;
-
-			assert.isFalse(open(h, run.tabId));
-			assert.deepStrictEqual(h.worktrees(), []);
-			assert.isFalse(h.hasBranch(run.branch));
-			assert.deepStrictEqual(yield* h.runs, []);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
-		}),
-	);
-
 	it.effect('leaves a working agent alone even after its PR was closed', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
-			h.github.addPullRequest({ repo: h.githubRepo, branch: epic.branchName, state: 'CLOSED' });
+			yield* h.t3.setRunStatus(run.threadId, 'running');
+			h.github.addPullRequest({ repo: h.githubRepo, branch: run.branch, state: 'CLOSED' });
 			yield* h.tick;
-			assert.isTrue(open(h, run.tabId));
+			assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(false));
 			assert.deepStrictEqual(h.worktrees(), [run.worktreePath]);
 
-			h.herdr.setAgentStatus(run.paneId, 'idle');
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
 			yield* h.tick;
-			assert.isFalse(open(h, run.tabId));
+			assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(true));
+			assert.deepStrictEqual(h.worktrees(), []);
 			assert.deepStrictEqual(yield* h.runs, []);
 		}),
 	);
@@ -57,8 +38,9 @@ describe('cleanup', () => {
 	it.effect('keeps a worktree with unpushed commits and says so once, also across restarts, until the work is pushed', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle' });
+			const { epic, run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
 			git(run.worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Sync plugin settings');
 			h.moveEpic(epic.id, 'Shipped');
 			yield* h.tick;
@@ -68,13 +50,12 @@ describe('cleanup', () => {
 
 			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['keptWorktree:0']);
 			assert.include(h.notices(epic.identifier)[0].text, `📦 **Kept TEST-10's worktree**: it has 1 unpushed commit.\n- Worktree: \`${run.worktreePath}\``);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['keptWorktree:0']);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((found) => found.status),
 				['kept'],
 			);
 			assert.isTrue(existsSync(run.worktreePath));
-			assert.isFalse(open(h, run.tabId));
 
 			git(run.worktreePath, 'push', '--quiet', 'origin', run.branch);
 			yield* h.tick;
@@ -85,21 +66,23 @@ describe('cleanup', () => {
 		}),
 	);
 
-	it.effect('finishes the cleanup after a crash between closing the tab and removing the worktree, or before dropping the run', () =>
+	it.effect('finishes the cleanup after a crash between settling the thread and recording it, or before dropping the run', () =>
 		Effect.gen(function* () {
 			const injections: ReadonlyArray<[string, (h: Harness) => void]> = [
-				['after closing the tab', (h) => h.herdr.crashAfterWrite(1, new Transient({ message: 'the process died' }))],
-				['before dropping the run', (h) => h.crashAtJournalWrite(1)],
+				['before recording the settled thread', (h) => h.crashAtJournalWrite(1)],
+				['before dropping the run', (h) => h.crashAtJournalWrite(2)],
 			];
 
 			for (const [where, inject] of injections) {
 				const h = yield* makeHarness();
-				const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle' });
+				const { epic, run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
+				yield* h.t3.setRunStatus(run.threadId, 'completed');
 				h.moveEpic(epic.id, 'Shipped');
 				inject(h);
 				yield* h.tick;
-				assert.isFalse(open(h, run.tabId), where);
+				assert.isTrue(h.crashed(), where);
+				assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(true), where);
 				assert.lengthOf(yield* h.runs, 1, where);
 
 				yield* h.restart;
@@ -109,50 +92,6 @@ describe('cleanup', () => {
 				assert.isFalse(h.hasBranch(run.branch), where);
 				assert.deepStrictEqual(yield* h.runs, [], where);
 			}
-		}),
-	);
-
-	it.effect('resolves owned tabs that no run tracks, records no session for one Claude already runs in, and never touches a user tab', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness();
-			const shipped = h.linear.addEpic({ identifier: 'TEST-20', title: 'Old run', state: 'Shipped' });
-			const working = h.linear.addEpic({ identifier: 'TEST-21', title: 'Still busy', state: 'Shipped' });
-			const active = h.linear.addEpic({ identifier: 'TEST-22', title: 'Lost track', state: 'Implementing' });
-			h.linear.addEpic({ identifier: 'TEST-23', title: 'Never started', state: 'Implementing' });
-			const idleTab = h.herdr.addTab({ label: 'TEST-20 Old run', agentStatus: 'idle' });
-			const workingTab = h.herdr.addTab({ label: 'TEST-21 Still busy', agentStatus: 'working' });
-			const activeTab = h.herdr.addTab({ label: 'TEST-22 Lost track', agentStatus: 'idle' });
-			const emptyTab = h.herdr.addTab({ label: 'TEST-23 Never started', agent: null });
-			const userTab = h.herdr.addTab({ label: 'notes', agentStatus: 'idle' });
-			const otherWorkspace = h.herdr.addTab({ label: 'TEST-20 Old run', workspace: 'personal', agentStatus: 'idle' });
-
-			yield* h.tick;
-			yield* h.restart;
-			yield* h.tick;
-
-			assert.deepStrictEqual(h.herdr.closedTabs(), [idleTab.tabId]);
-			assert.isTrue(open(h, workingTab.tabId));
-			assert.isTrue(open(h, userTab.tabId));
-			assert.isTrue(open(h, otherWorkspace.tabId));
-			assert.deepStrictEqual(h.notices(working.identifier).map(({ marker }) => marker), [`workingOrphan:${workingTab.tabId}`]);
-			assert.deepStrictEqual(h.linear.comments(working.id), []);
-			assert.deepStrictEqual(h.linear.comments(shipped.id), []);
-
-			const runs = new Map((yield* h.runs).map((run) => [run.identifier, run]));
-			const lostTrack = runs.get('TEST-22');
-			const neverStarted = runs.get('TEST-23');
-
-			assert.deepStrictEqual([...runs.keys()].toSorted(), ['TEST-22', 'TEST-23']);
-			assert.isDefined(lostTrack);
-			assert.isDefined(neverStarted);
-			assert.deepStrictEqual([lostTrack.status, lostTrack.tabId, lostTrack.session], ['running', activeTab.tabId, null]);
-			assert.deepStrictEqual([neverStarted.status, neverStarted.tabId], ['running', emptyTab.tabId]);
-			assert.isNotNull(neverStarted.session);
-			assert.deepStrictEqual(
-				h.herdr.starts().map((start) => [start.paneId, start.args]),
-				[[emptyTab.paneId, ['--session-id', neverStarted.session.id, '--name', 'test-23']]],
-			);
-			assert.strictEqual(h.linear.stateName(active.id), 'Implementing');
 		}),
 	);
 
@@ -175,9 +114,103 @@ describe('cleanup', () => {
 			assert.deepStrictEqual(h.worktrees().toSorted(), [dirtyPath, inProgressPath, unrelatedPath].toSorted());
 			assert.isFalse(h.hasBranch('mario/test-30-done-long-ago'));
 			assert.deepStrictEqual(h.notices(dirty.identifier).map(({ marker }) => marker), [`keptWorktree:${dirtyPath}`]);
-			assert.deepStrictEqual(h.linear.comments(dirty.id), []);
+			assert.deepStrictEqual(h.epicMarkers(dirty.id), [`keptWorktree:${dirtyPath}`]);
 			assert.deepStrictEqual([...h.linear.comments(done.id), ...h.linear.comments(inProgress.id)], []);
 			assert.isFalse(existsSync(donePath));
+		}),
+	);
+
+	it.effect('once the PR is merged, settles the thread, then removes the worktree and branch and drops the run', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			git(run.worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Sync plugin settings');
+			git(run.worktreePath, 'push', '--quiet', 'origin', run.branch);
+
+			const pullRequest = h.github.addPullRequest({ repo: h.githubRepo, branch: run.branch });
+
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			yield* h.tick;
+			assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(false));
+
+			h.github.setPullRequestState(h.githubRepo, pullRequest.number, 'MERGED', git(run.worktreePath, 'rev-parse', 'HEAD'));
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(true));
+			assert.deepStrictEqual(h.worktrees(), []);
+			assert.isFalse(h.hasBranch(run.branch));
+			assert.deepStrictEqual(yield* h.runs, []);
+			assert.deepStrictEqual(h.pushover.sent(), []);
+		}),
+	);
+
+	it.effect('removes the worktree of a squash-merged PR whose branch is gone from origin, and leaves a thread T3 settled as it is', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic, run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			git(run.worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Sync plugin settings');
+			git(run.worktreePath, 'push', '--quiet', 'origin', run.branch);
+
+			const head = git(run.worktreePath, 'rev-parse', 'HEAD');
+			const pullRequest = h.github.addPullRequest({ repo: h.githubRepo, branch: run.branch, headRefOid: head });
+
+			// GitHub squashes the PR onto main and deletes its branch; the next fetch prunes it.
+			git(h.origin, 'branch', '--delete', '--force', run.branch);
+			git(h.repo, 'fetch', '--quiet', '--prune', 'origin');
+			h.github.setPullRequestState(h.githubRepo, pullRequest.number, 'MERGED');
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			yield* h.t3.setSettled(run.threadId, true);
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.worktrees(), []);
+			assert.isFalse(h.hasBranch(run.branch));
+			assert.deepStrictEqual(yield* h.runs, []);
+			assert.notInclude(yield* h.t3.calls, 't3_thread_organize');
+			assert.deepStrictEqual(h.notices(epic.identifier), []);
+		}),
+	);
+
+	it.effect('keeps a worktree with unpushed work with one notice on the epic and one on the phone, leaves it while the user un-settled the thread, and removes it once pushed and settled', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic, run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			git(run.worktreePath, 'commit', '--quiet', '--allow-empty', '-m', 'Sync plugin settings');
+			h.github.addPullRequest({ repo: h.githubRepo, branch: run.branch, state: 'CLOSED' });
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(true));
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['keptWorktree:0']);
+			assert.deepStrictEqual(h.pushover.sent(), [
+				{
+					title: "Kept TEST-10's worktree",
+					message: `${run.worktreePath} has 1 unpushed commit. Push or discard that work; the worktree is removed on a later poll.`,
+					url: 'https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync',
+					priority: 'normal',
+				},
+			]);
+			assert.deepStrictEqual(
+				(yield* h.runs).map((found) => found.status),
+				['kept'],
+			);
+
+			yield* h.t3.setSettled(run.threadId, false);
+			git(run.worktreePath, 'push', '--quiet', 'origin', run.branch);
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.worktrees(), [run.worktreePath]);
+			assert.deepStrictEqual(yield* settled(h, run.threadId), Option.some(false));
+
+			yield* h.t3.setSettled(run.threadId, true);
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.worktrees(), []);
+			assert.deepStrictEqual(yield* h.runs, []);
+			assert.lengthOf(h.pushover.sent(), 1);
 		}),
 	);
 });

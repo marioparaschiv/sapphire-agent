@@ -59,7 +59,7 @@ describe('WebhookServer', () => {
 				const [command, ...others] = yield* h.commands;
 
 				assert.deepStrictEqual([command.status, command.repo, command.number, others], ['running', h.githubRepo, number, []], sent.event);
-				assert.lengthOf(h.herdr.starts(), 1, sent.event);
+				assert.lengthOf(yield* h.t3.launches, 1, sent.event);
 			}
 
 			const h = yield* makeHarness();
@@ -92,7 +92,7 @@ describe('WebhookServer', () => {
 
 			assert.deepStrictEqual(statuses, [204, 204, 204, 204]);
 			assert.deepStrictEqual(described(yield* h.commands), [['stranger', '@orchestratorbot merge this', 'ignored']]);
-			assert.deepStrictEqual(h.herdr.starts(), []);
+			assert.deepStrictEqual(yield* h.t3.launches, []);
 		}),
 	);
 
@@ -108,7 +108,7 @@ describe('WebhookServer', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual(described(yield* h.commands), [['marioparaschiv', '@orchestratorbot what is running?', 'running']]);
-			assert.lengthOf(h.herdr.starts(), 1);
+			assert.lengthOf(yield* h.t3.launches, 1);
 		}),
 	);
 
@@ -160,7 +160,7 @@ describe('WebhookServer', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual(described(yield* h.commands), [['marioparaschiv', '@orchestratorbot status', 'running']]);
-			assert.lengthOf(h.herdr.starts(), 1);
+			assert.lengthOf(yield* h.t3.launches, 1);
 		}),
 	);
 

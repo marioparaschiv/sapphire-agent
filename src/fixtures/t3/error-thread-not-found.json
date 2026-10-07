@@ -1,0 +1,9 @@
+{
+	"content": [
+		{
+			"type": "text",
+			"text": "{\"_tag\":\"OrchestratorMcpFailure\",\"code\":\"thread_not_found\",\"message\":\"Thread thread-gone is no longer available.\"}"
+		}
+	],
+	"isError": true
+}

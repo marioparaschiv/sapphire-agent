@@ -5,44 +5,71 @@ const keys = { hookEventName: 'hook_event_name', sessionId: 'session_id', agentI
 
 // Every hook payload has these; `agent_id` only when a subagent fires it.
 const hook = <Name extends string, Fields extends Schema.Struct.Fields>(name: Name, fields: Fields) =>
-	Schema.Struct({ hookEventName: Schema.Literal(name), sessionId: Schema.String, agentId: Schema.optional(Schema.String), ...fields }).pipe(Schema.encodeKeys(keys));
+	Schema.Struct({ hookEventName: Schema.Literal(name), sessionId: Schema.String, cwd: Schema.String, agentId: Schema.optional(Schema.String), ...fields }).pipe(Schema.encodeKeys(keys));
 
 // The hooks `~/.claude/settings.json` runs `sapphire hook claude` for.
 const ClaudeHook = Schema.Union([
 	hook('SessionStart', { source: SessionSource }),
 	hook('UserPromptSubmit', {}),
 	hook('Stop', {}),
-	hook('Notification', { message: Schema.String }),
-	hook('SessionEnd', { reason: Schema.String }),
-	hook('PostToolUse', { toolName: Schema.Literal('Skill'), toolInput: Schema.Struct({ skill: Schema.String }) }),
+	hook('Notification', {}),
+	hook('SessionEnd', {}),
 	hook('PostToolUse', { toolName: Schema.String }),
+	hook('PreToolUse', { toolName: Schema.String }),
+	hook('SubagentStop', {}),
 ]);
 
 type ClaudeHook = typeof ClaudeHook.Type;
 
+const FilePathInput = Schema.Struct({ filePath: Schema.String }).pipe(Schema.encodeKeys({ filePath: 'file_path' }));
+
+const NotebookPathInput = Schema.Struct({ notebookPath: Schema.String }).pipe(Schema.encodeKeys({ notebookPath: 'notebook_path' }));
+
+// The hooks the hook process answers itself for a dispatched run (`run-hooks.ts`): tool calls it guards and the turn
+// ends and notifications it sends a notice for.
+export const ClaudeRunHook = Schema.Union([
+	hook('PreToolUse', { toolName: Schema.Literal('Bash'), toolInput: Schema.Struct({ command: Schema.String }) }),
+	hook('PreToolUse', { toolName: Schema.Literals(['Write', 'Edit', 'MultiEdit']), toolInput: FilePathInput }),
+	hook('PreToolUse', { toolName: Schema.Literal('NotebookEdit'), toolInput: NotebookPathInput }),
+	hook('PreToolUse', { toolName: Schema.String }),
+	hook('Stop', {}),
+	hook('Notification', { message: Schema.String }),
+]);
+
+export type ClaudeRunHook = typeof ClaudeRunHook.Type;
+
+// The PreToolUse answer that refuses the tool call; Claude reads `reason`.
+export const denyToolUse = (reason: string) =>
+	JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+
+// The PreToolUse answer that runs the tool call without asking the user, as a supervised session otherwise would.
+export const allowToolUse = (reason: string) =>
+	JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: reason } });
+
 const toEvent = (payload: ClaudeHook): Option.Option<AgentEvent> => {
+	const { sessionId, cwd } = payload;
+
+	// A subagent's events only show it is working, but for its tool calls, which check its context.
 	if (payload.agentId !== undefined) {
-		return payload.hookEventName === 'PostToolUse' ? Option.some({ _tag: 'ToolUsed', sessionId: payload.sessionId, agentId: payload.agentId }) : Option.none();
+		return Option.some({ _tag: payload.hookEventName === 'PostToolUse' ? 'ToolUsed' : 'Acted', sessionId, cwd, agentId: payload.agentId });
 	}
 
 	switch (payload.hookEventName) {
+		case 'PreToolUse':
+		case 'SubagentStop':
+			return Option.some({ _tag: 'Acted', sessionId, cwd, agentId: null });
 		case 'SessionStart':
-			return Option.some({ _tag: 'SessionStarted', sessionId: payload.sessionId, source: payload.source });
+			return Option.some({ _tag: 'SessionStarted', sessionId, cwd, source: payload.source });
 		case 'UserPromptSubmit':
-			return Option.some({ _tag: 'TurnStarted', sessionId: payload.sessionId });
+			return Option.some({ _tag: 'TurnStarted', sessionId, cwd });
 		case 'Stop':
-			return Option.some({ _tag: 'TurnEnded', sessionId: payload.sessionId });
+			return Option.some({ _tag: 'TurnEnded', sessionId, cwd });
 		case 'Notification':
-			return Option.some({ _tag: 'Notified', sessionId: payload.sessionId, message: payload.message });
+			return Option.some({ _tag: 'Notified', sessionId, cwd });
 		case 'SessionEnd':
-			return Option.some({ _tag: 'SessionEnded', sessionId: payload.sessionId, reason: payload.reason });
+			return Option.some({ _tag: 'SessionEnded', sessionId, cwd });
 		case 'PostToolUse':
-			return Option.some(
-				'toolInput' in payload
-					? // A plugin's skill is reported as `<plugin>:<skill>`.
-						{ _tag: 'SkillInvoked', sessionId: payload.sessionId, skill: payload.toolInput.skill.slice(payload.toolInput.skill.lastIndexOf(':') + 1) }
-					: { _tag: 'ToolUsed', sessionId: payload.sessionId, agentId: null },
-			);
+			return Option.some({ _tag: 'ToolUsed', sessionId, cwd, agentId: null });
 	}
 };
 

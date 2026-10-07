@@ -1,14 +1,17 @@
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Console, Effect, FileSystem, Layer, Option, Schema } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
-import { AppConfig, toPath } from './config.ts';
+import { AppConfig, T3Config, toPath } from './config.ts';
 import { Git } from './git.ts';
-import { type Command as CommandRow, commandIdentifier, Journal, type Project, type ProjectSettings, type Request, type Run } from './journal.ts';
+import { type Command as CommandRow, commandIdentifier, Journal, journalPath, type Project, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
 import { acceptsMessages, hasRunInFlight, isInFlight, isOver } from './observation.ts';
+import { Pause } from './pause.ts';
 import { wakeFileName } from './reconciler.ts';
+import { T3 } from './t3.ts';
+import { T3Projects } from './t3-projects.ts';
 
 // What the CLI refuses, said to whoever ran it: a person, or a command's agent.
 export class Refused extends Schema.TaggedError<Refused>()('Refused', { message: Schema.String }) {}
@@ -18,7 +21,7 @@ const describeRun = (run: Run, epicState: string) =>
 		`${run.identifier} ${run.status} (${run.job._tag})`,
 		epicState,
 		`claimed ${new Date(run.claimedAt).toISOString()}`,
-		run.tabId === null ? 'no tab' : `tab ${run.tabId}`,
+		run.threadId === null ? 'no T3 thread' : `T3 thread ${run.threadId}`,
 		run.session === null ? 'no session' : `session ${run.session.name}`,
 		...(run.replyTo === null ? [] : [`reply-to ${run.replyTo}`]),
 		run.worktreePath ?? 'no worktree',
@@ -34,7 +37,7 @@ const describeCommand = (command: CommandRow) => `${commandIdentifier(command)} 
 const describeRequest = (request: Request) => {
 	switch (request._tag) {
 		case 'start':
-			return `start ${request.identifier}${request.replyTo === null ? '' : ` reply-to ${request.replyTo}`}`;
+			return `dispatch ${request.identifier}${request.replyTo === null ? '' : ` reply-to ${request.replyTo}`}`;
 		case 'stop':
 			return `stop ${request.identifier}`;
 		case 'send':
@@ -47,8 +50,6 @@ const describeRequest = (request: Request) => {
 			return `done CMD-${request.commandId}`;
 		case 'session':
 			return `session ${request.identifier}: ${request.sessionId}`;
-		case 'phase':
-			return `phase ${request.identifier}: /${request.phase}`;
 		case 'handoff':
 			return `handoff ${request.identifier}: ${request.sessionId}`;
 		case 'project-add':
@@ -91,6 +92,7 @@ const status = Command.make('status', {}, () =>
 	Effect.gen(function* () {
 		const journal = yield* Journal;
 		const linear = yield* Linear;
+		const paused = yield* Pause.use((pause) => pause.isPaused);
 		const runs = yield* journal.listRuns;
 		const epics = yield* linear.epics(runs.map((run) => run.epicId)).pipe(Effect.result);
 		const stateOf = (run: Run) =>
@@ -100,6 +102,7 @@ const status = Command.make('status', {}, () =>
 		const commands = (yield* journal.listCommands).filter((command) => command.status === 'queued' || command.status === 'claimed' || command.status === 'running');
 		const requests = yield* journal.listRequests;
 
+		yield* Console.log(`dispatching: ${paused ? 'paused' : 'active'}`);
 		yield* Console.log(describeProjects(yield* journal.listProjects));
 		yield* Console.log(runs.length === 0 ? 'no runs' : runs.map((run) => describeRun(run, stateOf(run))).join('\n'));
 
@@ -113,10 +116,26 @@ const status = Command.make('status', {}, () =>
 			yield* Console.log(requests.map(({ id, request }) => `request ${id}: ${describeRequest(request)}`).join('\n'));
 		}
 	}),
-).pipe(Command.withDescription('The projects, the runs with their epics, the commands in flight and the requests not acted on yet'));
+).pipe(Command.withDescription('Whether dispatching is paused, the projects, the runs with their epics, the commands in flight and the requests not acted on yet'));
 
-const start = Command.make(
-	'start',
+const pause = Command.make('pause', {}, () =>
+	Effect.gen(function* () {
+		yield* Pause.use((file) => file.pause);
+		yield* wake;
+		yield* Console.log('dispatching paused; runs in flight are still watched');
+	}),
+).pipe(Command.withDescription('Starts no new runs until resume; runs in flight are still watched'));
+
+const resume = Command.make('resume', {}, () =>
+	Effect.gen(function* () {
+		yield* Pause.use((file) => file.resume);
+		yield* wake;
+		yield* Console.log('dispatching resumed');
+	}),
+).pipe(Command.withDescription('Starts new runs again'));
+
+const dispatch = Command.make(
+	'dispatch',
 	{
 		epic: epicArgument,
 		replyTo: Flag.String('reply-to').pipe(
@@ -137,7 +156,11 @@ const start = Command.make(
 			const [epic] = yield* linear.epicsByIdentifier([identifier]);
 
 			if (!epic) {
-				return yield* new Refused({ message: `there is no epic ${identifier} in Linear` });
+				return yield* new Refused({ message: `there is no issue ${identifier} in Linear` });
+			}
+
+			if (epic.parent !== null) {
+				return yield* new Refused({ message: `${identifier} is a sub-issue of ${epic.parent.identifier}; dispatch ${epic.parent.identifier} instead` });
 			}
 
 			if (Option.isNone(yield* projectOf(epic.team.name))) {
@@ -164,17 +187,19 @@ const start = Command.make(
 				`${identifier} is in ${config.states.ready}${stuck ? `, but it has the ${config.labels.stuck} label, so it is not dispatched until that is removed` : '; it is dispatched once a slot is free'}`,
 			);
 		}),
-).pipe(Command.withDescription("Moves the epic to its team's ready state, so it is dispatched"));
+).pipe(Command.withDescription("Moves the top-level epic to its team's ready state, so it is dispatched"));
 
 const stop = Command.make('stop', { epic: epicArgument }, ({ epic: identifier }) =>
 	Effect.gen(function* () {
-		if (!Option.exists(yield* runOf(identifier), isInFlight)) {
+		const run = Option.filter(yield* runOf(identifier), isInFlight);
+
+		if (Option.isNone(run)) {
 			return yield* new Refused({ message: `${identifier} has no run in flight` });
 		}
 
-		yield* record({ _tag: 'stop', identifier }, `${identifier}'s run is stopped and its tab closed on the next tick`);
+		yield* record({ _tag: 'stop', identifier }, `${identifier}'s run is stopped and its T3 thread interrupted on the next tick`);
 	}),
-).pipe(Command.withDescription("Ends the epic's run and closes its tab"));
+).pipe(Command.withDescription("Ends the epic's run: interrupts its T3 thread"));
 
 const send = Command.make('send', { epic: epicArgument, message: words('message', 'What to type into the agent') }, ({ epic: identifier, message }) =>
 	Effect.gen(function* () {
@@ -182,7 +207,7 @@ const send = Command.make('send', { epic: epicArgument, message: words('message'
 			return yield* new Refused({ message: `${identifier} has no agent running` });
 		}
 
-		yield* record({ _tag: 'send', identifier, text: message }, `the message is typed into ${identifier}'s agent on the next tick`);
+		yield* record({ _tag: 'send', identifier, text: message }, `the message is sent to ${identifier}'s agent on the next tick`);
 	}),
 ).pipe(Command.withDescription("Types a message into the epic's agent"));
 
@@ -237,9 +262,9 @@ const reply = Command.make('reply', { url: Argument.String('comment-url'), text:
 			return yield* new Refused({ message: `${url} is not a comment that mentioned the bot` });
 		}
 
-		yield* record({ _tag: 'reply', commandId: command.value.id, body: text }, `the bot answers ${url} in the chat on the next tick`);
+		yield* record({ _tag: 'reply', commandId: command.value.id, body: text }, `the bot replies on ${url} on the next tick`);
 	}),
-).pipe(Command.withDescription("Answers the comment that mentioned the bot, in its author's chat with the bot"));
+).pipe(Command.withDescription('Replies as the bot on the issue or PR of the comment that mentioned it'));
 
 const done = Command.make('done', { command: Argument.String('command').pipe(Argument.withDescription('The command, e.g. CMD-3')) }, ({ command: identifier }) =>
 	Effect.gen(function* () {
@@ -253,7 +278,7 @@ const done = Command.make('done', { command: Argument.String('command').pipe(Arg
 
 		yield* record({ _tag: 'done', commandId: command.id }, `${commandIdentifier(command)} ends once its agent stops`);
 	}),
-).pipe(Command.withDescription('Says the command is done, so its tab is closed'));
+).pipe(Command.withDescription('Says the command is done, so its T3 thread is settled'));
 
 const teamArgument = Argument.String('team').pipe(Argument.withDescription('The exact name of a Linear team, e.g. Unbound'));
 
@@ -279,7 +304,7 @@ const checkRepo = (path: string) =>
 	);
 
 // Checked before the request is recorded, so a project the service applies can be dispatched from.
-const checkProject = ({ repo, labelReposDirectory }: ProjectSettings) =>
+const checkProject = ({ repo, labelReposDirectory }: Project) =>
 	checkRepo(repo).pipe(Effect.andThen(labelReposDirectory === null ? Effect.void : checkDirectory(labelReposDirectory)));
 
 const projectList = Command.make('list', {}, () =>
@@ -355,13 +380,49 @@ const project = Command.make('project').pipe(
 	Command.withDescription('Lists, adds, changes and removes the projects'),
 );
 
-const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, start, stop, send, followUp, session, reply, done, project]));
+const t3Status = Command.make('status', {}, () =>
+	Effect.gen(function* () {
+		const { t3: settings } = yield* AppConfig;
+		const { expiresAt } = yield* T3Config;
+		const t3 = yield* T3;
+		const expires = new Date(expiresAt).toISOString();
+
+		yield* t3.ping.pipe(
+			Effect.catchTag('T3Unauthorized', () => new Refused({ message: `T3 rejects the token in ${settings.tokenFile}, which expires ${expires}; run scripts/mint-t3-token.sh again` })),
+		);
+		yield* Console.log(`token: accepted, expires ${expires}`);
+
+		const projects = yield* Journal.use((journal) => journal.listProjects);
+		const projectIds = yield* Effect.forEach(projects, ({ repo }) => T3Projects.use((t3Projects) => t3Projects.projectFor(repo)));
+		// Listed after the lookups, so it has the projects they created.
+		const known = yield* t3.listProjects;
+
+		for (const [index, { team, repo, labelReposDirectory }] of projects.entries()) {
+			const projectId = projectIds[index];
+			const title = Option.match(Option.fromUndefinedOr(known.find(({ id }) => id === projectId)), { onNone: () => 'missing from T3', onSome: (found) => found.title });
+
+			yield* Console.log(`project ${team}: ${repo} is T3 project ${projectId} (${title})`);
+
+			if (labelReposDirectory !== null) {
+				const labelRepos = known.filter(({ workspaceRoot }) => dirname(toPath(workspaceRoot)) === labelReposDirectory);
+				const described = labelRepos.map(({ id, workspaceRoot }) => `${basename(workspaceRoot)} is T3 project ${id}`).join(', ');
+
+				yield* Console.log(`  label repos in ${labelReposDirectory}: ${described || 'none in T3 yet'}`);
+			}
+		}
+	}),
+).pipe(Command.withDescription("Whether T3 accepts the token and when it expires, and the T3 project of each project's repo, created if it has none"));
+
+const t3Command = Command.make('t3').pipe(Command.withSubcommands([t3Status]), Command.withDescription('The T3 Code server runs are dispatched to'));
+
+const ctl = Command.make('ctl').pipe(Command.withSubcommands([status, pause, resume, dispatch, stop, send, followUp, session, reply, done, project, t3Command]));
 
 export const runCtl = Command.runWith(ctl, { version: '0.1.0' });
 
 if (import.meta.main) {
-	const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
-	const CtlLive = Layer.mergeAll(JournalLive, Linear.layer(), Git.layer).pipe(Layer.provideMerge(AppConfig.layer), Layer.provide(FetchHttpClient.layer), Layer.provideMerge(NodeServices.layer));
+	const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(journalPath(env.stateDirectory))));
+	const T3Live = T3Projects.layer.pipe(Layer.provideMerge(T3.layer), Layer.provideMerge(T3Config.layer), Layer.provide(JournalLive));
+	const CtlLive = Layer.mergeAll(JournalLive, Linear.layer(), Git.layer, Pause.layer, T3Live).pipe(Layer.provideMerge(AppConfig.layer), Layer.provide(FetchHttpClient.layer), Layer.provideMerge(NodeServices.layer));
 
 	NodeRuntime.runMain(
 		Effect.suspend(() => runCtl(process.argv.slice(2))).pipe(

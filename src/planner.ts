@@ -4,6 +4,7 @@ import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
 import { Journal } from './journal.ts';
 import { type Observation, Observer } from './observation.ts';
+import { makeOutage } from './outages.ts';
 import { makeFlag } from './run-actions.ts';
 
 // What one rule does to one epic this tick. `identifier` (e.g. HL-9) is added to every log line as `epic`; epicId and
@@ -100,14 +101,22 @@ export class Planner extends Context.Service<
 		readonly tick: (options: { readonly paused: boolean }) => Effect.Effect<void>;
 	}
 >()('sapphire-agent/Planner') {
-	// Build with every rule module, in order: `Planner.layer(Effect.all([cleanupRule, resultsRule, ...]))`.
+	// Build with every rule module, in order: `Planner.layer(Effect.all([cleanupRule, resultsRule, ...]))`. Observing that
+	// keeps failing for flagTransientAfterSeconds is sent to Pushover.
 	static readonly layer = <E, R>(makeRules: Effect.Effect<ReadonlyArray<Rule>, E, R>) =>
 		Layer.effect(
 			Planner,
 			Effect.gen(function* () {
 				const rules = yield* makeRules;
+				const config = yield* AppConfig;
 				const observer = yield* Observer;
 				const reconcileEpic = yield* makePolicy;
+				// No rule runs without an observation, so nothing is dispatched or watched.
+				const blind = yield* makeOutage(config.flagTransientAfterSeconds, ({ error, minutes }) => ({
+					title: 'sapphire-agent cannot observe',
+					message: `Reading Linear or the journal has failed for ${minutes} min, so no epic is dispatched or watched: ${error}`,
+					priority: 'high',
+				}));
 
 				const runWork = (observation: Observation, rateLimited: Ref.Ref<boolean>) => (work: Work) =>
 					isTaskWork(work) ? work.apply.pipe(logFailure('failed'), Effect.annotateLogs({ task: work.task })) : reconcileEpic(observation, rateLimited, work);
@@ -121,7 +130,10 @@ export class Planner extends Context.Service<
 
 				const tick = ({ paused }: { readonly paused: boolean }) =>
 					Effect.gen(function* () {
-						const observation = yield* observer.observe;
+						const observation = yield* observer.observe.pipe(Effect.tapError((error) => blind.failed(error.message)));
+
+						yield* blind.recovered;
+
 						const rateLimited = yield* Ref.make(false);
 
 						for (const rule of rules.filter((candidate) => !(paused && candidate.pausable))) {

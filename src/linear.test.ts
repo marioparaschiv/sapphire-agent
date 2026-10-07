@@ -66,6 +66,7 @@ describe('Linear reads', () => {
 				team: { id: testTeam.id, name: 'Test' },
 				state: { id: stateId('Ready For Agent'), name: 'Ready For Agent' },
 				labels: { nodes: [{ id: repoLabel.id, name: 'loader-ios', parent: { name: 'repo' } }] },
+				parent: null,
 				children: { nodes: [{ id: fixture.subIssues(withSlices.id)[0].id }] },
 			});
 
@@ -85,7 +86,7 @@ describe('Linear reads', () => {
 		}).pipe(withFixture),
 	);
 
-	it.effect('reads epics by identifier, skipping identifiers no issue has', () =>
+	it.effect('reads issues by identifier with their parent, skipping identifiers no issue has', () =>
 		Effect.gen(function* () {
 			const fixture = yield* LinearFixture;
 			const linear = yield* Linear;
@@ -94,13 +95,14 @@ describe('Linear reads', () => {
 			fixture.addEpic({ identifier: 'TEST-11', title: 'Not asked for' });
 			fixture.addEpic({ identifier: 'TEST-12', title: 'Running', state: 'Implementing' });
 
-			const epics = yield* linear.epicsByIdentifier(['TEST-12', 'TEST-10', 'TEST-99']);
+			const epics = yield* linear.epicsByIdentifier(['TEST-12', 'TEST-10', 'TEST-99', 'TEST-101']);
 
 			assert.deepStrictEqual(
-				epics.map((epic) => [epic.identifier, epic.state.name]),
+				epics.map((epic) => [epic.identifier, epic.state.name, epic.parent]),
 				[
-					['TEST-10', 'Shipped'],
-					['TEST-12', 'Implementing'],
+					['TEST-10', 'Shipped', null],
+					['TEST-101', 'To Do', { identifier: 'TEST-10' }],
+					['TEST-12', 'Implementing', null],
 				],
 			);
 		}).pipe(withFixture),

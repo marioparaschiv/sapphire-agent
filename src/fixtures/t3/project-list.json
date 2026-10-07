@@ -1,0 +1,122 @@
+{
+	"content": [
+		{
+			"type": "text",
+			"text": "{\"projects\":[{\"id\":\"599d8e00-4dc0-4c36-aa38-4ebb6c02bad5\",\"title\":\"hivemind.ts\",\"workspaceRoot\":\"/home/dev/hivemind.ts\",\"repositoryIdentity\":{\"canonicalKey\":\"github.com/marioparaschiv/hivemind.ts\",\"locator\":{\"source\":\"git-remote\",\"remoteName\":\"origin\",\"remoteUrl\":\"https://github.com/marioparaschiv/hivemind.ts\"},\"rootPath\":\"/home/dev/hivemind.ts\",\"displayName\":\"marioparaschiv/hivemind.ts\",\"provider\":\"github\",\"owner\":\"marioparaschiv\",\"name\":\"hivemind.ts\"},\"faviconPath\":null,\"projectIcon\":null,\"defaultModelSelection\":null,\"defaultThreadEnvMode\":null,\"autoPull\":false,\"scripts\":[],\"createdAt\":\"2026-10-07T02:54:08.817Z\",\"updatedAt\":\"2026-10-07T02:54:08.817Z\",\"deletedAt\":null},{\"id\":\"1975f15c-daea-4ef5-92e8-4854c122d672\",\"title\":\"telecord\",\"workspaceRoot\":\"/home/dev/telecord\",\"repositoryIdentity\":{\"canonicalKey\":\"github.com/marioparaschiv/telecord\",\"locator\":{\"source\":\"git-remote\",\"remoteName\":\"origin\",\"remoteUrl\":\"https://github.com/marioparaschiv/telecord\"},\"rootPath\":\"/home/dev/telecord\",\"displayName\":\"marioparaschiv/telecord\",\"provider\":\"github\",\"owner\":\"marioparaschiv\",\"name\":\"telecord\"},\"faviconPath\":null,\"projectIcon\":null,\"defaultModelSelection\":null,\"defaultThreadEnvMode\":null,\"autoPull\":false,\"scripts\":[],\"createdAt\":\"2026-10-07T02:54:09.234Z\",\"updatedAt\":\"2026-10-07T02:54:09.234Z\",\"deletedAt\":null},{\"id\":\"8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd\",\"title\":\"sapphire-agent\",\"workspaceRoot\":\"/home/dev/sapphire-agent\",\"repositoryIdentity\":{\"canonicalKey\":\"github.com/marioparaschiv/sapphire-agent\",\"locator\":{\"source\":\"git-remote\",\"remoteName\":\"origin\",\"remoteUrl\":\"https://github.com/marioparaschiv/sapphire-agent.git\"},\"rootPath\":\"/home/dev/sapphire-agent\",\"displayName\":\"marioparaschiv/sapphire-agent\",\"provider\":\"github\",\"owner\":\"marioparaschiv\",\"name\":\"sapphire-agent\"},\"faviconPath\":null,\"projectIcon\":null,\"defaultModelSelection\":null,\"defaultThreadEnvMode\":null,\"autoPull\":false,\"scripts\":[],\"createdAt\":\"2026-10-07T02:54:09.390Z\",\"updatedAt\":\"2026-10-07T02:54:09.390Z\",\"deletedAt\":null},{\"id\":\"mcp:62f28e99-2299-4397-a5a1-ddf95b681ee0\",\"title\":\"unbound\",\"workspaceRoot\":\"/home/dev/unbound\",\"repositoryIdentity\":{\"canonicalKey\":\"github.com/marioparaschiv/unbound\",\"locator\":{\"source\":\"git-remote\",\"remoteName\":\"origin\",\"remoteUrl\":\"https://github.com/marioparaschiv/unbound.git\"},\"rootPath\":\"/home/dev/unbound\",\"displayName\":\"marioparaschiv/unbound\",\"provider\":\"github\",\"owner\":\"marioparaschiv\",\"name\":\"unbound\"},\"faviconPath\":\"/home/dev/unbound/assets/logo.png\",\"projectIcon\":null,\"defaultModelSelection\":null,\"defaultThreadEnvMode\":null,\"autoPull\":false,\"scripts\":[],\"createdAt\":\"2026-10-07T07:18:04.084Z\",\"updatedAt\":\"2026-10-07T07:18:04.084Z\",\"deletedAt\":null}],\"nextCursor\":null}"
+		}
+	],
+	"structuredContent": {
+		"projects": [
+			{
+				"id": "599d8e00-4dc0-4c36-aa38-4ebb6c02bad5",
+				"title": "hivemind.ts",
+				"workspaceRoot": "/home/dev/hivemind.ts",
+				"repositoryIdentity": {
+					"canonicalKey": "github.com/marioparaschiv/hivemind.ts",
+					"locator": {
+						"source": "git-remote",
+						"remoteName": "origin",
+						"remoteUrl": "https://github.com/marioparaschiv/hivemind.ts"
+					},
+					"rootPath": "/home/dev/hivemind.ts",
+					"displayName": "marioparaschiv/hivemind.ts",
+					"provider": "github",
+					"owner": "marioparaschiv",
+					"name": "hivemind.ts"
+				},
+				"faviconPath": null,
+				"projectIcon": null,
+				"defaultModelSelection": null,
+				"defaultThreadEnvMode": null,
+				"autoPull": false,
+				"scripts": [],
+				"createdAt": "2026-10-07T02:54:08.817Z",
+				"updatedAt": "2026-10-07T02:54:08.817Z",
+				"deletedAt": null
+			},
+			{
+				"id": "1975f15c-daea-4ef5-92e8-4854c122d672",
+				"title": "telecord",
+				"workspaceRoot": "/home/dev/telecord",
+				"repositoryIdentity": {
+					"canonicalKey": "github.com/marioparaschiv/telecord",
+					"locator": {
+						"source": "git-remote",
+						"remoteName": "origin",
+						"remoteUrl": "https://github.com/marioparaschiv/telecord"
+					},
+					"rootPath": "/home/dev/telecord",
+					"displayName": "marioparaschiv/telecord",
+					"provider": "github",
+					"owner": "marioparaschiv",
+					"name": "telecord"
+				},
+				"faviconPath": null,
+				"projectIcon": null,
+				"defaultModelSelection": null,
+				"defaultThreadEnvMode": null,
+				"autoPull": false,
+				"scripts": [],
+				"createdAt": "2026-10-07T02:54:09.234Z",
+				"updatedAt": "2026-10-07T02:54:09.234Z",
+				"deletedAt": null
+			},
+			{
+				"id": "8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd",
+				"title": "sapphire-agent",
+				"workspaceRoot": "/home/dev/sapphire-agent",
+				"repositoryIdentity": {
+					"canonicalKey": "github.com/marioparaschiv/sapphire-agent",
+					"locator": {
+						"source": "git-remote",
+						"remoteName": "origin",
+						"remoteUrl": "https://github.com/marioparaschiv/sapphire-agent.git"
+					},
+					"rootPath": "/home/dev/sapphire-agent",
+					"displayName": "marioparaschiv/sapphire-agent",
+					"provider": "github",
+					"owner": "marioparaschiv",
+					"name": "sapphire-agent"
+				},
+				"faviconPath": null,
+				"projectIcon": null,
+				"defaultModelSelection": null,
+				"defaultThreadEnvMode": null,
+				"autoPull": false,
+				"scripts": [],
+				"createdAt": "2026-10-07T02:54:09.390Z",
+				"updatedAt": "2026-10-07T02:54:09.390Z",
+				"deletedAt": null
+			},
+			{
+				"id": "mcp:62f28e99-2299-4397-a5a1-ddf95b681ee0",
+				"title": "unbound",
+				"workspaceRoot": "/home/dev/unbound",
+				"repositoryIdentity": {
+					"canonicalKey": "github.com/marioparaschiv/unbound",
+					"locator": {
+						"source": "git-remote",
+						"remoteName": "origin",
+						"remoteUrl": "https://github.com/marioparaschiv/unbound.git"
+					},
+					"rootPath": "/home/dev/unbound",
+					"displayName": "marioparaschiv/unbound",
+					"provider": "github",
+					"owner": "marioparaschiv",
+					"name": "unbound"
+				},
+				"faviconPath": "/home/dev/unbound/assets/logo.png",
+				"projectIcon": null,
+				"defaultModelSelection": null,
+				"defaultThreadEnvMode": null,
+				"autoPull": false,
+				"scripts": [],
+				"createdAt": "2026-10-07T07:18:04.084Z",
+				"updatedAt": "2026-10-07T07:18:04.084Z",
+				"deletedAt": null
+			}
+		],
+		"nextCursor": null
+	},
+	"isError": false
+}

@@ -1,23 +1,19 @@
 import { Context, Layer, Option } from 'effect';
 import { AppConfig, type AppConfigShape } from './config.ts';
-import { oneLine } from './herdr.ts';
-import type { AgentStatus, Job, RunStatus } from './journal.ts';
+import type { Job, RunStatus } from './journal.ts';
 import { type MarkedComment, type Marker, type Notice, withMarker } from './markers.ts';
 import type { ResultFile } from './result-file.ts';
 
-// The run a flag is about, as the user sees it in herdr.
-export type FlaggedRun = {
+// The run a flag is about, as the user sees it in T3.
+export type FlaggedThread = {
 	readonly identifier: string;
 	readonly claimedAt: number;
-	readonly tabLabel: string;
-	readonly tabId: string;
-	readonly paneId: string;
+	readonly threadTitle: string;
+	readonly threadId: string;
 	readonly worktreePath: string;
 	readonly branch: string;
-	readonly agentStatus: AgentStatus;
+	// When the thread, its timeline or its subagents last changed.
 	readonly agentStatusSince: number;
-	// The last lines of the pane.
-	readonly tail: string;
 	readonly now: number;
 };
 
@@ -26,15 +22,15 @@ const maxItems = 5;
 
 const tailLines = 10;
 
-// The end of a pane's tail a message shows.
-export const shownTail = (tail: string) => tail.split('\n').slice(-tailLines).join('\n');
+// The end of an error a message shows.
+const shownTail = (text: string) => text.split('\n').slice(-tailLines).join('\n');
 
-export const itemList = (items: ReadonlyArray<string>) =>
+const oneLine = (text: string) => text.trim().replace(/\s*[\r\n]+\s*/g, ' ');
+
+const itemList = (items: ReadonlyArray<string>) =>
 	items.length <= maxItems ? items.map((item) => `- ${item}`) : [...items.slice(0, maxItems - 1).map((item) => `- ${item}`), `- …and ${items.length - maxItems + 1} more`];
 
 const minutesBetween = (from: number, to: number) => Math.round((to - from) / 60_000);
-
-const withoutPrefix = (text: string, prefix: string) => (text.startsWith(prefix) ? text.slice(prefix.length).trimStart() : text);
 
 const codeBlock = (text: string) => `\`\`\`\n${text.replaceAll('```', "'''")}\n\`\`\``;
 
@@ -53,25 +49,6 @@ const notice = (marker: Marker, { title, items = [], body, block = Option.none()
 	text: [title, ...itemList(items), ...(body === undefined ? [] : [body]), ...Option.match(block, { onNone: () => [], onSome: (text) => [codeBlock(shownTail(text))] }), `Next: ${next}`].join('\n'),
 });
 
-const describeStop = (status: AgentStatus, minutes: number) => {
-	switch (status) {
-		case 'idle':
-			return `has been idle for ${minutes} min`;
-		case 'done':
-			return `finished its turn ${minutes} min ago`;
-		case 'blocked':
-			return `has been waiting for input for ${minutes} min`;
-		case 'working':
-			return `has shown no new output for ${minutes} min, even after a nudge`;
-		case 'exited':
-			return 'exited';
-		case 'vanished':
-			return 'disappeared (its tab was closed or herdr restarted)';
-		case 'unknown':
-			return 'stopped';
-	}
-};
-
 // Why the replies do not answer exactly the dispatched threads, once each; none when they do.
 export const replyMismatch = (threadIds: ReadonlyArray<string>, replies: ResultFile['replies']): Option.Option<string> => {
 	const replied = replies.map((reply) => reply.threadId);
@@ -89,48 +66,32 @@ const make = (config: AppConfigShape) => {
 	const startOver = `Remove the \`${config.labels.stuck}\` label and move the epic back to ${config.states.ready} to start over.`;
 	const retryAfterFix = `Fix the problem, then remove the \`${config.labels.stuck}\` label to retry.`;
 
-	const runFlag = (run: FlaggedRun, title: string, purpose: 'awaitingInput' | 'stale' | 'error', key: string, next: string) =>
-		notice(
-			{ identifier: run.identifier, purpose, key },
-			{
-				title: `${title}: the agent ${describeStop(run.agentStatus, minutesBetween(run.agentStatusSince, run.now))} without writing its result file.`,
-				items: [`Tab: \`${run.tabLabel}\` (${run.tabId}), pane ${run.paneId}`, `Worktree: \`${run.worktreePath}\` on \`${run.branch}\``, `Label: \`${config.labels.stuck}\``],
-				block: Option.some(run.tail),
-				next,
-			},
-		);
-
 	return {
-		awaitingInput: (run: FlaggedRun) => runFlag(run, `⏸ **${run.identifier} needs input**`, 'awaitingInput', `${run.claimedAt}-${run.agentStatusSince}`, 'Answer the agent in its tab.'),
-
-		// The question a run sent its reply-to session by message, which no one answered, while the epic has no topic to ask in.
-		messageQuestion: (run: Pick<FlaggedRun, 'identifier' | 'claimedAt' | 'agentStatusSince'> & { readonly message: string }) =>
+		// A T3 run whose thread, timeline and subagents stayed the same even after a nudge.
+		threadStale: (run: FlaggedThread & { readonly nudgedAt: number }) =>
 			notice(
-				{ identifier: run.identifier, purpose: 'awaitingInput', key: `${run.claimedAt}-${run.agentStatusSince}` },
-				{ title: `❓ **${run.identifier} asks:** ${withoutPrefix(oneLine(run.message), `${run.identifier}:`)}`, next: 'Answer the agent in its tab.' },
+				{ identifier: run.identifier, purpose: 'stale', key: `${run.claimedAt}-${run.nudgedAt}` },
+				{
+					title: `🔴 **${run.identifier} looks stuck**: its T3 thread shows no progress for ${minutesBetween(run.agentStatusSince, run.now)} min, even after a nudge, and no result file.`,
+					items: [`T3 thread: \`${run.threadTitle}\` (${run.threadId})`, `Worktree: \`${run.worktreePath}\` on \`${run.branch}\``, `Label: \`${config.labels.stuck}\``],
+					next: 'Look at the agent in its T3 thread.',
+				},
 			),
 
-		stale: (run: FlaggedRun & { readonly nudgedAt: number }) =>
-			runFlag(run, `🔴 **${run.identifier} looks stuck**`, 'stale', `${run.claimedAt}-${run.nudgedAt}`, 'Look at the agent in its tab.'),
-
-		// The agent exited or vanished without a result file.
-		agentStopped: (run: FlaggedRun) => runFlag(run, `🔴 **${run.identifier} stopped**`, 'error', `${run.claimedAt}`, startOver),
-
-		overCap: (run: { readonly identifier: string; readonly claimedAt: number; readonly status: RunStatus; readonly tail: string; readonly now: number }) =>
+		overCap: (run: { readonly identifier: string; readonly claimedAt: number; readonly status: RunStatus; readonly now: number }) =>
 			notice(
 				{ identifier: run.identifier, purpose: 'overCap', key: `${run.claimedAt}` },
 				{
 					title: `⏰ **${run.identifier} is over the time cap**: ${minutesBetween(run.claimedAt, run.now)} min, cap ${Math.round(config.maxRunSeconds / 60)} min. It keeps running.`,
 					items: [`Status: \`${run.status}\``],
-					block: Option.some(run.tail),
-					next: 'Look at the agent in its tab.',
+					next: 'Look at the agent in its T3 thread.',
 				},
 			),
 
-		startFailed: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string; readonly tail: Option.Option<string> }) =>
+		startFailed: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string }) =>
 			notice(
 				{ identifier: run.identifier, purpose: 'startFailed', key: `${run.claimedAt}` },
-				{ title: `🔴 **${run.identifier} didn't start**: ${run.error}`, block: run.tail, next: retryAfterFix },
+				{ title: `🔴 **${run.identifier} didn't start**: ${run.error}`, next: retryAfterFix },
 			),
 
 		invalidResult: (run: { readonly identifier: string; readonly claimedAt: number; readonly error: string }) =>
@@ -189,16 +150,6 @@ const make = (config: AppConfigShape) => {
 				{ title: `🔴 **A call for ${failure.identifier} failed for good**: ${failure.error}`, next: retryAfterFix },
 			),
 
-		workingOrphan: (tab: { readonly identifier: string; readonly tabLabel: string; readonly tabId: string; readonly paneId: string }) =>
-			notice(
-				{ identifier: tab.identifier, purpose: 'workingOrphan', key: tab.tabId },
-				{
-					title: `👻 **An untracked agent works on ${tab.identifier}**: no run of the epic tracks it.`,
-					items: [`Tab: \`${tab.tabLabel}\` (${tab.tabId}), pane ${tab.paneId}`],
-					next: 'Let it finish; its tab is closed once it stops working.',
-				},
-			),
-
 		summary: (run: { readonly identifier: string; readonly claimedAt: number; readonly summary: string; readonly url: string }) =>
 			notice(
 				{ identifier: run.identifier, purpose: 'summary', key: `${run.claimedAt}` },
@@ -227,22 +178,15 @@ const make = (config: AppConfigShape) => {
 		addressed: (run: { readonly identifier: string; readonly claimedAt: number }) =>
 			withMarker('Addressed your concerns inline.', { identifier: run.identifier, purpose: 'addressed', key: `${run.claimedAt}` }),
 
-		// What a command's agent asked to say.
-		commandReply: (reply: { readonly identifier: string; readonly requestId: number; readonly url: string; readonly body: string }): Notice => ({
-			marker: { identifier: reply.identifier, purpose: 'commandReply', key: `${reply.requestId}` },
-			text: [`💬 **${reply.identifier}** on ${reply.url}`, reply.body].join('\n'),
-		}),
+		// What a command's agent asked to say, posted by the bot.
+		commandReply: (reply: { readonly identifier: string; readonly requestId: number; readonly body: string }) =>
+			withMarker(reply.body, { identifier: reply.identifier, purpose: 'commandReply', key: `${reply.requestId}` }),
 
-		// A command that ended without its agent saying it was done.
-		commandFailed: (command: { readonly identifier: string; readonly claimedAt: number; readonly url: string; readonly reason: string; readonly tail: Option.Option<string> }) =>
-			notice(
+		// Posted by the bot when a command ends without its agent saying it was done.
+		commandFailed: (command: { readonly identifier: string; readonly claimedAt: number; readonly reason: string }) =>
+			withMarker(
+				[`**sapphire-agent** (\`error\`): ${command.identifier} ${command.reason}, so I stopped it.`, '', `Mention @${config.bot.login} again to retry.`].join('\n'),
 				{ identifier: command.identifier, purpose: 'commandFailed', key: `${command.claimedAt}` },
-				{
-					title: `🔴 **${command.identifier} ${command.reason}**, so I stopped it.`,
-					items: [`Comment: ${command.url}`],
-					block: command.tail,
-					next: `Mention @${config.bot.login} again to retry.`,
-				},
 			),
 
 		// The orchestrator was asked for a handoff doc and ended its turn without writing it.
@@ -250,9 +194,9 @@ const make = (config: AppConfigShape) => {
 			notice(
 				{ identifier: handoff.identifier, purpose: 'handoffMissing', key: handoff.sessionId },
 				{
-					title: `📝 **${handoff.identifier} wrote no handoff doc** ${Math.round(config.startTimeoutSeconds / 60)} min after its context passed ${config.handoffAtTokens} tokens, so its session was not cleared.`,
+					title: `📝 **${handoff.identifier} wrote no handoff doc** ${Math.round(config.startTimeoutSeconds / 60)} min after its context passed ${config.handoffAtTokens} tokens, so no new thread took over.`,
 					items: [`Expected: \`${handoff.path}\``],
-					next: 'Look at the agent in its tab.',
+					next: 'Look at the agent in its T3 thread.',
 				},
 			),
 
@@ -263,14 +207,14 @@ const make = (config: AppConfigShape) => {
 				{
 					title: `🧠 **A subagent of ${subagent.identifier} did not hand off**: its context is at ${subagent.tokens} tokens. It keeps running.`,
 					items: [`Agent: \`${subagent.agentId}\``],
-					next: 'Look at the agent in its tab.',
+					next: 'Look at the agent in its T3 thread.',
 				},
 			),
 	} satisfies Record<string, (...args: never) => MarkedComment | Notice>;
 };
 
-// Every notice, and the few Linear and PR comments, sapphire-agent writes, each with its marker (see markers.ts for the
-// keys).
+// Every notice on a Linear epic, and the few other Linear and GitHub comments, sapphire-agent writes, each with its
+// marker (see markers.ts for the keys).
 export class Comments extends Context.Service<Comments, ReturnType<typeof make>>()('sapphire-agent/Comments') {
 	static readonly layer = Layer.effect(Comments, AppConfig.useSync(make));
 }

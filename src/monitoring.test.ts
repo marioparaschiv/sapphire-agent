@@ -1,195 +1,31 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Option } from 'effect';
+import { Clock, Effect } from 'effect';
 import { TestClock } from 'effect/testing';
-import { transcriptEntries as entries } from './claude-transcript-fixture.ts';
-import { type Harness, makeHarness, type StartedRunSeed } from './test-harness.ts';
+import { type Harness, makeHarness } from './test-harness.ts';
 
 const statuses = (h: Harness) => h.runs.pipe(Effect.map((runs) => runs.map((run) => run.status)));
 
 const markers = (h: Harness, identifier: string) => h.notices(identifier).map(({ marker }) => marker);
 
-const question = '⏺ The sync needs a conflict rule.\n\n❯ Which should win, local or remote?';
+const nudges = (h: Harness) => h.t3.sends.pipe(Effect.map((sends) => sends.map(({ message, mode }) => [message, mode])));
 
-const replyTo = 'hivemind-ts-59';
-
-// A run started by another Claude session, whose agent asked that session a question by message and ended its turn.
-const askedByMessage = (h: Harness, seed: Partial<StartedRunSeed> = {}) =>
-	Effect.gen(function* () {
-		const started = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: `⏺ SendMessage(${replyTo})\n  ⎿  Sent`, replyTo, ...seed });
-		const session = { id: started.run.session.id, cwd: started.run.worktreePath };
-		const asked = [
-			...entries.prompt(session, `/orchestrate Linear epic TEST-10 autonomously, reply-to ${replyTo}`),
-			...entries.text(session, 'The sync needs a conflict rule before I can write the merge step.'),
-			...entries.sentMessage(session, replyTo, 'TEST-10: Which should win on a conflict,\nlocal or remote?'),
-			...entries.text(session, `Asked ${replyTo}; waiting for the reply.`),
-		];
-
-		h.writeTranscript(session, asked);
-
-		return { ...started, session, asked };
-	});
+// Ticks once a minute for `minutes`, calling `each` before every tick, as the poll and T3's wakes do.
+const minuteTicks = (h: Harness, minutes: number, each: Effect.Effect<void> = Effect.void) =>
+	Effect.forEach(
+		Array.from({ length: minutes }),
+		() => TestClock.adjust('1 minute').pipe(Effect.andThen(each), Effect.andThen(h.tick)),
+		{ discard: true },
+	);
 
 describe('monitoring', () => {
-	it.effect('flags an agent that sits quiet without a result file and without a topic as awaitingInput, once, also across a restart', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
-			const { epic, run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: question });
-
-			yield* h.tick;
-			yield* TestClock.adjust('179 seconds');
-			yield* h.tick;
-			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
-
-			// idle to done is still quiet, so the timer keeps running.
-			h.herdr.setAgentStatus(run.paneId, 'done');
-			yield* TestClock.adjust('1 second');
-			yield* h.tick;
-			yield* h.restart;
-			yield* TestClock.adjust('1 minute');
-			yield* h.tick;
-
-			const [flag] = h.notices('TEST-10');
-
-			assert.deepStrictEqual(markers(h, 'TEST-10'), ['awaitingInput:0-0']);
-			assert.match(flag.text, /^⏸ \*\*TEST-10 needs input\*\*: the agent finished its turn 3 min ago without writing its result file\./);
-			assert.include(flag.text, 'Which should win, local or remote?');
-			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
-			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
-			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
-		}),
-	);
-
-	it.effect("asks the question of a run in its epic's topic, once, also across a restart", () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180 });
-			const { epic } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', agentStatus: 'idle', tail: question });
-
-			h.telegram.write({ from: h.telegramUser, text: 'hi' });
-			yield* h.tick;
-			yield* TestClock.adjust('3 minutes');
-			yield* h.tick;
-			yield* h.restart;
-			yield* TestClock.adjust('1 minute');
-			yield* h.tick;
-
-			const [topic] = h.telegram.topics().filter(({ title }) => title !== '📁 Test');
-
-			assert.deepStrictEqual(
-				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
-				[{ text: `⏸ The agent waits for input\n${question}\nWrite here to answer; it is typed into the agent.`, topicId: topic.topicId }],
-			);
-			assert.deepStrictEqual([h.linear.comments(epic.id), h.linear.labelNames(epic.id), h.notices('TEST-10')], [[], [], []]);
-			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
-			assert.strictEqual(topic.title, '⏸ TEST-10 Plugin settings sync');
-		}),
-	);
-
-	it.effect("asks the requesting session first, then the epic's topic with the agent's message", () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-
-			h.telegram.write({ from: h.telegramUser, text: 'hi' });
-
-			const { epic } = yield* askedByMessage(h);
-
-			yield* h.tick;
-			yield* TestClock.adjust('599 seconds');
-			yield* h.tick;
-			assert.deepStrictEqual([h.telegram.sent, yield* statuses(h)], [[], ['running']]);
-
-			yield* TestClock.adjust('1 second');
-			yield* h.tick;
-
-			const [topic] = h.telegram.topics().filter(({ title }) => title !== '📁 Test');
-
-			assert.deepStrictEqual(
-				h.telegram.sent.map(({ text, topicId }) => ({ text, topicId })),
-				[{ text: '⏸ The agent waits for input\nTEST-10: Which should win on a conflict,\nlocal or remote?\nWrite here to answer; it is typed into the agent.', topicId: topic.topicId }],
-			);
-			assert.deepStrictEqual([h.linear.comments(epic.id), h.linear.labelNames(epic.id), h.notices('TEST-10')], [[], [], []]);
-			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
-		}),
-	);
-
-	it.effect('nudges an agent whose pane stopped changing once, then flags it as stale, keeping its tab', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ staleAfterSeconds: 600, nudgeGraceSeconds: 600 });
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '✻ Thinking… (12s · ↓ 3.1k tokens)' });
-
-			yield* h.tick;
-			// Only the spinner and its counters change: that is not progress.
-			h.herdr.setTail(run.paneId, '✶ Thinking… (58s · ↓ 3.4k tokens)');
-			yield* TestClock.adjust('10 minutes');
-			yield* h.tick;
-			yield* h.tick;
-			yield* h.restart;
-			yield* h.tick;
-
-			assert.deepStrictEqual(h.herdr.sentKeys(), [{ paneId: run.paneId, keys: ['esc'] }]);
-			assert.deepStrictEqual(h.herdr.prompts(), [{ paneId: run.paneId, text: 'continue' }]);
-			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
-
-			yield* TestClock.adjust('10 minutes');
-			yield* h.tick;
-			yield* h.restart;
-			yield* h.tick;
-
-			assert.deepStrictEqual(markers(h, 'TEST-10'), [`stale:0-${10 * 60_000}`]);
-			assert.match(h.notices('TEST-10')[0].text, /^🔴 \*\*TEST-10 looks stuck\*\*: the agent has shown no new output for 20 min, even after a nudge/);
-			assert.deepStrictEqual(yield* statuses(h), ['stale']);
-			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
-			assert.strictEqual(h.herdr.sentKeys().length, 1);
-
-			// New output ends the stale episode.
-			h.herdr.setTail(run.paneId, '⏺ Wrote src/sync/merge.ts');
-			yield* h.tick;
-			assert.deepStrictEqual(yield* statuses(h), ['running']);
-		}),
-	);
-
-	it.effect('flags an agent that exited as error once, then closes its tab', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '$ claude\nSegmentation fault' });
-
-			h.herdr.setAgent(run.paneId, null);
-			yield* h.tick;
-			yield* h.restart;
-			yield* h.tick;
-
-			assert.deepStrictEqual(markers(h, 'TEST-10'), ['error:0']);
-			assert.match(h.notices('TEST-10')[0].text, /^🔴 \*\*TEST-10 stopped\*\*: the agent exited without writing its result file[\s\S]*Segmentation fault/);
-			assert.deepStrictEqual(h.herdr.closedTabs(), [run.tabId]);
-			assert.deepStrictEqual(yield* statuses(h), ['error']);
-		}),
-	);
-
-	it.effect('flags an agent whose tab vanished as error once', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
-
-			h.herdr.removeTab(run.tabId);
-			yield* h.tick;
-			yield* h.tick;
-
-			assert.deepStrictEqual(markers(h, 'TEST-10'), ['error:0']);
-			assert.include(h.notices('TEST-10')[0].text, 'disappeared (its tab was closed or herdr restarted)');
-			assert.deepStrictEqual(yield* statuses(h), ['error']);
-		}),
-	);
-
 	it.effect('flags a run over the wall-clock cap once and lets it keep running', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ maxRunSeconds: 3600 });
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
-			for (const file of ['api', 'cache', 'client', 'config', 'db', 'events', 'hooks', 'index', 'jobs', 'merge', 'queue', 'routes', 'schema', 'store', 'sync']) {
-				h.herdr.setTail(run.paneId, `⏺ Wrote src/sync/${file}.ts`);
-				yield* h.tick;
-				yield* TestClock.adjust('5 minutes');
-			}
+			yield* h.t3.setRunStatus(run.threadId, 'running');
+
+			yield* Effect.forEach(Array.from({ length: 15 }), () => h.t3.addActivity(run.threadId).pipe(Effect.andThen(h.tick), Effect.andThen(TestClock.adjust('5 minutes'))), { discard: true });
 
 			yield* h.restart;
 			yield* h.tick;
@@ -197,104 +33,158 @@ describe('monitoring', () => {
 			assert.deepStrictEqual(markers(h, 'TEST-10'), ['overCap:0']);
 			assert.match(h.notices('TEST-10')[0].text, /^⏰ \*\*TEST-10 is over the time cap\*\*: 60 min, cap 60 min\. It keeps running\./);
 			assert.deepStrictEqual(yield* statuses(h), ['running']);
-			assert.isTrue(Option.isSome(h.herdr.tab(run.tabId)));
 		}),
 	);
 
-	it.effect('reads the agent state from herdr on every poll, so a dropped event changes nothing', () =>
+	it.effect('does not nudge a run whose only activity is a long-running subagent', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
-			yield* h.tick;
-			// No AgentStatusChanged event is emitted: it was dropped.
-			h.herdr.setAgentStatus(run.paneId, 'done');
-			yield* TestClock.adjust('30 seconds');
-			yield* h.tick;
+			yield* h.t3.setRunStatus(run.threadId, 'running');
 
-			const [tracked] = yield* h.runs;
+			const subagent = yield* h.t3.addSubagent(run.threadId, 'Slice 2 of TEST-10', 'running');
 
-			assert.deepStrictEqual([tracked.agentStatus, tracked.agentStatusSince], ['done', 30_000]);
+			yield* minuteTicks(h, 30, h.t3.addActivity(subagent));
+
+			assert.deepStrictEqual(yield* nudges(h), []);
+			assert.deepStrictEqual(yield* statuses(h), ['running']);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
 		}),
 	);
 
-	it.effect('leaves a run that asked by message alone for staleAfterSeconds, then, without a topic, flags its question in one line, once, also across a restart', () =>
+	it.effect('counts a timeline item that keeps changing as progress', () =>
 		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { epic } = yield* askedByMessage(h);
+			const h = yield* makeHarness();
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
+			yield* h.t3.setRunStatus(run.threadId, 'running');
+			yield* h.t3.addActivity(run.threadId);
+			yield* minuteTicks(h, 25, h.t3.updateLastItem(run.threadId));
+
+			assert.deepStrictEqual(yield* nudges(h), []);
+		}),
+	);
+
+	it.effect('nudges a run idle everywhere once after staleAfterSeconds, then flags it stale once and tells Pushover once after nudgeGraceSeconds, until it moves again', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic, run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			yield* h.t3.setRunStatus(run.threadId, 'running');
+			yield* h.t3.addActivity(run.threadId);
 			yield* h.tick;
 			yield* TestClock.adjust('599 seconds');
 			yield* h.tick;
+			assert.deepStrictEqual(yield* nudges(h), []);
 
-			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
-			assert.deepStrictEqual(h.linear.labelNames(epic.id), []);
-			assert.deepStrictEqual([h.herdr.sentKeys(), h.herdr.prompts()], [[], []]);
+			yield* TestClock.adjust('1 second');
+			yield* h.tick;
+			yield* h.tick;
+			assert.deepStrictEqual(yield* nudges(h), [['continue', 'restart']]);
+
+			const [nudged] = yield* h.runs;
+
+			assert.deepStrictEqual([nudged.status, nudged.nudgedAt, nudged.threadRunId], ['running', 600_000, `run:thread:${run.threadId}:ordinal:2`]);
+
+			yield* TestClock.adjust('599 seconds');
+			yield* h.tick;
 			assert.deepStrictEqual(yield* statuses(h), ['running']);
 
 			yield* TestClock.adjust('1 second');
 			yield* h.tick;
-			yield* h.restart;
+			yield* minuteTicks(h, 5);
+
+			assert.deepStrictEqual(yield* nudges(h), [['continue', 'restart']]);
+			assert.deepStrictEqual(yield* statuses(h), ['stale']);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['stale:0-600000']);
+			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
+			assert.match(h.notices('TEST-10')[0].text, /^🔴 \*\*TEST-10 looks stuck\*\*: its T3 thread shows no progress for 20 min, even after a nudge, and no result file\.\n- T3 thread: `TEST-10 Plugin settings sync` \(thread-\d+\)\n/);
+			assert.deepStrictEqual(h.pushover.sent(), [
+				{
+					title: 'TEST-10 looks stuck',
+					message: 'No progress in T3 thread "TEST-10 Plugin settings sync" for 20 min, even after a nudge. The epic is flagged.',
+					url: 'https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync',
+					priority: 'normal',
+				},
+			]);
+
+			yield* h.t3.addActivity(run.threadId);
 			yield* h.tick;
 
 			assert.deepStrictEqual(
-				h.notices('TEST-10').map(({ marker, text }) => [marker, text]),
-				[['awaitingInput:0-0', '❓ **TEST-10 asks:** Which should win on a conflict, local or remote?\nNext: Answer the agent in its tab.']],
+				(yield* h.runs).map(({ status, nudgedAt }) => [status, nudgedAt]),
+				[['running', null]],
 			);
-			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
-			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
 		}),
 	);
 
-	it.effect('stops waiting for staleAfterSeconds once the reply comes by message, and flags the run as awaitingInput as before', () =>
+	it.effect('tells Pushover once that a run waits on a question, and does not nudge it', () =>
 		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { session, asked } = yield* askedByMessage(h);
+			const h = yield* makeHarness();
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
+			yield* h.t3.setRunStatus(run.threadId, 'running');
+			yield* h.t3.setPendingRequests(run.threadId, 1);
 			yield* h.tick;
-			yield* TestClock.adjust('5 minutes');
-			yield* h.tick;
+			yield* minuteTicks(h, 40);
 
+			assert.deepStrictEqual(yield* nudges(h), []);
+			assert.deepStrictEqual(yield* statuses(h), ['running']);
 			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
-
-			h.writeTranscript(session, [...asked, ...entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.')]);
-			yield* h.tick;
-
-			const [flagged] = h.notices('TEST-10');
-
-			assert.isTrue(flagged.text.startsWith('⏸ **TEST-10 needs input**'));
-			assert.deepStrictEqual(markers(h, 'TEST-10'), ['awaitingInput:0-0']);
-			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
+			assert.deepStrictEqual(h.pushover.sent(), [
+				{ title: 'TEST-10 needs input', message: 'A question or approval waits in T3 thread "TEST-10 Plugin settings sync".', url: 'https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync', priority: 'normal' },
+			]);
 		}),
 	);
 
-	it.effect('asks after staleAfterSeconds when that comes before awaitingInputAfterSeconds', () =>
+	it.effect('does not nudge a run whose thread stopped while its background subagent keeps calling tools, and nudges, flags and tells Pushover once the calls stop', () =>
 		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 600, staleAfterSeconds: 180 });
+			const h = yield* makeHarness();
+			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const sessionId = '6f1c2e9a-4b7d-4c3e-8a5f-0d2b9e1c7a43';
+			// What Claude Code sends before a background subagent's Bash call in the run's worktree.
+			const subagentToolCall = h
+				.hook(
+					'claude',
+					JSON.stringify({
+						session_id: sessionId,
+						transcript_path: `/home/dev/.claude/projects/${run.worktreePath.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}.jsonl`,
+						cwd: run.worktreePath,
+						permission_mode: 'bypassPermissions',
+						hook_event_name: 'PreToolUse',
+						tool_name: 'Bash',
+						tool_input: { command: 'npm test', description: 'Run the tests' },
+						tool_use_id: 'toolu_01HkqZ3vYb7mJ8xWn2pQ4rT5',
+						agent_id: 'a4f29c81d03e5b7a6',
+						agent_type: 'general-purpose',
+					}),
+				)
+				.pipe(Effect.tap((outcome) => Effect.sync(() => assert.deepStrictEqual(outcome, { code: 0, stdout: '', stderr: '' }))));
 
-			yield* askedByMessage(h);
-			yield* h.tick;
-			yield* TestClock.adjust('180 seconds');
-			yield* h.tick;
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			yield* subagentToolCall;
+			yield* minuteTicks(h, 30, Clock.currentTimeMillis.pipe(Effect.flatMap((now) => (now % 300_000 === 0 ? subagentToolCall : Effect.void))));
 
-			assert.isTrue(h.notices('TEST-10')[0].text.startsWith('❓ **TEST-10 asks:** Which should win on a conflict, local or remote?'));
-		}),
-	);
+			assert.deepStrictEqual(yield* nudges(h), []);
+			assert.deepStrictEqual(yield* statuses(h), ['running']);
 
-	it.effect('flags a run with a reply-to as awaitingInput as before once its message was answered', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness({ awaitingInputAfterSeconds: 180, staleAfterSeconds: 600 });
-			const { session, asked } = yield* askedByMessage(h, { tail: question });
+			// A restart forgets the calls it saw, and gives the run a fresh stall period instead of a nudge.
+			yield* minuteTicks(h, 3);
+			yield* h.restart;
+			yield* minuteTicks(h, 9);
+			assert.deepStrictEqual(yield* nudges(h), []);
 
-			h.writeTranscript(session, [...asked, ...entries.peerMessage(session, replyTo, 'TEST-10: Remote wins.'), ...entries.text(session, 'The sync needs a second conflict rule.')]);
-			yield* h.tick;
-			yield* TestClock.adjust('3 minutes');
-			yield* h.tick;
+			yield* minuteTicks(h, 1);
+			assert.deepStrictEqual(yield* nudges(h), [['continue', 'restart']]);
 
-			assert.deepStrictEqual(markers(h, 'TEST-10'), ['awaitingInput:0-0']);
-			assert.include(h.notices('TEST-10')[0].text, 'Which should win, local or remote?');
-			assert.deepStrictEqual(yield* statuses(h), ['awaitingInput']);
+			yield* minuteTicks(h, 10);
+			assert.deepStrictEqual(yield* statuses(h), ['stale']);
+			assert.deepStrictEqual(markers(h, 'TEST-10'), ['stale:0-2580000']);
+			assert.deepStrictEqual(
+				h.pushover.sent().map(({ title }) => title),
+				['TEST-10 looks stuck'],
+			);
 		}),
 	);
 });

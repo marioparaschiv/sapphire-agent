@@ -1,91 +1,23 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { TestClock } from 'effect/testing';
-import { Transient } from './call-policy.ts';
-import { type Harness, makeHarness } from './test-harness.ts';
-
-const ownedTabs = (h: Harness) => h.herdr.tabs().filter((tab) => /^[A-Z]+-\d+ /.test(tab.label));
-
-// The run as dispatch leaves it, ready to compare across harnesses.
-const started = (h: Harness) =>
-	Effect.gen(function* () {
-		const runs = yield* h.runs;
-
-		return {
-			runs: runs.map((run) => [run.identifier, run.status, run.worktreePath, run.tabId === null ? null : 'tab']),
-			worktrees: h.worktrees(),
-			tabs: ownedTabs(h).map((tab) => [tab.label, Option.getOrNull(tab.agent), tab.agentStatus]),
-			starts: h.herdr.starts().map((start) => start.name),
-		};
-	});
+import { git, makeHarness } from './test-harness.ts';
 
 describe('dispatch', () => {
-	it.effect('starts a ready epic: one worktree, one tab running Claude on /orchestrate, the epic in Implementing', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness();
-			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
-
-			yield* h.tick;
-
-			const worktree = join(h.dir, 'worktrees', 'repo', 'mario-test-10-plugin-settings-sync');
-			const [tab] = ownedTabs(h);
-			const [run] = yield* h.runs;
-
-			assert.isNotNull(run.session);
-			assert.strictEqual(run.session.name, 'test-10');
-			assert.match(run.session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-			assert.deepStrictEqual(yield* started(h), {
-				runs: [['TEST-10', 'running', worktree, 'tab']],
-				worktrees: [worktree],
-				tabs: [['TEST-10 Plugin settings sync', 'claude', 'working']],
-				starts: ['test-10'],
-			});
-			assert.deepStrictEqual(h.herdr.starts(), [
-				{
-					paneId: tab.paneId,
-					name: 'test-10',
-					prompt: '/orchestrate Linear epic TEST-10 autonomously',
-					args: ['--session-id', run.session.id, '--name', 'test-10'],
-				},
-			]);
-			assert.strictEqual(tab.workspace, 'Test');
-			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
-			assert.isTrue(JSON.parse(readFileSync(join(h.dir, 'claude.json'), 'utf8')).projects[worktree].hasTrustDialogAccepted);
-
-			yield* h.tick;
-			assert.deepStrictEqual(h.herdr.starts().length, 1);
-		}),
-	);
-
-	it.effect('starts an epic without sub-issues on /orchestrate inline', () =>
-		Effect.gen(function* () {
-			const h = yield* makeHarness();
-			const epic = h.linear.addEpic({ identifier: 'TEST-11', title: 'Fix the file leak', subIssues: 0 });
-
-			yield* h.tick;
-
-			assert.deepStrictEqual(
-				h.herdr.starts().map((start) => start.prompt),
-				['/orchestrate Linear epic TEST-11 inline autonomously'],
-			);
-			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
-		}),
-	);
-
-	it.effect('claims an epic started with --reply-to replying to that session, as the newest start asked, and drops its start requests', () =>
+	it.effect('claims an epic dispatched with --reply-to replying to that session, as the newest dispatch asked, and drops its start requests', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ maxInFlight: 3 });
 
 			h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync', state: 'To Do' });
 			h.linear.addEpic({ identifier: 'TEST-11', title: 'Fix the file leak', state: 'To Do', subIssues: 0 });
 			h.linear.addEpic({ identifier: 'TEST-12', title: 'Rename the config', state: 'To Do' });
-			yield* h.ctl('start', 'TEST-10', '--reply-to', 'planning');
-			yield* h.ctl('start', 'TEST-11', '--reply-to', 'planning');
-			yield* h.ctl('start', 'TEST-11', '--reply-to', 'triage');
-			yield* h.ctl('start', 'TEST-12', '--reply-to', 'planning');
-			yield* h.ctl('start', 'TEST-12');
+			yield* h.ctl('dispatch', 'TEST-10', '--reply-to', 'planning');
+			yield* h.ctl('dispatch', 'TEST-11', '--reply-to', 'planning');
+			yield* h.ctl('dispatch', 'TEST-11', '--reply-to', 'triage');
+			yield* h.ctl('dispatch', 'TEST-12', '--reply-to', 'planning');
+			yield* h.ctl('dispatch', 'TEST-12');
 			yield* h.tick;
 
 			assert.deepStrictEqual(
@@ -97,7 +29,7 @@ describe('dispatch', () => {
 				],
 			);
 			assert.deepStrictEqual(
-				h.herdr.starts().map((start) => start.prompt),
+				(yield* h.t3.launches).map(({ message }) => message),
 				[
 					'/orchestrate Linear epic TEST-10 autonomously, reply-to planning',
 					'/orchestrate Linear epic TEST-11 inline autonomously, reply-to triage',
@@ -107,87 +39,12 @@ describe('dispatch', () => {
 
 			const status = yield* h.ctl('status');
 
-			assert.include(status[1], 'session test-10, reply-to planning, ');
-			assert.notInclude(status[3], 'reply-to');
+			assert.include(status[2], 'session test-10, reply-to planning, ');
+			assert.notInclude(status[4], 'reply-to');
 			assert.deepStrictEqual(
 				status.filter((line) => line.startsWith('request')),
 				[],
 			);
-		}),
-	);
-
-	it.effect('resumes after a crash before any journal write without a second worktree, tab or start, in the session it was claimed with', () =>
-		Effect.gen(function* () {
-			const crashPoints: Array<number> = [];
-
-			for (let nth = 1; ; nth += 1) {
-				const h = yield* makeHarness();
-				const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
-
-				// The workspace exists already, as in production.
-				h.herdr.addTab({ label: 'notes', agent: null });
-				h.crashAtJournalWrite(nth);
-				yield* h.tick;
-
-				if (!h.crashed()) {
-					break;
-				}
-
-				crashPoints.push(nth);
-
-				const claimed = (yield* h.runs).map((run) => run.session);
-
-				yield* h.restart;
-				yield* h.tick;
-				yield* h.tick;
-
-				const [run] = yield* h.runs;
-
-				assert.isNotNull(run.session);
-				assert.deepStrictEqual(claimed, nth === 1 ? [] : [run.session], `crash before journal write ${nth}`);
-				assert.deepStrictEqual(h.herdr.starts().map(({ args }) => args), [['--session-id', run.session.id, '--name', 'test-10']], `crash before journal write ${nth}`);
-
-				const { runs, worktrees, tabs, starts } = yield* started(h);
-
-				assert.deepStrictEqual(
-					{ runs: runs.map(([identifier, status]) => [identifier, status]), worktrees: worktrees.length, tabs, starts },
-					{ runs: [['TEST-10', 'running']], worktrees: 1, tabs: [['TEST-10 Plugin settings sync', 'claude', 'working']], starts: ['test-10'] },
-					`crash before journal write ${nth}`,
-				);
-				assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
-				assert.deepStrictEqual(
-					h.herdr.tabs().map((tab) => tab.label),
-					['notes', 'TEST-10 Plugin settings sync'],
-				);
-				assert.deepStrictEqual(h.herdr.closedTabs(), [], `crash before journal write ${nth}`);
-			}
-
-			// The claim, the worktree, the tab and the confirmed start each end with a journal write.
-			assert.deepStrictEqual(crashPoints, [1, 2, 3, 4]);
-		}),
-	);
-
-	it.effect('resumes after a crash right after opening the tab or starting Claude', () =>
-		Effect.gen(function* () {
-			// With the workspace in place, the herdr writes of a start are: create the tab, start Claude.
-			for (const nth of [1, 2]) {
-				const h = yield* makeHarness();
-
-				h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
-				h.herdr.addTab({ label: 'notes', agent: null });
-				h.herdr.crashAfterWrite(nth, new Transient({ message: 'herdr went away' }));
-				yield* h.tick;
-				yield* h.restart;
-				yield* h.tick;
-
-				const { runs, worktrees, tabs, starts } = yield* started(h);
-
-				assert.deepStrictEqual(
-					{ runs: runs.map(([identifier, status]) => [identifier, status]), worktrees: worktrees.length, tabs, starts },
-					{ runs: [['TEST-10', 'running']], worktrees: 1, tabs: [['TEST-10 Plugin settings sync', 'claude', 'working']], starts: ['test-10'] },
-					`crash after herdr write ${nth}`,
-				);
-			}
 		}),
 	);
 
@@ -205,10 +62,14 @@ describe('dispatch', () => {
 			);
 			assert.strictEqual(h.linear.stateName(second.id), 'Ready For Agent');
 
-			// The first agent exits: its run is flagged as error, which frees its slot.
-			const [tab] = ownedTabs(h);
+			// The first agent stops with an invalid result file: its run is flagged as error, which frees its slot.
+			const [run] = yield* h.runs;
+			const worktreePath = h.makeT3Worktree(run.branch);
 
-			h.herdr.setAgent(tab.paneId, null);
+			assert.isNotNull(run.threadId);
+			yield* h.t3.setWorktreePath(run.threadId, worktreePath);
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			h.writeResultFile({ ...run, worktreePath }, '{ "summary": ');
 			yield* h.tick;
 
 			assert.deepStrictEqual(
@@ -236,7 +97,7 @@ describe('dispatch', () => {
 			yield* TestClock.adjust('1 second');
 			yield* h.tick;
 			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
-			assert.strictEqual(h.herdr.starts()[0].prompt, '/orchestrate Linear epic TEST-10 autonomously');
+			assert.strictEqual((yield* h.t3.launches)[0].message, '/orchestrate Linear epic TEST-10 autonomously');
 		}),
 	);
 
@@ -253,19 +114,15 @@ describe('dispatch', () => {
 		}),
 	);
 
-	it.effect('flags a run that is not confirmed running within the start timeout, once', () =>
+	it.effect('flags a run whose thread is not launched within the start timeout, once', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ startTimeoutSeconds: 300 });
 			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
-			const herdrDown = new Transient({ message: 'herdr tab create: server_not_running' });
 
-			h.herdr.addTab({ label: 'notes', agent: null });
-
-			for (let tick = 0; tick < 3; tick += 1) {
-				h.herdr.failWrite(1, herdrDown);
-				yield* h.tick;
-				yield* TestClock.adjust('100 seconds');
-			}
+			yield* h.t3.rejectToken(true);
+			yield* h.tick;
+			yield* TestClock.adjust('299 seconds');
+			yield* h.tick;
 
 			assert.deepStrictEqual(h.notices(epic.identifier), []);
 			assert.deepStrictEqual(
@@ -273,40 +130,218 @@ describe('dispatch', () => {
 				['claimed'],
 			);
 
-			yield* h.tick;
-			yield* TestClock.adjust('100 seconds');
+			yield* h.t3.rejectToken(false);
+			yield* TestClock.adjust('1 second');
 			yield* h.tick;
 			yield* h.restart;
 			yield* h.tick;
 
 			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['startFailed:0']);
 			assert.match(h.notices(epic.identifier)[0].text, /^🔴 \*\*TEST-10 didn't start\*\*: the agent was not confirmed running within 300 s/);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['startFailed:0']);
 			assert.deepStrictEqual(h.linear.labelNames(epic.id), ['agent-stuck']);
 			assert.deepStrictEqual(
 				(yield* h.runs).map((run) => run.status),
 				['error'],
 			);
-			assert.deepStrictEqual(h.herdr.starts(), []);
+			assert.deepStrictEqual(yield* h.t3.launches, []);
 			assert.strictEqual(h.linear.stateName(epic.id), 'Ready For Agent');
 		}),
 	);
-
-	it.effect('flags a start where Claude does not come up, with the pane tail', () =>
+	it.effect('starts a ready epic as one full-access T3 thread on /orchestrate in a new worktree of its branch, and records the worktree once T3 made it', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
-			h.herdr.setStartBehaviour('no-agent');
+			yield* h.tick;
+
+			const [project] = yield* h.t3.projects;
+			const [run] = yield* h.runs;
+
+			assert.deepStrictEqual(project.workspaceRoot, h.repo);
+			assert.deepStrictEqual(yield* h.t3.launches, [
+				{
+					projectId: project.id,
+					title: 'TEST-10 Plugin settings sync',
+					message: '/orchestrate Linear epic TEST-10 autonomously',
+					workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: 'mario/test-10-plugin-settings-sync', startFromOrigin: true },
+					runtimeMode: 'full-access',
+				},
+			]);
+			assert.isNotNull(run.threadId);
+			assert.deepStrictEqual([run.status, run.threadRunId, run.worktreePath], ['running', `run:thread:${run.threadId}:ordinal:1`, null]);
+			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
+
+			const path = h.makeT3Worktree(run.branch);
+
+			yield* h.t3.setWorktreePath(run.threadId, path);
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((found) => [found.status, found.threadId, found.worktreePath]),
+				[['running', run.threadId, path]],
+			);
+			assert.lengthOf(yield* h.t3.launches, 1);
+		}),
+	);
+
+	it.effect('starts an epic without sub-issues on /orchestrate inline, and one with a worktree already on its branch in that worktree', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+
+			h.linear.addEpic({ identifier: 'TEST-11', title: 'Fix the file leak', subIssues: 0 });
+			const path = h.makeT3Worktree('mario/test-11-fix-the-file-leak');
+
+			writeFileSync(join(git(path, 'rev-parse', '--absolute-git-dir'), 'sapphire-agent-result.json'), '{"summary":"An earlier run.","replies":[],"flags":[]}');
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.t3.launches).map(({ message, workspaceStrategy }) => [message, workspaceStrategy]),
+				[['/orchestrate Linear epic TEST-11 inline autonomously', { type: 'existing_worktree', worktreePath: path, branch: 'mario/test-11-fix-the-file-leak' }]],
+			);
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.status, run.worktreePath]),
+				[['running', path]],
+			);
+			assert.isFalse(existsSync(join(git(path, 'rev-parse', '--absolute-git-dir'), 'sapphire-agent-result.json')));
+		}),
+	);
+
+	it.effect('launches one thread when the process dies at any journal write of the start, finding the launched thread by its title after the restart', () =>
+		Effect.gen(function* () {
+			const crashPoints: Array<number> = [];
+
+			for (let nth = 1; ; nth += 1) {
+				const h = yield* makeHarness();
+				const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+				h.crashAtJournalWrite(nth);
+				yield* h.tick;
+
+				if (!h.crashed()) {
+					break;
+				}
+
+				crashPoints.push(nth);
+				yield* h.restart;
+				yield* h.tick;
+				yield* h.tick;
+
+				const launches = yield* h.t3.launches;
+				const [run] = yield* h.runs;
+
+				assert.lengthOf(launches, 1, `crash before journal write ${nth}`);
+				assert.isNotNull(run.threadId);
+				assert.isTrue(Option.isSome(yield* h.t3.thread(run.threadId)), `crash before journal write ${nth}`);
+				assert.deepStrictEqual([run.status, run.threadRunId], ['running', `run:thread:${run.threadId}:ordinal:1`], `crash before journal write ${nth}`);
+				assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
+			}
+
+			// The claim, the launched thread and the confirmed start each end with a journal write.
+			assert.deepStrictEqual(crashPoints, [1, 2, 3]);
+		}),
+	);
+
+	it.effect('keeps a run in flight across a restart without a second thread, and a new claim after it ended launches a new one', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			yield* h.tick;
+
+			const [before] = yield* h.runs;
+
+			yield* h.restart;
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* h.runs, [before]);
+			assert.lengthOf(yield* h.t3.launches, 1);
+
+			assert.isNotNull(before.threadId);
+			yield* h.t3.setRunStatus(before.threadId, 'failed');
+			h.moveEpic(epic.id, 'Ready For Agent');
+			yield* TestClock.adjust('1 second');
+			yield* h.tick;
+
+			const [after] = yield* h.runs;
+
+			assert.lengthOf(yield* h.t3.launches, 2);
+			assert.notStrictEqual(after.threadId, before.threadId);
+			assert.strictEqual(after.status, 'running');
+		}),
+	);
+
+	it.effect('fails the start once when T3 refuses the launch, leaving the epic in Ready for a retry', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			yield* h.t3.setLaunchOutcome({ code: 'runtime_mode_escalation_denied', message: 'The token may not launch full-access threads.' });
+			yield* h.tick;
 			yield* h.tick;
 
 			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['startFailed:0']);
-			assert.match(h.notices(epic.identifier)[0].text, /Claude did not start in \S+: no agent is running/);
-			assert.deepStrictEqual(h.linear.comments(epic.id), []);
+			assert.include(h.notices(epic.identifier)[0].text, 'T3 refused t3_thread_launch: The token may not launch full-access threads. (runtime_mode_escalation_denied)');
 			assert.deepStrictEqual(
-				(yield* h.runs).map((run) => run.status),
-				['error'],
+				(yield* h.runs).map((run) => [run.status, run.threadId]),
+				[['error', null]],
 			);
+			assert.lengthOf(yield* h.t3.launches, 1);
+			assert.notInclude(yield* h.t3.calls, 't3_thread_interrupt');
+			assert.strictEqual(h.linear.stateName(epic.id), 'Ready For Agent');
+		}),
+	);
+
+	it.effect('fails the start of a thread whose run ended at once, and interrupts the thread', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			yield* h.t3.setLaunchOutcome({ status: 'failed' });
+			yield* h.tick;
+
+			const [run] = yield* h.runs;
+
+			assert.include(h.notices(epic.identifier)[0].text, `the run of T3 thread ${run.threadId} ended at once: failed`);
+			assert.deepStrictEqual(run.status, 'error');
+			assert.include(yield* h.t3.calls, 't3_thread_interrupt');
+			assert.strictEqual(h.linear.stateName(epic.id), 'Ready For Agent');
+		}),
+	);
+
+	it.effect("reads the result file only once the thread's run completed, then posts it and ends the run", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			yield* h.tick;
+
+			const [run] = yield* h.runs;
+			const path = h.makeT3Worktree(run.branch);
+
+			assert.isNotNull(run.threadId);
+			yield* h.t3.setWorktreePath(run.threadId, path);
+			yield* h.t3.setRunStatus(run.threadId, 'running');
+			h.github.addPullRequest({ repo: h.githubRepo, branch: run.branch, author: 'marioparaschiv' });
+			writeFileSync(join(git(path, 'rev-parse', '--absolute-git-dir'), 'sapphire-agent-result.json'), JSON.stringify({ summary: 'Plugin settings now sync.', replies: [], flags: [] }));
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((found) => [found.status, found.result]),
+				[['running', null]],
+			);
+
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((found) => [found.status, found.worktreePath, found.result?.summary]),
+				[['ended', path, 'Plugin settings now sync.']],
+			);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['pullRequestOpened:https://github.com/test/repo/pull/1', 'summary:0']);
+			assert.strictEqual(h.linear.stateName(epic.id), 'To Review');
 		}),
 	);
 });
