@@ -21,7 +21,7 @@ import { Prompts } from './prompts.ts';
 import { Reconciler } from './reconciler.ts';
 import { telegramChat } from './telegram.ts';
 import { FakeTelegram } from './telegram-fake.ts';
-import { plannerDependencies } from './test-harness.ts';
+import { collectLogs, plannerDependencies } from './test-harness.ts';
 import { Transcriber } from './transcription.ts';
 
 // The chat as the service runs it, over the Telegram fake, a fake `claude` for project topics, the manager with the
@@ -91,16 +91,6 @@ const refOf = (chat: Effect.Success<ReturnType<typeof makeChat>>, messageId: num
 
 // What the user wrote, as the manager reads it.
 const userInput = (chat: Effect.Success<ReturnType<typeof makeChat>>, messageId: number, text: string) => `Message ${refOf(chat, messageId)} from the user:\n${text}`;
-
-// What the messages logged, without the rest of each log line.
-const collectLogs = () => {
-	const logs: Array<{ level: string; message: unknown }> = [];
-	const logger = Logger.map(Logger.formatStructured, ({ level, message }) => {
-		logs.push({ level, message });
-	});
-
-	return { logs, layer: Logger.layer([logger]) };
-};
 
 describe('main chat', () => {
 	it.effect('hands each message to the manager as it arrives, a second one while the first is still being worked on, and sends only what the manager passes to send_message', () =>

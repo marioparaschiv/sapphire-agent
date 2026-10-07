@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem, NodeServices } from '@effect/platform-node';
-import { Console, Context, Effect, Exit, Layer, Option, Scope, Stream, SubscriptionRef } from 'effect';
+import { Console, Context, Effect, Exit, Layer, Logger, Option, Scope, Stream, SubscriptionRef } from 'effect';
 import { TestConsole } from 'effect/testing';
 import { AgentEventServer } from './agent-event-server.ts';
 import type { CallError } from './call-policy.ts';
@@ -473,6 +473,16 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 // Nothing observed: for planner and reconciler tests whose rules do not look at the world.
 const emptyObservation: Observation = { teams: new Map(), epics: new Map(), ready: [], tabs: [], worktrees: [] };
+
+// What the messages logged, without the rest of each log line.
+export const collectLogs = () => {
+	const logs: Array<{ level: string; message: unknown }> = [];
+	const logger = Logger.map(Logger.formatStructured, ({ level, message }) => {
+		logs.push({ level, message });
+	});
+
+	return { logs, layer: Logger.layer([logger]) };
+};
 
 // What Planner.layer needs besides its rules, with an observer that sees nothing and an in-memory journal.
 export const plannerDependencies = (dir: string, settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>

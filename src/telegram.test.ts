@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
-import { type Cause, Effect, Exit, Fiber, Layer, Logger, Queue, Stream } from 'effect';
+import { type Cause, Effect, Exit, Fiber, Layer, Queue, Stream } from 'effect';
 import { TestClock } from 'effect/testing';
 import { Chat } from './chat.ts';
 import { Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { telegramChat } from './telegram.ts';
 import { FakeTelegram } from './telegram-fake.ts';
+import { collectLogs } from './test-harness.ts';
 import { Transcriber } from './transcription.ts';
 
 const chatWith = (config: Layer.Layer<AppConfig>, transcriber: Layer.Layer<Transcriber> = Transcriber.layerTest) =>
@@ -48,16 +49,6 @@ const stranger = 6_200_300_400;
 const ticks = (n: number) => Effect.repeat(TestClock.adjust('1500 millis'), { times: n - 1 });
 
 const encode = (text: string) => new TextEncoder().encode(text);
-
-// What the messages logged, without the rest of each log line.
-const collectLogs = () => {
-	const logs: Array<{ level: string; message: unknown }> = [];
-	const logger = Logger.map(Logger.formatStructured, ({ level, message }) => {
-		logs.push({ level, message });
-	});
-
-	return { logs, layer: Logger.layer([logger]) };
-};
 
 const allowedUser = AppConfig.useSync((config) => config.telegram.allowedUserIds[0]);
 
