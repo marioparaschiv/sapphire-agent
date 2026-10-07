@@ -8,7 +8,6 @@ import {
 	type Options,
 	type Query,
 	query,
-	type SDKAssistantMessage,
 	type SDKMessage,
 	type SDKSessionInfo,
 	type SDKUserMessage,
@@ -18,6 +17,7 @@ import { Cause, Clock, Context, Deferred, Duration, Effect, Exit, FileSystem, La
 import { z } from 'zod';
 import { Chat, type MessageRef } from './chat.ts';
 import { readPromptCacheTtl } from './claude-settings.ts';
+import { contextTokens } from './claude-transcript.ts';
 import { AppConfig } from './config.ts';
 import { Journal } from './journal.ts';
 import { Prompts } from './prompts.ts';
@@ -77,10 +77,6 @@ export const summaryTimeout = Duration.minutes(5);
 const userMessage = (text: string): SDKUserMessage => ({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, priority: 'next' });
 
 const toolText = (text: string) => ({ content: [{ type: 'text' as const, text }] });
-
-// What the request behind an assistant message put in the model's context.
-const contextTokens = ({ input_tokens, cache_read_input_tokens, cache_creation_input_tokens }: SDKAssistantMessage['message']['usage']) =>
-	input_tokens + (cache_read_input_tokens ?? 0) + (cache_creation_input_tokens ?? 0);
 
 // How long the main chat may sit idle before its manager is replaced; none, with a warning, when that is not known.
 const idleLimit = readPromptCacheTtl.pipe(
@@ -256,7 +252,9 @@ export const runManager = Effect.gen(function* () {
 					yield* keepActive;
 
 					if (message.type === 'assistant' && message.parent_tool_use_id === null) {
-						yield* Ref.set(context, contextTokens(message.message.usage));
+						const { input_tokens, cache_read_input_tokens, cache_creation_input_tokens } = message.message.usage;
+
+					yield* Ref.set(context, contextTokens({ inputTokens: input_tokens, cacheReadInputTokens: cache_read_input_tokens ?? 0, cacheCreationInputTokens: cache_creation_input_tokens ?? 0 }));
 					}
 
 					if (message.type !== 'result') {

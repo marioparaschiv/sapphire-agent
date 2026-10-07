@@ -12,16 +12,11 @@ const Entry = Schema.fromJsonString(
 );
 
 // What the request behind an assistant entry put in the model's context.
-const UsageEntry = Schema.fromJsonString(
-	Schema.Struct({
-		type: Schema.Literal('assistant'),
-		message: Schema.Struct({
-			usage: Schema.Struct({ inputTokens: Schema.Int, cacheReadInputTokens: Schema.Int, cacheCreationInputTokens: Schema.Int }).pipe(
-				Schema.encodeKeys({ inputTokens: 'input_tokens', cacheReadInputTokens: 'cache_read_input_tokens', cacheCreationInputTokens: 'cache_creation_input_tokens' }),
-			),
-		}),
-	}),
+const Usage = Schema.Struct({ inputTokens: Schema.Int, cacheReadInputTokens: Schema.Int, cacheCreationInputTokens: Schema.Int }).pipe(
+	Schema.encodeKeys({ inputTokens: 'input_tokens', cacheReadInputTokens: 'cache_read_input_tokens', cacheCreationInputTokens: 'cache_creation_input_tokens' }),
 );
+
+const UsageEntry = Schema.fromJsonString(Schema.Struct({ type: Schema.Literal('assistant'), message: Schema.Struct({ usage: Usage }) }));
 
 const SentMessage = Schema.Struct({ type: Schema.Literal('tool_use'), name: Schema.Literal('SendMessage'), input: Schema.Struct({ to: Schema.String, message: Schema.String }) });
 
@@ -49,14 +44,15 @@ export type TranscriptSession = { readonly id: string; readonly cwd: string };
 
 const newline = 0x0a;
 
+// The context a request's usage stands for: its input, cache read and cache creation tokens.
+export const contextTokens = ({ inputTokens, cacheReadInputTokens, cacheCreationInputTokens }: typeof Usage.Type) => inputTokens + cacheReadInputTokens + cacheCreationInputTokens;
+
 const latestContext = (lines: ReadonlyArray<string>): Option.Option<number> => {
 	for (const line of lines.toReversed()) {
 		const entry = decodeUsageEntry(line);
 
 		if (Option.isSome(entry)) {
-			const { usage } = entry.value.message;
-
-			return Option.some(usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens);
+			return Option.some(contextTokens(entry.value.message.usage));
 		}
 	}
 
