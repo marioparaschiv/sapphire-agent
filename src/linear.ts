@@ -265,12 +265,13 @@ const make = (endpoint: string) =>
 					return Effect.fail(new Permanent({ message: `${identifiers.length} identifiers exceed the ${MAX_PAGE_SIZE} issues one read can return` }));
 				}
 
-				// The id filter takes only UUIDs, so an identifier is matched by its team key and number.
+				// The id filter takes only UUIDs, so an identifier is matched by its team key and number. Linear ORs the fields
+				// of one object inside `or`, so each pair goes in its own `and`.
 				const filter = {
 					or: identifiers.map((identifier) => {
 						const [key, number] = identifier.split('-');
 
-						return { team: { key: { eq: key } }, number: { eq: Number(number) } };
+						return { and: [{ team: { key: { eq: key } } }, { number: { eq: Number(number) } }] };
 					}),
 				};
 
