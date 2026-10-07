@@ -20,8 +20,10 @@ type PullRequestRecord = {
 type ThreadRecord = { isResolved: boolean; readonly comments: Array<FakeComment> };
 
 export type FakeGitHubControls = {
-	readonly addPullRequest: (options: { readonly repo: string; readonly branch: string; readonly state?: PullRequestState; readonly author?: string }) => PullRequest;
-	readonly setPullRequestState: (repo: string, number: number, state: PullRequestState) => void;
+	// `headRefOid` is the commit the branch points at on GitHub; a made-up one unless given.
+	readonly addPullRequest: (options: { readonly repo: string; readonly branch: string; readonly state?: PullRequestState; readonly author?: string; readonly headRefOid?: string }) => PullRequest;
+	// As GitHub does on a merge or close; a push moves the head along.
+	readonly setPullRequestState: (repo: string, number: number, state: PullRequestState, headRefOid?: string) => void;
 	// A comment on the PR itself, by the PR's author unless `author` is given. Returns it.
 	readonly addComment: (repo: string, number: number, body: string, author?: string) => FakeComment;
 	// Returns the new thread's id. Comments are by the PR's author unless they name one.
@@ -171,19 +173,19 @@ const makeFake = (appLogin: string) => {
 	});
 
 	const controls: FakeGitHubControls = {
-		addPullRequest: ({ repo, branch, state = 'OPEN', author = 'octocat' }) => {
+		addPullRequest: ({ repo, branch, state = 'OPEN', author = 'octocat', headRefOid = '9b1d4f7a2c6e8b0d3f5a7c9e1b3d5f7a9c2e4b6d' }) => {
 			const number = pullRequests.filter((candidate) => candidate.repo === repo).length + 1;
-			const pullRequest = { number, url: `https://github.com/${repo}/pull/${number}`, state, author: { login: author } };
+			const pullRequest = { number, url: `https://github.com/${repo}/pull/${number}`, state, author: { login: author }, headRefOid };
 
 			pullRequests.push({ repo, branch, pullRequest, comments: [], threadIds: [] });
 
 			return pullRequest;
 		},
 
-		setPullRequestState: (repo, number, state) => {
+		setPullRequestState: (repo, number, state, headRefOid) => {
 			const found = existingRecord(repo, number);
 
-			found.pullRequest = { ...found.pullRequest, state };
+			found.pullRequest = { ...found.pullRequest, state, headRefOid: headRefOid ?? found.pullRequest.headRefOid };
 		},
 
 		addComment: (repo, number, body, author) => {

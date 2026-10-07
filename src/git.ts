@@ -8,7 +8,7 @@ import { decodeResultFile, type InvalidResultFile, type ResultFile } from './res
 // An epic's checkout: the main repo, the epic's branch and the linked worktree it is checked out in.
 export type Worktree = { readonly repo: string; readonly branch: string; readonly path: string };
 
-// Same layout as herdr's own worktrees: <directory>/<repo>/<branch-slug>.
+// The layout T3 makes its worktrees in: <directory>/<repo>/<branch-slug>.
 export const worktreePath = (worktreesDirectory: string, repo: string, branch: string) =>
 	join(worktreesDirectory, basename(repo), branch.replace(/[^A-Za-z0-9._-]+/g, '-'));
 
@@ -45,9 +45,15 @@ export class Git extends Context.Service<
 		// Checks the branch out in its own worktree and returns its path.
 		readonly prepareWorktree: (repo: string, branch: string) => Effect.Effect<string, CallError>;
 		readonly pull: (worktree: Worktree) => Effect.Effect<void, CallError>;
-		readonly unsavedWork: (worktree: Worktree) => Effect.Effect<Option.Option<string>, CallError>;
+		// A worktree of the repo at `path` on no branch, at origin's default branch as fetched now; made if missing.
+		readonly checkoutDefaultBranch: (repo: string, path: string) => Effect.Effect<void, CallError>;
+		// Commits `savedHead` contains count as on origin, e.g. those of a PR GitHub squash-merged and whose branch it
+		// deleted.
+		readonly unsavedWork: (worktree: Worktree, savedHead?: string) => Effect.Effect<Option.Option<string>, CallError>;
 		readonly removeWorktree: (worktree: Worktree) => Effect.Effect<void, CallError>;
 		readonly listWorktrees: (repo: string) => Effect.Effect<ReadonlyArray<Worktree>, CallError>;
+		// The branch origin's HEAD points at, e.g. main.
+		readonly defaultBranch: (repo: string) => Effect.Effect<string, CallError>;
 		readonly githubRepo: (repo: string) => Effect.Effect<string, CallError>;
 		readonly readResultFile: (worktree: Worktree) => Effect.Effect<Option.Option<ResultFile>, CallError | InvalidResultFile>;
 		readonly removeResultFile: (worktree: Worktree) => Effect.Effect<void, CallError>;
@@ -106,14 +112,17 @@ export class Git extends Context.Service<
 			const defaultBranch = (repo: string) => {
 				const read = git(repo, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
 
-				return read.pipe(Effect.catch(() => git(repo, ['remote', 'set-head', 'origin', '--auto']).pipe(Effect.andThen(read))));
+				return read.pipe(
+					Effect.catch(() => git(repo, ['remote', 'set-head', 'origin', '--auto']).pipe(Effect.andThen(read))),
+					Effect.map((ref) => ref.replace(/^origin\//, '')),
+				);
 			};
 
 			// The agent writes its result into the worktree's own git dir (`.git` is a file in a linked worktree), so it can
 			// never be committed. The orchestrate skill resolves the same path with `git rev-parse --git-dir`.
 			const resultFilePath = ({ repo, path }: Worktree) =>
 				git(path, ['rev-parse', '--absolute-git-dir']).pipe(
-					Effect.map((gitDir) => join(gitDir, 'herdr-result.json')),
+					Effect.map((gitDir) => join(gitDir, 'sapphire-agent-result.json')),
 					locked(repo),
 				);
 
@@ -143,10 +152,19 @@ export class Git extends Context.Service<
 						} else if (yield* succeeds(repo, ['show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`])) {
 							yield* git(repo, ['worktree', 'add', '--track', '-b', branch, path, `origin/${branch}`]);
 						} else {
-							yield* git(repo, ['worktree', 'add', '--no-track', '-b', branch, path, yield* defaultBranch(repo)]);
+							yield* git(repo, ['worktree', 'add', '--no-track', '-b', branch, path, `origin/${yield* defaultBranch(repo)}`]);
 						}
 
 						return path;
+					}).pipe(locked(repo)),
+
+				checkoutDefaultBranch: (repo, path) =>
+					Effect.gen(function* () {
+						yield* git(repo, ['fetch', 'origin']);
+
+						const head = `origin/${yield* defaultBranch(repo)}`;
+
+						yield* (yield* exists(path)) ? git(path, ['checkout', '--quiet', '--detach', head]) : git(repo, ['worktree', 'add', '--quiet', '--detach', path, head]);
 					}).pipe(locked(repo)),
 
 				// Names origin explicitly: a branch created without tracking has no upstream to pull from.
@@ -154,7 +172,7 @@ export class Git extends Context.Service<
 
 				// A commit counts as pushed when any origin branch contains it, so a branch never pushed is unsaved as soon as
 				// it has commits beyond the default branch.
-				unsavedWork: ({ repo, branch, path }) =>
+				unsavedWork: ({ repo, branch, path }, savedHead) =>
 					Effect.gen(function* () {
 						const hasWorktree = yield* exists(path);
 
@@ -168,7 +186,9 @@ export class Git extends Context.Service<
 							return Option.none();
 						}
 
-						const unpushed = Number(yield* git(hasWorktree ? path : repo, ['rev-list', '--count', ...heads, '--not', '--remotes=origin']));
+						// A head this clone does not have may or may not hold its commits; they count as unpushed.
+						const saved = savedHead !== undefined && (yield* succeeds(repo, ['cat-file', '-e', `${savedHead}^{commit}`])) ? [savedHead] : [];
+						const unpushed = Number(yield* git(hasWorktree ? path : repo, ['rev-list', '--count', ...heads, '--not', '--remotes=origin', ...saved]));
 
 						return unpushed > 0 ? Option.some(`${unpushed} unpushed commit${unpushed === 1 ? '' : 's'}`) : Option.none();
 					}).pipe(locked(repo)),
@@ -199,6 +219,8 @@ export class Git extends Context.Service<
 						),
 						locked(repo),
 					),
+
+				defaultBranch: (repo) => defaultBranch(repo).pipe(locked(repo)),
 
 				githubRepo: (repo) =>
 					git(repo, ['remote', 'get-url', 'origin']).pipe(

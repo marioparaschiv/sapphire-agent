@@ -76,7 +76,7 @@ describe('withCallPolicy', () => {
 		Effect.gen(function* () {
 			const attempts = yield* Ref.make(0);
 			const call = Ref.updateAndGet(attempts, (n) => n + 1).pipe(Effect.flatMap((attempt) => (attempt === 1 ? Effect.never : Effect.succeed('ok'))));
-			const fiber = yield* call.pipe(withCallPolicy(callTimeouts.herdr), Effect.forkChild);
+			const fiber = yield* call.pipe(withCallPolicy(callTimeouts.t3), Effect.forkChild);
 
 			yield* TestClock.adjust('29 seconds');
 			assert.strictEqual(yield* Ref.get(attempts), 1);
@@ -94,7 +94,7 @@ describe('withWritePolicy', () => {
 		Effect.gen(function* () {
 			const attempts = yield* Ref.make(0);
 			const call = Ref.update(attempts, (n) => n + 1).pipe(Effect.andThen(Effect.never));
-			const fiber = yield* call.pipe(withWritePolicy(callTimeouts.herdr), Effect.forkChild);
+			const fiber = yield* call.pipe(withWritePolicy(callTimeouts.t3), Effect.forkChild);
 
 			yield* TestClock.adjust('30 seconds');
 
@@ -109,7 +109,7 @@ describe('withWritePolicy', () => {
 	it.effect('retries a write that failed before reaching the server', () =>
 		Effect.gen(function* () {
 			const { attempts, call } = yield* scriptedCall([transient]);
-			const fiber = yield* call.pipe(withWritePolicy(callTimeouts.herdr), Effect.forkChild);
+			const fiber = yield* call.pipe(withWritePolicy(callTimeouts.t3), Effect.forkChild);
 
 			yield* TestClock.adjust('1200 millis');
 

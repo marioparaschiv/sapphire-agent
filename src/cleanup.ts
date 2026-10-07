@@ -1,68 +1,139 @@
 import { Clock, Effect, Option } from 'effect';
 import type { CallError } from './call-policy.ts';
 import { Comments } from './comments.ts';
-import { AppConfig } from './config.ts';
-import { adoptTab, claimedRun, repoOf, runsClaude } from './dispatch.ts';
 import { Git, type Worktree } from './git.ts';
 import { GitHub } from './github.ts';
-import { Herdr, type WorkspaceTab } from './herdr.ts';
-import { Journal, newSession, type Run } from './journal.ts';
+import { Journal, type Run } from './journal.ts';
 import type { Epic } from './linear.ts';
 import { epicWithIdentifier, hasRole, identifierOfBranch, isAgentWorking, isFinished, type Observation } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
-import { Projects } from './projects.ts';
-import { makeTabActions } from './run-actions.ts';
+import { Pushover, sendOrLog } from './pushover.ts';
+import { makeSettle } from './run-actions.ts';
+import { hasActiveRun, T3 } from './t3.ts';
+
+// The run is over; commits of its merged PR's head count as on origin.
+type Ending = { readonly mergedHead: Option.Option<string> };
 
 // Everything cleanup found for one epic this tick.
-type Found = { readonly epic: Epic; readonly run: Option.Option<Run>; readonly tabs: Array<WorkspaceTab>; readonly worktrees: Array<Worktree> };
-
-const isTrackedTab = (runs: ReadonlyArray<Run>, tab: WorkspaceTab) => runs.some((run) => run.tabId === tab.tabId || run.paneId === tab.paneId);
+type Found = { readonly epic: Epic; readonly run: Option.Option<Run>; readonly worktrees: Array<Worktree> };
 
 const isTrackedWorktree = (runs: ReadonlyArray<Run>, worktree: Worktree) =>
 	runs.some((run) => run.worktreePath === worktree.path || (run.repo === worktree.repo && run.branch === worktree.branch));
 
-// Ends what is left of a run once its epic shipped or its PR was merged or closed (or, for a ready epic's run that never started,
-// once it ended): its tab, then its worktree and local branch, then its row. Work that is not on origin keeps the
-// worktree and the user is told once; it is removed on a later tick once pushed or discarded. Also resolves owned
-// tabs and worktrees that no run tracks.
+// Ends what is left of a run once its epic shipped or was canceled, or its PR was merged or closed (or, for a ready
+// epic's run that never started, once it ended): its T3 thread is settled (unless T3 auto-settled it), then its
+// worktree and local branch removed, and its row dropped. Work that is not on origin keeps the worktree and the user is
+// told once, on the epic and by Pushover; it is removed on a later tick once pushed or discarded. Commits of a merged
+// PR count as on origin, so a squash merge whose branch was deleted is no unpushed work. A thread the user un-settled
+// after that is left alone with its worktree. Also resolves owned worktrees that no run tracks.
 export const cleanupRule = Effect.gen(function* () {
-	const config = yield* AppConfig;
-	const projects = yield* Projects;
 	const journal = yield* Journal;
 	const git = yield* Git;
 	const github = yield* GitHub;
-	const herdr = yield* Herdr;
 	const comments = yield* Comments;
-	const { closeRunTab } = yield* makeTabActions;
+	const t3 = yield* T3;
+	const pushover = yield* Pushover;
+	const settle = yield* makeSettle;
 
-	const isDue = (observation: Observation, run: Run, epic: Epic): Effect.Effect<boolean, CallError> => {
+	// Whether the run is over: none while it goes on, else the head of its merged PR, if any, whose commits are on
+	// origin even once a squash merge left them on no origin branch.
+	const ending = (observation: Observation, run: Run, epic: Epic): Effect.Effect<Option.Option<Ending>, CallError> => {
 		if (run.status === 'claimed') {
-			return Effect.succeed(false);
+			return Effect.succeedNone;
 		}
 
-		if (hasRole(observation, epic, ['shipped'])) {
-			return Effect.succeed(true);
+		if (hasRole(observation, epic, ['shipped']) || isFinished(observation, epic)) {
+			return Effect.succeed(Option.some({ mergedHead: Option.none() }));
 		}
 
 		// A follow-up that never started still has the previous run's worktree and PR.
 		if (run.startedAt === null && run.job._tag === 'orchestrate') {
-			return Effect.succeed(run.status === 'ended' || run.status === 'kept');
+			return Effect.succeed(run.status === 'ended' || run.status === 'kept' ? Option.some({ mergedHead: Option.none() }) : Option.none());
 		}
 
 		return git.githubRepo(run.repo).pipe(
 			Effect.flatMap((repo) => github.findPullRequest(repo, run.branch)),
-			Effect.map(Option.exists((pullRequest) => pullRequest.state === 'MERGED' || pullRequest.state === 'CLOSED')),
+			Effect.map((found) =>
+				Option.filter(found, (pullRequest) => pullRequest.state === 'MERGED' || pullRequest.state === 'CLOSED').pipe(
+					Option.map((pullRequest) => ({ mergedHead: pullRequest.state === 'MERGED' ? Option.some(pullRequest.headRefOid) : Option.none() })),
+				),
+			),
 		);
 	};
 
-	const cleanUpRun = (observation: Observation, run: Run, epic: Epic) =>
+	// One notice on the epic and one on the phone.
+	const tellKept = (epic: Epic, kept: { readonly claimedAt: Option.Option<number>; readonly worktreePath: string; readonly reason: string }) =>
 		Effect.gen(function* () {
-			// Closing a working agent's tab would kill it mid-turn; the next tick looks again.
-			if (!(yield* isDue(observation, run, epic)) || isAgentWorking(observation, run)) {
+			if (yield* journal.addNotice(comments.keptWorktree({ identifier: epic.identifier, ...kept }))) {
+				yield* sendOrLog(pushover, {
+					title: `Kept ${epic.identifier}'s worktree`,
+					message: `${kept.worktreePath} has ${kept.reason}. Push or discard that work; the worktree is removed on a later poll.`,
+					url: epic.url,
+					priority: 'normal',
+				});
+			}
+		});
+
+	// Settles a T3 run's thread unless T3 settled it already, and says whether cleanup may go on: not while the thread
+	// works, nor once the user un-settled a thread that was settled, which they are using again.
+	const settleThread = (run: Run, threadId: string) =>
+		Effect.gen(function* () {
+			const read = yield* t3.readThread({ threadId, limit: 1 }).pipe(
+				Effect.map(Option.some),
+				Effect.catchTag('T3ToolFailure', (error) => (error.code === 'thread_not_found' ? Effect.succeedNone : Effect.fail(error))),
+			);
+
+			if (Option.isNone(read)) {
+				return Option.some(run);
+			}
+
+			const { status, settled } = read.value.thread;
+
+			if (hasActiveRun(status)) {
+				return Option.none();
+			}
+
+			if (!settled && run.threadSettledAt !== null) {
+				yield* Effect.logDebug(`T3 thread ${threadId} was un-settled; leaving it alone`);
+
+				return Option.none();
+			}
+
+			if (!settled) {
+				yield* settle(threadId);
+			}
+
+			if (run.threadSettledAt !== null) {
+				return Option.some(run);
+			}
+
+			const recorded: Run = { ...run, threadSettledAt: yield* Clock.currentTimeMillis };
+
+			yield* journal.putRun(recorded);
+
+			return Option.some(recorded);
+		});
+
+	const cleanUpRun = (observation: Observation, due: Run, epic: Epic) =>
+		Effect.gen(function* () {
+			// A working agent is left to finish its turn; the next tick looks again.
+			if (isAgentWorking(observation, due)) {
 				return;
 			}
 
-			yield* closeRunTab(observation, run);
+			const ended = yield* ending(observation, due, epic);
+
+			if (Option.isNone(ended)) {
+				return;
+			}
+
+			const settled = due.threadId === null ? Option.some(due) : yield* settleThread(due, due.threadId);
+
+			if (Option.isNone(settled)) {
+				return;
+			}
+
+			const run = settled.value;
 
 			if (run.worktreePath === null) {
 				yield* journal.deleteRun(run.epicId);
@@ -71,14 +142,12 @@ export const cleanupRule = Effect.gen(function* () {
 			}
 
 			const worktree = { repo: run.repo, branch: run.branch, path: run.worktreePath };
-			const unsaved = yield* git.unsavedWork(worktree);
+			const unsaved = yield* git.unsavedWork(worktree, Option.getOrUndefined(ended.value.mergedHead));
 
 			if (Option.isSome(unsaved)) {
 				if (run.status !== 'kept') {
 					yield* Effect.log(`kept ${worktree.path}: ${unsaved.value}`);
-					yield* journal.addNotice(
-						comments.keptWorktree({ identifier: run.identifier, claimedAt: Option.some(run.claimedAt), worktreePath: worktree.path, reason: unsaved.value }),
-					);
+					yield* tellKept(epic, { claimedAt: Option.some(run.claimedAt), worktreePath: worktree.path, reason: unsaved.value });
 					yield* journal.putRun({ ...run, status: 'kept' });
 				}
 
@@ -90,42 +159,6 @@ export const cleanupRule = Effect.gen(function* () {
 			yield* Effect.log(`removed ${worktree.path} and branch ${worktree.branch}; dropped the run`);
 		});
 
-	// The first untracked tab of an active epic without a run becomes its run; the start rule confirms it. Any other
-	// is closed once its agent is not working. A working one is flagged and left running.
-	const resolveTabs = (observation: Observation, epic: Epic, run: Option.Option<Run>, tabs: ReadonlyArray<WorkspaceTab>) =>
-		Effect.gen(function* () {
-			// A claim whose tab was opened just before a crash: the start rule adopts it.
-			if (tabs.length === 0 || Option.exists(run, (found) => found.status === 'claimed' && found.tabId === null)) {
-				return;
-			}
-
-			let rest = tabs;
-
-			if (Option.isNone(run) && hasRole(observation, epic, ['ready', 'implementing', 'inReview'])) {
-				const [first, ...others] = tabs;
-				const repo = yield* repoOf(config, projects, epic);
-				// Claude already in the tab runs in a session sapphire-agent never recorded. Without Claude, the start rule starts
-				// it in the new one.
-				const session = runsClaude(Option.some(first)) ? null : yield* newSession(epic.identifier);
-				const adopted = adoptTab(claimedRun(epic, repo, yield* Clock.currentTimeMillis, session), first);
-
-				yield* journal.putRun({ ...adopted, worktreePath: git.worktreePath(repo, epic.branchName) });
-				yield* Effect.log(`adopted untracked tab ${first.tabId}`);
-				rest = others;
-			}
-
-			for (const tab of rest) {
-				if (tab.agentStatus === 'working') {
-					yield* journal.addNotice(comments.workingOrphan({ identifier: epic.identifier, tabLabel: tab.label, tabId: tab.tabId, paneId: tab.paneId }));
-					continue;
-				}
-
-				if (yield* herdr.closeTab(tab.tabId)) {
-					yield* Effect.log(`closed untracked tab ${tab.tabId}`);
-				}
-			}
-		});
-
 	const resolveWorktrees = (epic: Epic, worktrees: ReadonlyArray<Worktree>) =>
 		Effect.forEach(
 			worktrees,
@@ -134,9 +167,7 @@ export const cleanupRule = Effect.gen(function* () {
 					const unsaved = yield* git.unsavedWork(worktree);
 
 					if (Option.isSome(unsaved)) {
-						return yield* journal.addNotice(
-							comments.keptWorktree({ identifier: epic.identifier, claimedAt: Option.none(), worktreePath: worktree.path, reason: unsaved.value }),
-						);
+						return yield* tellKept(epic, { claimedAt: Option.none(), worktreePath: worktree.path, reason: unsaved.value });
 					}
 
 					yield* git.removeWorktree(worktree);
@@ -158,7 +189,7 @@ export const cleanupRule = Effect.gen(function* () {
 					return existing;
 				}
 
-				const created: Found = { epic, run: Option.fromUndefinedOr(runs.find((run) => run.epicId === epic.id)), tabs: [], worktrees: [] };
+				const created: Found = { epic, run: Option.fromUndefinedOr(runs.find((run) => run.epicId === epic.id)), worktrees: [] };
 
 				found.set(epic.id, created);
 
@@ -181,22 +212,14 @@ export const cleanupRule = Effect.gen(function* () {
 				});
 			}
 
-			// Only tabs and worktrees of an epic in a resolved team count as owned; anything else is left alone.
+			// Only worktrees of an epic in a resolved team count as owned; anything else is left alone.
 			const ownedEpic = (identifier: string) => Option.filter(epicWithIdentifier(observation, identifier), (epic) => observation.teams.has(epic.team.id));
-
-			for (const tab of observation.tabs.filter((candidate) => !isTrackedTab(runs, candidate))) {
-				const epic = Option.flatMap(tab.identifier, ownedEpic);
-
-				if (Option.isSome(epic)) {
-					entry(epic.value).tabs.push(tab);
-				}
-			}
 
 			for (const worktree of observation.worktrees.filter((candidate) => !isTrackedWorktree(runs, candidate))) {
 				const epic = Option.filter(
 					Option.flatMap(identifierOfBranch(worktree.branch), ownedEpic),
-					// Built the way sapphire-agent builds its worktrees, for an epic whose work is over. herdr's own worktrees
-					// use the same layout, so a worktree of an epic still in progress is never touched.
+					// Built the way T3 builds sapphire-agent's worktrees, for an epic whose work is over. A worktree of an epic
+					// still in progress is never touched.
 					(candidate) =>
 						candidate.branchName === worktree.branch &&
 						git.worktreePath(worktree.repo, worktree.branch) === worktree.path &&
@@ -209,13 +232,12 @@ export const cleanupRule = Effect.gen(function* () {
 				}
 			}
 
-			for (const { epic, run, tabs, worktrees } of found.values()) {
+			for (const { epic, run, worktrees } of found.values()) {
 				const apply = Effect.gen(function* () {
 					if (Option.isSome(run)) {
 						yield* cleanUpRun(observation, run.value, epic);
 					}
 
-					yield* resolveTabs(observation, epic, run, tabs);
 					yield* resolveWorktrees(epic, worktrees);
 				});
 

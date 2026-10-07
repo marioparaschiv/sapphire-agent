@@ -2,7 +2,7 @@ import { Option, Schema } from 'effect';
 
 // What a marked write is for. Together with the epic's identifier (or a command's, `CMD-<id>`) and a key it names one
 // write, so a write first looks for its marker and skips if it is there: a retry or a restart never posts twice, while
-// a later occurrence (a new question in the same run, a new summary from a follow-up run) has a new key and is posted.
+// a later occurrence (a new stall in the same run, a new summary from a follow-up run) has a new key and is posted.
 // The Comments service builds every key; `claimedAt` is the run's claim time in epoch ms.
 //
 // On the Linear epic:
@@ -10,22 +10,19 @@ import { Option, Schema } from 'effect';
 // On the GitHub PR, as the bot:
 // - reply: `<threadId>.<claimedAt>`, once per thread per run; found among the thread's comments.
 // - addressed: `<claimedAt>`, once per run that replied to a thread.
-// Notices, in the journal's outbox, once per marker:
-// - awaitingInput: `<claimedAt>-<agentStatusSince>`, one per quiet episode of a run.
+// On the issue or PR of a command's comment, as the bot:
+// - commandReply: `<requestId>`, once per reply a command's agent asked for.
+// - commandFailed: `<claimedAt>` of the command, once per command that failed.
+// Notices, in the journal's outbox once per marker, then on the Linear epic:
 // - stale: `<claimedAt>-<nudgedAt>`, one per nudged episode of a run.
-// - error, startFailed, invalidResult, noPullRequest, threadMismatch, overCap, permanentFailure, summary, flags:
+// - startFailed, invalidResult, noPullRequest, threadMismatch, overCap, permanentFailure, summary, flags:
 //   `<claimedAt>`, once per run (permanentFailure without a run: once per failure streak).
 // - keptWorktree: `<claimedAt>`, once per run; `<worktreePath>` for an orphan worktree that no run tracks.
 // - transientFailure: `<streakStartedAt>` from `Journal.recordTransient`, once per streak of transient failures.
-// - workingOrphan: `<tabId>`, once per untracked tab whose agent is working.
-// - commandReply: `<requestId>`, once per reply a command's agent asked for.
-// - commandFailed: `<claimedAt>` of the command, once per command that failed.
 // - handoffMissing: `<sessionId>`, once per orchestrator session that wrote no handoff doc.
 // - subagentOverContext: `<agentId>`, once per subagent that went on past its handoff.
 export const MarkerPurpose = Schema.Literals([
-	'awaitingInput',
 	'stale',
-	'error',
 	'startFailed',
 	'invalidResult',
 	'noPullRequest',
@@ -34,7 +31,6 @@ export const MarkerPurpose = Schema.Literals([
 	'permanentFailure',
 	'keptWorktree',
 	'transientFailure',
-	'workingOrphan',
 	'summary',
 	'flags',
 	'reply',
@@ -61,7 +57,7 @@ export type MarkedComment = {
 // The key is URI-encoded so a path or id never breaks the HTML comment or the parser.
 export const renderMarker = ({ identifier, purpose, key }: Marker) => `<!-- sapphire-agent:${identifier}:${purpose}:${encodeURIComponent(key)} -->`;
 
-// A short markdown message for the user in the chat, sent once per marker (`Journal.addNotice`).
+// A short markdown message for the user, posted on the epic once per marker (`Journal.addNotice`).
 export type Notice = {
 	readonly marker: Marker;
 	readonly text: string;
@@ -70,8 +66,7 @@ export type Notice = {
 export const withMarker = (body: string, marker: Marker): MarkedComment => ({ marker, body: `${body}\n\n${renderMarker(marker)}` });
 
 // Only a marker on a line of its own counts, so a user quoting one of our comments (`> <!-- ... -->`) is not ours.
-// Comments posted before the rename carry `herdr-linear:`.
-const markerLine = /^<!-- (?:sapphire-agent|herdr-linear):([A-Z]+-\d+):(\w+):(\S+) -->$/m;
+const markerLine = /^<!-- sapphire-agent:([A-Z]+-\d+):(\w+):(\S+) -->$/m;
 
 const decodePurpose = Schema.decodeUnknownOption(MarkerPurpose);
 

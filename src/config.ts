@@ -2,10 +2,11 @@ import { createPrivateKey, generateKeyPairSync, type KeyObject } from 'node:cryp
 import { homedir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { Config, Context, Effect, FileSystem, Layer, Predicate, Redacted, Result, Schema, SchemaGetter, SchemaIssue } from 'effect';
+import { defaultConfigDirectory, defaultStateDirectory } from './directories.ts';
 
 const expandHome = (path: string) => (path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path);
 
-// Without a trailing slash, so a path compares equal to the paths git and herdr report.
+// Without a trailing slash, so a path compares equal to the paths git and T3 report.
 export const toPath = (path: string) => normalize(expandHome(path)).replace(/(.)\/$/, '$1');
 
 const Path = Schema.NonEmptyString.pipe(Schema.decode({ decode: SchemaGetter.transform(toPath), encode: SchemaGetter.passthrough() }));
@@ -23,20 +24,19 @@ const Team = Schema.Struct({
 });
 
 const Settings = Schema.Struct({
-	// The backstop poll. Linear webhook deliveries and herdr events trigger the ticks that matter in between.
+	// The backstop poll. Linear deliveries, thread waits and agent events trigger the ticks that matter in between.
 	pollSeconds: IntAtLeast(5, 600),
 	maxInFlight: IntAtLeast(1, 1),
 	// How old an epic must be before it is claimed. An epic is often created before its sub-issues, and a claim in
 	// between starts it inline.
 	dispatchSettleSeconds: IntAtLeast(0, 60),
-	// How long an agent may sit idle or blocked without a PR before the epic is flagged as awaiting input.
+	// How long a command's thread may sit stopped without its agent saying it is done before the command fails.
 	awaitingInputAfterSeconds: IntAtLeast(30, 180),
-	// How long a dispatched run may take to confirm Claude started before it is flagged as an error. Starts run
-	// one at a time, so this covers waiting behind other starts as well as the fetch and herdr's 30 s start wait.
+	// How long a dispatched run may take to start its T3 thread before it is flagged as an error.
 	startTimeoutSeconds: IntAtLeast(60, 300),
-	// How long herdr may report working while the pane tail stays the same before the agent is nudged.
+	// How long a run's thread may show no progress before the agent is nudged.
 	staleAfterSeconds: IntAtLeast(60, 600),
-	// How long after the nudge the tail may stay the same before the epic is flagged as stale.
+	// How long after the nudge the agent may do nothing before the epic is flagged as stale.
 	nudgeGraceSeconds: IntAtLeast(60, 600),
 	// How long a run may go, in any state, before the epic is flagged once.
 	maxRunSeconds: IntAtLeast(600, 5400),
@@ -44,10 +44,8 @@ const Settings = Schema.Struct({
 	handoffAtTokens: IntAtLeast(10_000, 250_000),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
-	// How often the App's failed webhook deliveries are looked for and redelivered.
-	deliveryScanSeconds: IntAtLeast(60, 300),
-	worktreesDirectory: Path.pipe(withDefault('~/.herdr/worktrees')),
-	workspaceLabel: Name('agents'),
+	// Where T3 creates its worktrees (its own setting), as `<worktreesDirectory>/<repo>/<branch slug>`.
+	worktreesDirectory: Path.pipe(withDefault('~/.t3/worktrees')),
 	states: Schema.Struct({
 		ready: Name('Ready For Agent'),
 		implementing: Name('Implementing'),
@@ -75,16 +73,19 @@ const Settings = Schema.Struct({
 		}),
 		allowedUsers: Schema.Array(Schema.NonEmptyString).check(Schema.makeFilter((users) => users.length > 0 || 'no allowed users configured')),
 	}),
-	// The Telegram bot the user talks to in a private chat, logged in over MTProto with an app's api_id and api_hash
-	// (my.telegram.org). Messages from anyone but `allowedUserIds` are dropped.
-	telegram: Schema.Struct({
-		botTokenFile: Path,
-		apiIdFile: Path,
-		apiHashFile: Path,
-		allowedUserIds: Schema.Array(Schema.Int.check(Schema.isGreaterThan(0))).check(Schema.makeFilter((ids) => ids.length > 0 || 'no allowed users configured')),
-		// Where the voice note model is; defaults to `<state directory>/models/<transcriptionModel>`.
-		transcriptionModelDirectory: Schema.optionalKey(Path),
-	}),
+	// The Pushover application the service's notices about itself are sent with, and the user key they are sent to.
+	pushover: Schema.Struct({
+		appTokenFile: Path.pipe(withDefault(join(defaultConfigDirectory, 'pushover-app-token'))),
+		userKeyFile: Path.pipe(withDefault(join(defaultConfigDirectory, 'pushover-user-key'))),
+	}).pipe(withDefault({})),
+	// The T3 Code server runs are dispatched to, over its MCP endpoint at `<url>/mcp`, and the full-access token
+	// scripts/mint-t3-token.sh writes.
+	t3: Schema.Struct({
+		url: Schema.NonEmptyString.pipe(withDefault('http://127.0.0.1:3773')),
+		tokenFile: Path.pipe(withDefault(join(defaultConfigDirectory, 't3-token'))),
+		// T3's own settings, read to check it leaves sapphire-agent's worktrees alone and settles merged threads.
+		settingsFile: Path.pipe(withDefault('~/.t3/userdata/settings.json')),
+	}).pipe(withDefault({})),
 });
 
 export type Settings = typeof Settings.Type;
@@ -109,21 +110,14 @@ const SettingsFile = Schema.fromJsonString(
 	),
 );
 
-const env = {
-	herdrBinPath: Config.NonEmptyString('HERDR_BIN_PATH'),
-	herdrSocketPath: Config.NonEmptyString('HERDR_SOCKET_PATH'),
-	configDirectory: Config.NonEmptyString('HERDR_PLUGIN_CONFIG_DIR'),
-	stateDirectory: Config.NonEmptyString('HERDR_PLUGIN_STATE_DIR'),
-	linearKeyFile: Config.NonEmptyString('SAPPHIRE_AGENT_LINEAR_KEY_FILE').pipe(Config.withDefault(join(homedir(), '.config/sapphire-agent/linear-key'))),
-	claudeConfigPath: Config.NonEmptyString('CLAUDE_CONFIG_PATH').pipe(Config.withDefault(join(homedir(), '.claude.json'))),
+export const env = {
+	configDirectory: Config.NonEmptyString('SAPPHIRE_AGENT_CONFIG_DIR').pipe(Config.withDefault(defaultConfigDirectory)),
+	stateDirectory: Config.NonEmptyString('SAPPHIRE_AGENT_STATE_DIR').pipe(Config.withDefault(defaultStateDirectory)),
+	linearKeyFile: Config.NonEmptyString('SAPPHIRE_AGENT_LINEAR_KEY_FILE').pipe(Config.withDefault(join(defaultConfigDirectory, 'linear-key'))),
 	claudeConfigDirectory: Config.NonEmptyString('CLAUDE_CONFIG_DIR').pipe(Config.withDefault(join(homedir(), '.claude'))),
 };
 
 export type Env = { readonly [K in keyof typeof env]: Config.Success<(typeof env)[K]> };
-
-export const transcriptionModel = 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8';
-
-export const transcriptionModelFiles = { encoder: 'encoder.int8.onnx', decoder: 'decoder.int8.onnx', joiner: 'joiner.int8.onnx', tokens: 'tokens.txt' } as const;
 
 export type AppConfigShape = Settings & {
 	readonly env: Env;
@@ -133,12 +127,17 @@ export type AppConfigShape = Settings & {
 	readonly linearWebhookSecret: Redacted.Redacted<string>;
 };
 
-// Only the service talks to Telegram and transcribes voice notes; the CLI runs without these.
-export type TelegramConfigShape = {
-	readonly botToken: Redacted.Redacted<string>;
-	readonly apiId: number;
-	readonly apiHash: Redacted.Redacted<string>;
-	readonly transcriptionModelDirectory: string;
+// Only the service sends Pushover notices; the CLI runs without these.
+type PushoverConfigShape = {
+	readonly appToken: Redacted.Redacted<string>;
+	readonly userKey: Redacted.Redacted<string>;
+};
+
+type T3ConfigShape = {
+	readonly url: string;
+	readonly token: Redacted.Redacted<string>;
+	// Epoch milliseconds, from the token's `exp` claim.
+	readonly expiresAt: number;
 };
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
@@ -199,36 +198,31 @@ const readWebhookSecret = (path: string) => readSecretFile(path, 'GitHub App web
 
 const readLinearWebhookSecret = (path: string) => readSecretFile(path, 'Linear webhook secret').pipe(Effect.map(Redacted.make));
 
-const readTelegramBotToken = (path: string) => readSecretFile(path, 'Telegram bot token').pipe(Effect.map(Redacted.make));
+// Pushover's app tokens and user keys are 30 letters and digits.
+const pushoverKey = /^[A-Za-z0-9]{30}$/;
 
-const readTelegramApiId = (path: string) =>
-	readSecretFile(path, 'Telegram api_id').pipe(
-		Effect.flatMap((text) => Schema.decodeEffect(Schema.NumberFromString.pipe(Schema.decodeTo(Schema.Int)))(text).pipe(Effect.mapError(() => [`${path} is not a number`]))),
+const readPushoverKey = (path: string, what: string) =>
+	readSecretFile(path, what).pipe(
+		Effect.flatMap((text) => (pushoverKey.test(text) ? Effect.succeed(Redacted.make(text)) : Effect.fail([`${path} is not a ${what}: expected 30 letters and digits`]))),
 	);
 
-const readTelegramApiHash = (path: string) => readSecretFile(path, 'Telegram api_hash').pipe(Effect.map(Redacted.make));
+// A T3 session token is `<base64url JSON claims>.<signature>`.
+const T3TokenClaims = Schema.StringFromBase64Url.pipe(Schema.decodeTo(Schema.fromJsonString(Schema.Struct({ exp: Schema.Int }))));
+
+const readT3Token = (path: string) =>
+	readSecretFile(path, 'T3 token').pipe(
+		Effect.flatMap((token) =>
+			Schema.decodeUnknownEffect(T3TokenClaims)(token.split('.')[0]).pipe(
+				Effect.map(({ exp }) => ({ token: Redacted.make(token), expiresAt: exp })),
+				Effect.mapError(() => [`${path} is not a T3 session token; run scripts/mint-t3-token.sh`]),
+			),
+		),
+	);
 
 const readPrivateKey = (path: string) =>
 	readSecretFile(path, 'GitHub App private key').pipe(
 		Effect.flatMap((pem) => Effect.try({ try: () => createPrivateKey(pem), catch: () => [`${path} is not a PEM private key`] })),
 	);
-
-const resolveTranscriptionModelDirectory = (settings: Settings, stateDirectory: string) =>
-	settings.telegram.transcriptionModelDirectory ?? join(stateDirectory, 'models', transcriptionModel);
-
-const checkTranscriptionModel = (directory: string) =>
-	Effect.gen(function* () {
-		const fs = yield* FileSystem.FileSystem;
-		const files = Object.values(transcriptionModelFiles);
-		const present = yield* Effect.forEach(files, (file) => fs.exists(join(directory, file)), { concurrency: 'unbounded' });
-		const missing = files.filter((_, index) => !present[index]);
-
-		if (missing.length > 0) {
-			return yield* Effect.fail([`no transcription model in ${directory}: ${missing.join(', ')} missing; download ${transcriptionModel} there`]);
-		}
-
-		return directory;
-	}).pipe(Effect.catchTag('PlatformError', (error) => Effect.fail([`${directory}: ${error.message}`])));
 
 const configProblems = (error: Config.ConfigError) => (Schema.isSchemaError(error.cause) ? schemaProblems('', error.cause) : [error.message]);
 
@@ -239,7 +233,7 @@ const readWhen = <P, A>(path: Result.Result<P, unknown>, read: (path: P) => Effe
 const problemsOf = (result: Result.Result<unknown, ReadonlyArray<string>>) => (Result.isFailure(result) ? result.failure : []);
 
 // Reads env, the config file, the Linear API key and webhook secret and the GitHub App's private key and webhook
-// secret. Returns the config file and the state directory too, so the Telegram config is read from them in the same pass.
+// secret. Returns the config file too, so the Pushover config is read from it in the same pass.
 const readAppConfig = Effect.gen(function* () {
 	const envResults = yield* Effect.all(env, { mode: 'result' });
 	const settings = yield* readWhen(envResults.configDirectory, (directory) => readSettings(join(directory, 'config.json')));
@@ -268,24 +262,26 @@ const readAppConfig = Effect.gen(function* () {
 					linearWebhookSecret: loaded.success.linearWebhookSecret,
 				});
 
-	return { settings, stateDirectory: envResults.stateDirectory, config };
+	return { settings, config };
 });
 
-// Reads the Telegram bot token, api_id and api_hash and checks the transcription model is there.
-const readTelegramConfig = (settings: Result.Result<Settings, unknown>, stateDirectory: Result.Result<string, unknown>) =>
+// Reads the Pushover app token and user key.
+const readPushoverConfig = (settings: Result.Result<Settings, unknown>) =>
 	Effect.gen(function* () {
-		const botToken = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.botTokenFile), readTelegramBotToken);
-		const apiId = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiIdFile), readTelegramApiId);
-		const apiHash = yield* readWhen(Result.map(settings, ({ telegram }) => telegram.apiHashFile), readTelegramApiHash);
-		const transcriptionModelDirectory = yield* readWhen(
-			Result.all({ settings, stateDirectory }).pipe(Result.map(({ settings, stateDirectory }) => resolveTranscriptionModelDirectory(settings, stateDirectory))),
-			checkTranscriptionModel,
-		);
-		const problems = [...problemsOf(botToken), ...problemsOf(apiId), ...problemsOf(apiHash), ...problemsOf(transcriptionModelDirectory)];
-		const loaded = Result.all({ botToken, apiId, apiHash, transcriptionModelDirectory });
+		const appToken = yield* readWhen(Result.map(settings, ({ pushover }) => pushover.appTokenFile), (path) => readPushoverKey(path, 'Pushover app token'));
+		const userKey = yield* readWhen(Result.map(settings, ({ pushover }) => pushover.userKeyFile), (path) => readPushoverKey(path, 'Pushover user key'));
+		const problems = [...problemsOf(appToken), ...problemsOf(userKey)];
+		const loaded = Result.all({ appToken, userKey });
 
-		return problems.length > 0 || Result.isFailure(loaded) ? Result.fail(problems) : Result.succeed<TelegramConfigShape>(loaded.success);
+		return problems.length > 0 || Result.isFailure(loaded) ? Result.fail(problems) : Result.succeed<PushoverConfigShape>(loaded.success);
 	});
+
+// The config file alone, for the agent hook, which decides its guards without the secrets.
+export const loadSettings = Effect.gen(function* () {
+	const directory = yield* env.configDirectory.pipe(Effect.mapError(configProblems));
+
+	return yield* readSettings(join(directory, 'config.json'));
+}).pipe(Effect.mapError((problems) => new StartupError({ problems })));
 
 const orStartupError = <A>(result: Result.Result<A, ReadonlyArray<string>>) =>
 	Result.isFailure(result) ? Effect.fail(new StartupError({ problems: result.failure })) : Effect.succeed(result.success);
@@ -293,45 +289,41 @@ const orStartupError = <A>(result: Result.Result<A, ReadonlyArray<string>>) =>
 // What the CLI needs, every problem in one StartupError.
 export const loadAppConfig: Effect.Effect<AppConfigShape, StartupError, FileSystem.FileSystem> = readAppConfig.pipe(Effect.flatMap(({ config }) => orStartupError(config)));
 
-// What the service needs, the Telegram config included, every problem in one StartupError.
+// What the service needs, the Pushover config included, every problem in one StartupError.
 export const loadServiceConfig = Effect.gen(function* () {
-	const { settings, stateDirectory, config } = yield* readAppConfig;
-	const telegram = yield* readTelegramConfig(settings, stateDirectory);
+	const { settings, config } = yield* readAppConfig;
+	const pushover = yield* readPushoverConfig(settings);
 
-	return yield* orStartupError(Result.all({ app: config, telegram }).pipe(Result.mapError(() => [...problemsOf(config), ...problemsOf(telegram)])));
+	return yield* orStartupError(Result.all({ app: config, pushover }).pipe(Result.mapError(() => [...problemsOf(config), ...problemsOf(pushover)])));
+});
+
+// The config file of AppConfig.layerTest.
+export const testSettings = (directory: string, settings: Partial<typeof Settings.Encoded> = {}): typeof Settings.Encoded => ({
+	teams: { Test: { repo: join(directory, 'repo') } },
+	worktreesDirectory: join(directory, 'worktrees'),
+	linearWebhookSecretFile: join(directory, 'linear-webhook-secret'),
+	bot: {
+		login: 'orchestratorbot',
+		app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
+		allowedUsers: ['marioparaschiv'],
+	},
+	pushover: { appTokenFile: join(directory, 'pushover-app-token'), userKeyFile: join(directory, 'pushover-user-key') },
+	t3: { settingsFile: join(directory, 't3-settings.json') },
+	...settings,
 });
 
 export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sapphire-agent/AppConfig') {
 	static readonly layer = Layer.effect(AppConfig, loadAppConfig);
 
-	// Defaults plus one team, the bot and the Telegram bot, with every path under `directory`, a freshly generated App key
+	// Defaults plus one team and the bot, with every path under `directory`, a freshly generated App key
 	// and the webhook server on a free port.
 	static readonly layerTest = (directory: string, settings: Partial<typeof Settings.Encoded> = {}) =>
 		Layer.sync(AppConfig, () => ({
-			...Schema.decodeUnknownSync(Settings)({
-				teams: { Test: { repo: join(directory, 'repo') } },
-				worktreesDirectory: join(directory, 'worktrees'),
-				linearWebhookSecretFile: join(directory, 'linear-webhook-secret'),
-				bot: {
-					login: 'orchestratorbot',
-					app: { id: 424242, privateKeyFile: join(directory, 'app.pem'), webhookSecretFile: join(directory, 'webhook-secret'), webhookPort: 0 },
-					allowedUsers: ['marioparaschiv'],
-				},
-				telegram: {
-					botTokenFile: join(directory, 'telegram-bot-token'),
-					apiIdFile: join(directory, 'telegram-api-id'),
-					apiHashFile: join(directory, 'telegram-api-hash'),
-					allowedUserIds: [7_100_200_300],
-				},
-				...settings,
-			}),
+			...Schema.decodeUnknownSync(Settings)(testSettings(directory, settings)),
 			env: {
-				herdrBinPath: 'herdr',
-				herdrSocketPath: join(directory, 'herdr.sock'),
 				configDirectory: directory,
 				stateDirectory: directory,
 				linearKeyFile: join(directory, 'linear-key'),
-				claudeConfigPath: join(directory, 'claude.json'),
 				claudeConfigDirectory: join(directory, 'claude'),
 			},
 			linearApiKey: Redacted.make('lin_api_test'),
@@ -341,18 +333,23 @@ export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()('sap
 		}));
 }
 
-export class TelegramConfig extends Context.Service<TelegramConfig, TelegramConfigShape>()('sapphire-agent/TelegramConfig') {
-	// AppConfig and TelegramConfig, read in one pass.
+export class PushoverConfig extends Context.Service<PushoverConfig, PushoverConfigShape>()('sapphire-agent/PushoverConfig') {
+	// AppConfig and PushoverConfig, read in one pass.
 	static readonly layerWithAppConfig = Layer.effectContext(
-		loadServiceConfig.pipe(Effect.map(({ app, telegram }) => Context.make(AppConfig, app).pipe(Context.add(TelegramConfig, telegram)))),
+		loadServiceConfig.pipe(Effect.map(({ app, pushover }) => Context.make(AppConfig, app).pipe(Context.add(PushoverConfig, pushover)))),
+	);
+}
+
+export class T3Config extends Context.Service<T3Config, T3ConfigShape>()('sapphire-agent/T3Config') {
+	static readonly layer = Layer.effect(
+		T3Config,
+		Effect.gen(function* () {
+			const { t3 } = yield* AppConfig;
+			const { token, expiresAt } = yield* readT3Token(t3.tokenFile).pipe(Effect.mapError((problems) => new StartupError({ problems })));
+
+			return { url: t3.url, token, expiresAt };
+		}),
 	);
 
-	// The model in `<directory>/models/<transcriptionModel>`, as AppConfig.layerTest's state directory has it.
-	static readonly layerTest = (directory: string) =>
-		Layer.succeed(TelegramConfig, {
-			botToken: Redacted.make('123456:test-bot-token'),
-			apiId: 1_234_567,
-			apiHash: Redacted.make('test-api-hash'),
-			transcriptionModelDirectory: join(directory, 'models', transcriptionModel),
-		});
+	static readonly layerTest = Layer.succeed(T3Config, { url: 'http://127.0.0.1:3773', token: Redacted.make('test-t3-token'), expiresAt: Date.UTC(2036, 9, 4, 12) });
 }

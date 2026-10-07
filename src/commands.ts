@@ -1,88 +1,53 @@
 import { basename, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { Clock, Effect, Option } from 'effect';
-import { Permanent } from './call-policy.ts';
-import { ClaudeTrust } from './claude-trust.ts';
+import { Clock, Effect, FileSystem, Option } from 'effect';
+import { fileSystemFailure, Permanent } from './call-policy.ts';
 import { Comments } from './comments.ts';
 import { AppConfig } from './config.ts';
-import { describeAgent, runsClaude, sessionClaudeArgs } from './dispatch.ts';
+import { commandsDirectory, ctlPath } from './directories.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
-import { Herdr } from './herdr.ts';
-import { type Command, commandIdentifier, type CommandStatus, Journal, newSession } from './journal.ts';
-import { isSameWatch, quietStatuses, tailHash, trackAgent } from './monitoring.ts';
-import { type Observation, observedAgentStatus } from './observation.ts';
+import { type Command, commandIdentifier, type CommandStatus, Journal } from './journal.ts';
 import type { Rule, TaskWork } from './planner.ts';
-import { Projects, projectInRepo } from './projects.ts';
+import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
-import { makeNudge } from './run-actions.ts';
-
-export const ctlPath = fileURLToPath(new URL('../scripts/ctl.sh', import.meta.url));
-
-// Read-only gh and git subcommands a command's agent may run, besides the CLI. `--output` would make git write a file.
-const readOnlyCommands = ['gh pr view', 'gh pr diff', 'gh pr checks', 'gh issue view', 'git log', 'git show', 'git diff', 'git status'];
+import { makeInterrupt, makeSettle } from './run-actions.ts';
+import { hasActiveRun, hasFailedRun, T3 } from './t3.ts';
+import { T3Projects } from './t3-projects.ts';
 
 // The commands whose comment still gets a thumbs-up when it has none: an ignored one never does, and one that ended
 // or failed has had its answer.
 const acknowledgedStatuses: ReadonlyArray<CommandStatus> = ['queued', 'claimed', 'running'];
 
-// The tools besides Bash, each allowed in full.
-const allowedTools = ['Read', 'Grep', 'Glob', 'SendMessage'];
-
-// What Claude is started with for a command. --restricted ignores the user's and the project's settings, which may allow
-// more or bypass permissions, and keeps the file tools in the working directory; --tools leaves no tool that edits, and
-// SendMessage to message a run's session; dontAsk denies, without asking, every Bash command the allow list does not
-// cover, a command chained onto an allowed one included.
-export const commandClaudeArgs = (ctl: string) => [
-	'--restricted',
-	'--strict-mcp-config',
-	'--tools',
-	['Bash', ...allowedTools].join(','),
-	'--settings',
-	JSON.stringify({
-		permissions: {
-			defaultMode: 'dontAsk',
-			allow: [`Bash(sh ${ctl} *)`, ...readOnlyCommands.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]), ...allowedTools],
-			deny: ['Bash(git * --output*)'],
-		},
-	}),
-];
-
 const minutes = (millis: number) => Math.round(millis / 60_000);
 
-// Runs the command agents, one at a time, oldest first, and posts what they ask to post as notices in the chat. A
-// command's turn starts it in a herdr tab in the local clone of the repo its comment is on: tab, Claude with the command
-// prompt, then running. A running command ends once its agent said it was done (`ctl.sh done`) and stopped working. It
-// fails, with a notice and its tab closed, when it does not start in time, its agent exits, sits
-// quiet for awaitingInputAfterSeconds, stays stale after a nudge, or runs past maxRunSeconds. Not paused: `resume`
-// itself comes in as a command.
+type ThreadedCommand = Command & { readonly threadId: string };
+
+// Runs the command agents, one at a time, oldest first, and posts what they ask to post. A command's turn launches a
+// supervised T3 thread titled `CMD-<n>` with the command prompt, in a checkout of the comment's repo at origin's
+// default branch under the state directory's `commands` (or that directory itself without a clone), where the
+// PreToolUse guard keeps it to reading (`run-guards.ts`); then running. A running command ends once its agent said it
+// was done (`ctl.sh done`) and its thread stopped; its thread is settled. It fails, with a reply as the bot on the issue
+// or PR it came from and its thread interrupted and settled, when it does not start in time, its thread is gone, sits
+// quiet for awaitingInputAfterSeconds, or runs past maxRunSeconds. Not paused: `resume` itself comes in as a command.
 export const commandsRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
 	const projects = yield* Projects;
 	const git = yield* Git;
 	const github = yield* GitHub;
-	const herdr = yield* Herdr;
-	const trust = yield* ClaudeTrust;
 	const prompts = yield* Prompts;
 	const comments = yield* Comments;
-	const nudge = yield* makeNudge;
+	const t3 = yield* T3;
+	const t3Projects = yield* T3Projects;
+	const interrupt = yield* makeInterrupt;
+	const settle = yield* makeSettle;
+	const fs = yield* FileSystem.FileSystem;
 	// After a restart a claimed command gets a full start window again.
 	const bootedAt = yield* Clock.currentTimeMillis;
 	const { env } = config;
-	// So the agent's `ctl.sh` reaches this journal and config, wherever the service keeps them.
-	const tabEnv = {
-		HERDR_BIN_PATH: env.herdrBinPath,
-		HERDR_SOCKET_PATH: env.herdrSocketPath,
-		HERDR_PLUGIN_CONFIG_DIR: env.configDirectory,
-		HERDR_PLUGIN_STATE_DIR: env.stateDirectory,
-		SAPPHIRE_AGENT_LINEAR_KEY_FILE: env.linearKeyFile,
-		CLAUDE_CONFIG_PATH: env.claudeConfigPath,
-	};
 
-	// A project's clone whose origin is the comment's repo; the state directory when there is none, so status, pause
-	// and the like still work.
-	const cwdOf = (repo: string) =>
+	// A project's clone whose origin is the comment's repo.
+	const cloneOf = (repo: string) =>
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
 			const name = basename(repo);
@@ -95,173 +60,136 @@ export const commandsRule = Effect.gen(function* () {
 				const origin = yield* git.githubRepo(candidate).pipe(Effect.option);
 
 				if (Option.exists(origin, (found) => found.toLowerCase() === repo.toLowerCase())) {
-					return candidate;
+					return Option.some(candidate);
 				}
 			}
 
-			return env.stateDirectory;
+			return Option.none<string>();
 		});
 
-	// The workspace of the project whose repo the command runs in, or workspaceLabel for a repo of no project.
-	const workspaceOf = (cwd: string) =>
-		projects.list.pipe(Effect.map((found) => Option.match(projectInRepo(found, cwd), { onNone: () => config.workspaceLabel, onSome: (project) => project.team })));
+	// Its thread is stopped and settled.
+	const stop = (command: Command, reason: string) =>
+		command.threadId === null
+			? Effect.void
+			: interrupt(command, reason, `fail-${commandIdentifier(command)}`).pipe(Effect.andThen(settle(command.threadId)));
 
-	// The notice goes first, keyed by the claim, so a crash before the journal records it never posts it twice.
-	const fail = (command: Command, reason: string, tail: Option.Option<string>) =>
+	// The reply goes first, keyed by the claim, so a crash before the journal records it never posts it twice.
+	const fail = (command: Command, reason: string) =>
 		Effect.gen(function* () {
 			const identifier = commandIdentifier(command);
 
 			yield* Effect.logError(`${reason}; failing it`);
-			yield* journal.addNotice(comments.commandFailed({ identifier, claimedAt: command.claimedAt ?? command.recordedAt, url: command.url, reason, tail }));
-			yield* closeTab(command);
+			yield* github
+				.postComment(command.repo, command.number, comments.commandFailed({ identifier, claimedAt: command.claimedAt ?? command.recordedAt, reason }))
+				.pipe(Effect.catchTag('Permanent', (error) => Effect.logError(`cannot tell ${command.url} that ${identifier} failed`, error)));
+			yield* stop(command, reason);
 			yield* journal.putCommand({ ...command, status: 'error' });
 		});
 
-	// Looked up in herdr rather than the observation, which does not have a tab opened this tick. Matched by tab and pane
-	// id, as a run's tab is.
-	const closeTab = ({ tabId, paneId }: Command) =>
-		tabId === null || paneId === null
-			? Effect.void
-			: herdr
-					.pane(paneId)
-					.pipe(
-						Effect.flatMap((pane) =>
-							Option.exists(pane, (found) => found.tabId === tabId) ? herdr.closeTab(tabId).pipe(Effect.andThen(Effect.log(`closed tab ${tabId}`))) : Effect.void,
-						),
-					);
-
-	const readTail = (command: Command) => (command.paneId === null ? Effect.succeedNone : herdr.readTail(command.paneId));
-
-	const start = (observation: Observation, commands: ReadonlyArray<Command>, next: Command) =>
+	const start = (next: Command) =>
 		Effect.gen(function* () {
 			const identifier = commandIdentifier(next);
 			const now = yield* Clock.currentTimeMillis;
 			let command = next;
 
 			if (command.claimedAt === null) {
-				command = { ...command, status: 'claimed', claimedAt: now, session: yield* newSession(identifier) };
+				command = { ...command, status: 'claimed', claimedAt: now };
 				yield* journal.putCommand(command);
 				yield* Effect.log(`claimed for ${command.url}`);
 			} else if (now - Math.max(command.claimedAt, bootedAt) >= config.startTimeoutSeconds * 1000) {
-				return yield* fail(command, `was not confirmed running within ${config.startTimeoutSeconds} s`, yield* readTail(command));
+				return yield* fail(command, `was not confirmed running within ${config.startTimeoutSeconds} s`);
 			}
 
-			const openTab = (cwd: string) =>
-				Effect.gen(function* () {
-					const label = prompts.commandTabLabel({ identifier });
-					const found = Option.fromUndefinedOr(
-						observation.tabs.find((tab) => tab.label === label && !commands.some((other) => other.tabId === tab.tabId || other.paneId === tab.paneId)),
-					);
-					// The observation is from the start of the tick; an earlier rule may have closed the tab since.
-					const live = Option.isSome(found) && Option.isSome(yield* herdr.pane(found.value.paneId)) ? found : Option.none();
-					const tab = yield* Option.match(live, {
-						onNone: () => workspaceOf(cwd).pipe(Effect.flatMap((workspace) => herdr.openTab(workspace, label, cwd, tabEnv))),
-						onSome: (adopted) => Effect.log(`adopting tab ${adopted.tabId}`).pipe(Effect.as(adopted)),
+			const promptOf = () => prompts.command({ identifier, author: command.author, url: command.url, repo: command.repo, number: command.number, body: command.body, ctl: ctlPath });
+
+			// The thread is recorded before anything else, so a crash after the launch never launches a second one; one
+			// launched just before a crash is found by its title.
+			const steps = Effect.gen(function* () {
+				if (command.threadId === null) {
+					const clone = yield* cloneOf(command.repo);
+					const directory = commandsDirectory(env.stateDirectory);
+					const cwd = Option.match(clone, { onNone: () => directory, onSome: (found) => join(directory, basename(found)) });
+
+					yield* Option.match(clone, {
+						onNone: () => fs.makeDirectory(cwd, { recursive: true }).pipe(Effect.mapError(fileSystemFailure)),
+						onSome: (found) => git.checkoutDefaultBranch(found, cwd),
 					});
 
-					command = { ...command, tabId: tab.tabId, paneId: tab.paneId };
+					if (command.cwd !== cwd) {
+						command = { ...command, cwd };
+						yield* journal.putCommand(command);
+					}
+
+					const projectId = yield* t3Projects.projectFor(Option.getOrElse(clone, () => cwd));
+					const found = (yield* t3.listThreads({ projectId, titleContains: identifier, includeSubagents: false })).find((thread) => thread.title === identifier);
+					const launched =
+						found === undefined
+							? yield* t3.launchThread({
+									projectId,
+									title: identifier,
+									message: promptOf(),
+									workspaceStrategy: Option.isSome(clone) ? { type: 'existing_worktree', worktreePath: cwd } : { type: 'root' },
+									runtimeMode: 'approval-required',
+								})
+							: { threadId: found.threadId, status: found.status };
+
+					command = { ...command, threadId: launched.threadId };
 					yield* journal.putCommand(command);
 
-					return tab;
-				});
-
-			const steps = Effect.gen(function* () {
-				const cwd = command.cwd ?? (yield* cwdOf(command.repo));
-
-				if (command.cwd === null) {
-					command = { ...command, cwd };
-					yield* journal.putCommand(command);
-				}
-
-				yield* trust.trustFolder(cwd);
-
-				const { tabId, paneId } = command.tabId !== null && command.paneId !== null ? { tabId: command.tabId, paneId: command.paneId } : yield* openTab(cwd);
-
-				if (!runsClaude(yield* herdr.agent(paneId))) {
-					yield* Effect.log(`starting Claude in ${tabId} (${cwd})`);
-					yield* herdr.startClaude(
-						paneId,
-						identifier.toLowerCase(),
-						prompts.command({ identifier, author: command.author, url: command.url, repo: command.repo, number: command.number, body: command.body, ctl: ctlPath }),
-						[...commandClaudeArgs(ctlPath), ...sessionClaudeArgs(command.session)],
-					);
-
-					const agent = yield* herdr.agent(paneId);
-
-					if (!runsClaude(agent) || Option.exists(agent, (found) => found.agentStatus === 'blocked')) {
-						return yield* new Permanent({ message: `Claude did not start in ${tabId}: ${describeAgent(agent)}` });
+					if (hasFailedRun(launched.status)) {
+						return yield* new Permanent({ message: `the run of T3 thread ${launched.threadId} ended at once: ${launched.status}` });
 					}
 				}
 
 				command = { ...command, status: 'running', startedAt: yield* Clock.currentTimeMillis };
 				yield* journal.putCommand(command);
-				yield* Effect.log(`agent started in tab ${tabId}`);
-			});
+				yield* Effect.log(`agent started in T3 thread ${command.threadId}`);
+			}).pipe(Effect.catchTag('T3ToolFailure', (error) => Effect.fail(new Permanent({ message: `T3 refused ${error.tool}: ${error.message} (${error.code})` }))));
 
-			yield* steps.pipe(Effect.catchTag('Permanent', (error) => readTail(command).pipe(Effect.flatMap((tail) => fail(command, `could not start: ${error.message}`, tail)))));
+			yield* steps.pipe(Effect.catchTag('Permanent', (error) => fail(command, `could not start: ${error.message}`)));
 		});
 
-	// Closing a working agent's tab would cut its turn short, so a command that is done ends once its agent stopped.
-	const watch = (observation: Observation, watched: Command, done: ReadonlyArray<number>) =>
+	// A thread that stopped (or never ran) is quiet; one waiting on the user's approval or answer is not.
+	const watch = (command: ThreadedCommand, done: ReadonlyArray<number>) =>
 		Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
-			const status = observedAgentStatus(observation, watched);
+			const read = yield* t3.readThread({ threadId: command.threadId, limit: 1 }).pipe(
+				Effect.map(Option.some),
+				Effect.catchTag('T3ToolFailure', (error) => (error.code === 'thread_not_found' ? Effect.succeedNone : Effect.fail(error))),
+			);
 
-			if (done.length > 0 && status !== 'working') {
-				yield* closeTab(watched);
-				yield* journal.putCommand({ ...watched, status: 'ended' });
+			if (Option.isNone(read)) {
+				return yield* fail(command, 'lost its T3 thread');
+			}
+
+			const { status, updatedAt, pendingRequestCount } = read.value.thread;
+			const working = hasActiveRun(status);
+
+			if (done.length > 0 && !working) {
+				yield* settle(command.threadId);
+				yield* journal.putCommand({ ...command, status: 'ended' });
 				yield* Effect.forEach(done, journal.deleteRequest, { discard: true });
 
 				return yield* Effect.log('the agent is done; ended the command');
 			}
 
-			const tail = status === 'vanished' ? Option.none<string>() : yield* readTail(watched);
-			let command = trackAgent(watched, status, tailHash(Option.getOrElse(tail, () => '')), now).tracked;
-
-			if (!isSameWatch(watched, command)) {
-				yield* journal.putCommand(command);
-			}
-
 			const ranFor = now - (command.claimedAt ?? now);
-			const since = command.agentStatusSince ?? now;
+			const quietFor = now - Date.parse(updatedAt);
 
 			if (ranFor >= config.maxRunSeconds * 1000) {
-				return yield* fail(command, `ran for ${minutes(ranFor)} min, over the ${minutes(config.maxRunSeconds * 1000)} min cap`, tail);
+				return yield* fail(command, `ran for ${minutes(ranFor)} min, over the ${minutes(config.maxRunSeconds * 1000)} min cap`);
 			}
 
-			if (status === 'exited' || status === 'vanished') {
-				return yield* fail(command, status === 'exited' ? 'exited' : 'disappeared (its tab was closed or herdr restarted)', tail);
-			}
-
-			if (quietStatuses.includes(status) && now - since >= config.awaitingInputAfterSeconds * 1000) {
-				return yield* fail(command, `stopped ${minutes(now - since)} min ago without saying it was done`, tail);
-			}
-
-			const { paneId } = command;
-
-			if (status !== 'working' || paneId === null) {
-				return;
-			}
-
-			if (command.nudgedAt === null) {
-				if (now - since >= config.staleAfterSeconds * 1000) {
-					command = { ...command, nudgedAt: now };
-					yield* journal.putCommand(command);
-					yield* nudge(paneId);
-				}
-
-				return;
-			}
-
-			if (now - command.nudgedAt >= config.nudgeGraceSeconds * 1000) {
-				yield* fail(command, `showed no new output for ${minutes(now - since)} min, even after a nudge`, tail);
+			if (!working && pendingRequestCount === 0 && quietFor >= config.awaitingInputAfterSeconds * 1000) {
+				yield* fail(command, `stopped ${minutes(quietFor)} min ago without saying it was done`);
 			}
 		});
 
 	const postReply = (command: Command, requestId: number, body: string) =>
-		journal.addNotice(comments.commandReply({ identifier: commandIdentifier(command), requestId, url: command.url, body })).pipe(
+		github.postComment(command.repo, command.number, comments.commandReply({ identifier: commandIdentifier(command), requestId, body })).pipe(
+			Effect.andThen(Effect.log(`replied on ${command.url}`)),
+			Effect.catchTag('Permanent', (error) => Effect.logError(`cannot reply on ${command.url}; dropped request ${requestId}`, error)),
 			Effect.andThen(journal.deleteRequest(requestId)),
-			Effect.andThen(Effect.log(`replied to ${command.url} in the chat`)),
 		);
 
 	// A thumbs-up on the comment tells its author the bot has it, before any reply. One that fails for now is tried again
@@ -276,7 +204,7 @@ export const commandsRule = Effect.gen(function* () {
 			Effect.catchTag('Transient', (error) => Effect.logWarning(`cannot give ${command.url} a thumbs-up yet; trying again next tick`, error).pipe(Effect.as(command))),
 		);
 
-	const plan = (observation: Observation) =>
+	const plan = () =>
 		Effect.gen(function* () {
 			const commands = yield* journal.listCommands;
 			const requests = (yield* journal.listRequests).flatMap(({ id, request }) => ('commandId' in request ? [{ id, request }] : []));
@@ -292,9 +220,9 @@ export const commandsRule = Effect.gen(function* () {
 				// Given the command as acknowledged, so its own write keeps acknowledgedAt.
 				const lifecycle =
 					listed.status === 'running'
-						? Option.some((command: Command) => watch(observation, command, done))
+						? Option.some((command: Command) => (command.threadId === null ? fail(command, 'lost its T3 thread') : watch({ ...command, threadId: command.threadId }, done)))
 						: listed === next
-							? Option.some((command: Command) => start(observation, commands, command))
+							? Option.some(start)
 							: // A done request outlives its command only when a crash came between ending it and dropping the request.
 								Option.some(() => Effect.forEach(done, journal.deleteRequest, { discard: true })).pipe(Option.filter(() => done.length > 0));
 

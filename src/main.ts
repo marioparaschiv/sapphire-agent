@@ -1,47 +1,44 @@
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Effect, FileSystem, Layer, Stream } from 'effect';
 import { FetchHttpClient } from 'effect/http';
+import { AgentActivity } from './agent-activity.ts';
 import { AgentEventServer } from './agent-event-server.ts';
-import { ClaudeChat } from './claude-chat.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
-import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
-import { AppConfig, TelegramConfig } from './config.ts';
-import { answerChatMessages, checkChatSettings, keepChatSessionWarm } from './conversations.ts';
+import { AppConfig, PushoverConfig, T3Config } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { GitHubApp } from './github-app.ts';
-import { agentWorkspaceLabels, Herdr } from './herdr.ts';
-import { Journal } from './journal.ts';
+import { Journal, journalPath } from './journal.ts';
 import { refuseUndrainedClaims } from './legacy-claims.ts';
 import { Linear } from './linear.ts';
-import { MissedDeliveries } from './missed-deliveries.ts';
 import { Observer } from './observation.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
+import { Pushover } from './pushover.ts';
 import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
-import { telegramChat } from './telegram.ts';
-import { TelegramBot } from './telegram-bot.ts';
-import { Transcriber } from './transcription.ts';
+import { T3 } from './t3.ts';
+import { T3Projects } from './t3-projects.ts';
+import { checkT3Settings } from './t3-settings.ts';
+import { watchThreads } from './thread-waits.ts';
 import { WebhookServer } from './webhook-server.ts';
 
-const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(join(env.stateDirectory, 'journal.db'))));
+const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(journalPath(env.stateDirectory))));
 
-const ChatLive = telegramChat.pipe(Layer.provide(TelegramBot.layer), Layer.provide(Transcriber.layer));
-
-const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTrust.layer, ClaudeTranscript.layer, Herdr.layer, Comments.layer, ChatLive, ClaudeChat.layer).pipe(
+const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTranscript.layer, Comments.layer, Pushover.layer()).pipe(
 	Layer.provideMerge(Prompts.layer),
 	Layer.provideMerge(GitHubApp.layer()),
 );
 
-const MainLive = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, MissedDeliveries.layer).pipe(
+const MainLive = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer).pipe(
 	Layer.provideMerge(Reconciler.layer.pipe(Layer.provide(Planner.layer(rules).pipe(Layer.provide(Observer.layer))), Layer.provide(Pause.layer))),
 	Layer.provideMerge(ServicesLive),
-	Layer.provideMerge(Projects.layer),
+	Layer.provideMerge(Layer.mergeAll(Projects.layer, T3Projects.layer, AgentActivity.layer)),
+	Layer.provideMerge(T3.layer.pipe(Layer.provide(T3Config.layer))),
 	Layer.provideMerge(JournalLive),
 	Layer.provide(FetchHttpClient.layer),
 );
@@ -49,21 +46,16 @@ const MainLive = Layer.mergeAll(WebhookServer.layer, AgentEventServer.layer, Mis
 const program = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const reconciler = yield* Reconciler;
-	const herdr = yield* Herdr;
-	const missedDeliveries = yield* MissedDeliveries;
 	const projects = yield* Projects;
 	const fs = yield* FileSystem.FileSystem;
 	const watched = yield* projects.list;
 
 	yield* Effect.log(`watching ${watched.map(({ team }) => team).join(', ') || 'no projects'} every ${config.pollSeconds}s, at most ${config.maxInFlight} in flight`);
 
-	yield* Effect.forkChild(Stream.runForEach(herdr.events(Effect.map(projects.list, (list) => agentWorkspaceLabels(list, config.workspaceLabel))), () => reconciler.wake));
+	yield* checkT3Settings;
+	yield* Effect.forkChild(watchThreads);
 	// A project the requests rule changed is observed on the tick after.
 	yield* Effect.forkChild(Stream.runForEach(Stream.drop(projects.changes, 1), () => reconciler.wake));
-	yield* Effect.forkChild(checkChatSettings.pipe(Effect.catch((error) => Effect.logWarning("cannot check that chat turns run with the user's Claude settings", error))));
-	yield* Effect.forkChild(missedDeliveries.run);
-	yield* Effect.forkChild(answerChatMessages);
-	yield* Effect.forkChild(keepChatSessionWarm);
 	yield* Effect.forkChild(
 		fs.watch(config.env.stateDirectory).pipe(
 			Stream.filter((event) => basename(event.path) === wakeFileName),
@@ -76,4 +68,4 @@ const program = Effect.gen(function* () {
 });
 
 // Refused before the services are built, which reaches out to GitHub.
-NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(TelegramConfig.layerWithAppConfig.pipe(Layer.provideMerge(NodeServices.layer)))));
+NodeRuntime.runMain(refuseUndrainedClaims.pipe(Effect.andThen(program.pipe(Effect.provide(MainLive))), Effect.provide(PushoverConfig.layerWithAppConfig.pipe(Layer.provideMerge(NodeServices.layer)))));

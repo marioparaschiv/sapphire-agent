@@ -2,27 +2,28 @@ import { join } from 'node:path';
 import { NodeSocketServer } from '@effect/platform-node';
 import { Cause, Context, Effect, FileSystem, Layer, Option, Schema, Struct } from 'effect';
 import { Socket } from 'effect/socket';
+import { AgentActivity } from './agent-activity.ts';
 import type { AgentAdapter } from './agent-event.ts';
 import { eventSocketName } from './agent-hook.ts';
-import { Phase } from './chat.ts';
 import { claudeAdapter } from './claude-hooks.ts';
 import { AppConfig } from './config.ts';
 import { makeContextCheck } from './handoffs.ts';
 import { Journal } from './journal.ts';
-import { isInFlight, isStarted } from './observation.ts';
+import { isInFlight, isInside, isThreaded } from './observation.ts';
 import { Reconciler } from './reconciler.ts';
 
 // One adapter per coding agent, by the name its hook passes to `sapphire hook <agent>`.
 const adapters = { claude: claudeAdapter } satisfies Record<string, AgentAdapter>;
 
-const EventEnvelope = Schema.fromJsonString(Schema.Struct({ agent: Schema.Literals(Struct.keys(adapters)), paneId: Schema.NullOr(Schema.String), payload: Schema.String }));
+const EventEnvelope = Schema.fromJsonString(Schema.Struct({ agent: Schema.Literals(Struct.keys(adapters)), payload: Schema.String }));
 
-// Session events from the coding agents' hooks, on `<state dir>/events.sock` while the service runs. An event from the
-// pane of a run or command in flight wakes the reconciler, and a session start that changes a run's session (a resume
-// of another, a clear, a fork) records a `session` request, which the requests rule applies to the run. A run's skill
-// that starts a phase records a `phase` request, which the topics rule posts in the epic's thread. A tool call or a
-// turn's end of a run's agent or its subagents checks their context for a handoff (`handoffs.ts`); what the subagent is
-// told goes back in the answer. Events from any other pane are answered and dropped.
+// Session events from the coding agents' hooks, on `<state dir>/events.sock` while the service runs. An event of a run
+// or command in flight, matched by its worktree or checkout (the hook's cwd) since T3 passes the agent nothing that
+// names its thread, wakes the reconciler. Any event of a run's agent in another session records a `session` request,
+// which the requests rule applies to the run. A tool call or a turn's end of a run's agent or its subagents
+// checks their context for a handoff (`handoffs.ts`); what the subagent is told goes back in the answer. Any event of a
+// run, its subagents' included, counts as its agent's activity (`AgentActivity`). Events from anywhere else are answered
+// and dropped.
 export class AgentEventServer extends Context.Service<
 	AgentEventServer,
 	{
@@ -36,49 +37,58 @@ export class AgentEventServer extends Context.Service<
 			const journal = yield* Journal;
 			const reconciler = yield* Reconciler;
 			const checkContext = yield* makeContextCheck;
+			const activity = yield* AgentActivity;
 			const fs = yield* FileSystem.FileSystem;
 			const path = join(env.stateDirectory, eventSocketName);
 
 			// What the hook prints for the agent, if anything.
 			const receive = (line: string) =>
 				Effect.gen(function* () {
-					const { agent, paneId, payload } = yield* Schema.decodeUnknownEffect(EventEnvelope)(line);
+					const { agent, payload } = yield* Schema.decodeUnknownEffect(EventEnvelope)(line);
 					const adapter = adapters[agent];
 					const decoded = yield* adapter.decode(payload);
 
-					if (Option.isNone(decoded) || paneId === null) {
+					if (Option.isNone(decoded)) {
 						return Option.none<string>();
 					}
 
 					const event = decoded.value;
-					const run = (yield* journal.listRuns).find((candidate) => isInFlight(candidate) && candidate.paneId === paneId);
-					const command = (yield* journal.listCommands).find((candidate) => (candidate.status === 'claimed' || candidate.status === 'running') && candidate.paneId === paneId);
+					const isFrom = (directory: string | null) => directory !== null && isInside(directory, event.cwd);
+					const run = (yield* journal.listRuns).find((candidate) => isInFlight(candidate) && isFrom(candidate.worktreePath));
+					const command = (yield* journal.listCommands).find((candidate) => (candidate.status === 'claimed' || candidate.status === 'running') && isFrom(candidate.cwd));
 
 					if (run === undefined && command === undefined) {
 						return Option.none<string>();
 					}
 
-					yield* Effect.logDebug(`${agent} ${event._tag} in ${paneId}`);
+					yield* Effect.logDebug(`${agent} ${event._tag} in ${event.cwd}`);
 
-					if (run !== undefined && event._tag === 'SessionStarted' && run.session?.id !== event.sessionId) {
-						yield* journal.addRequest({ _tag: 'session', identifier: run.identifier, sessionId: event.sessionId });
-						yield* Effect.log(`${run.identifier}'s ${agent} session is now ${event.sessionId} (${event.source})`);
+					// T3 shows little of what a subagent does in the background; its hooks show all of it.
+					if (run !== undefined) {
+						yield* activity.record(run.epicId);
 					}
 
-					if (run !== undefined && event._tag === 'SkillInvoked' && Schema.is(Phase)(event.skill)) {
-						yield* journal.addRequest({ _tag: 'phase', identifier: run.identifier, phase: event.skill });
+					// A thread's agent starts in a session T3 chose, so its first event names it.
+					const changedSession =
+						run !== undefined &&
+						run.session?.id !== event.sessionId &&
+						!(yield* journal.listRequests).some(({ request }) => request._tag === 'session' && request.identifier === run.identifier && request.sessionId === event.sessionId);
+
+					if (run !== undefined && changedSession) {
+						yield* journal.addRequest({ _tag: 'session', identifier: run.identifier, sessionId: event.sessionId });
+						yield* Effect.log(`${run.identifier}'s ${agent} session is now ${event.sessionId}${event._tag === 'SessionStarted' ? ` (${event.source})` : ''}`);
 					}
 
 					// A failed check does not fail the event, which is recorded already; the next tool call checks again.
 					const context =
-						run !== undefined && isStarted(run) && (event._tag === 'ToolUsed' || event._tag === 'SkillInvoked' || event._tag === 'TurnEnded')
+						run !== undefined && isThreaded(run) && (event._tag === 'ToolUsed' || event._tag === 'TurnEnded')
 							? yield* checkContext(run, event.sessionId, event._tag === 'ToolUsed' ? event.agentId : null).pipe(
 									Effect.catch((error) => Effect.logWarning(`cannot check ${run.identifier}'s context for a handoff`, error).pipe(Effect.as(Option.none<string>()))),
 								)
 							: Option.none<string>();
 
 					// Tool calls come too often to tick on each; the context check wakes the reconciler when it recorded something.
-					if (event._tag !== 'ToolUsed') {
+					if (event._tag !== 'ToolUsed' && event._tag !== 'Acted') {
 						yield* reconciler.wake;
 					}
 

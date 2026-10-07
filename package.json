@@ -1,6 +1,7 @@
 {
 	"name": "sapphire-agent",
 	"version": "0.1.0",
+	"description": "Dispatches Linear epics to T3 Code threads and keeps Linear in sync.",
 	"private": true,
 	"type": "module",
 	"scripts": {
@@ -11,9 +12,7 @@
 	"dependencies": {
 		"@effect/platform-node": "4.0.0",
 		"@effect/sql-sqlite-node": "4.0.0",
-		"@mtcute/node": "0.32.4",
-		"effect": "4.0.0",
-		"sherpa-onnx-node": "1.13.8"
+		"effect": "4.0.0"
 	},
 	"engines": {
 		"node": ">=24"
@@ -23,8 +22,5 @@
 		"@types/node": "^24.19.1",
 		"typescript": "^7.0.2",
 		"vitest": "^5.0.3"
-	},
-	"allowScripts": {
-		"better-sqlite3@12.11.1": true
 	}
 }

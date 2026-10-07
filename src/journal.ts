@@ -1,21 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
-import { EpicState, MessageRef, Phase, ThreadRef } from './chat.ts';
 import { Marker, type Notice } from './markers.ts';
 import { ResultFile } from './result-file.ts';
 
-// claimed: recorded before the run is started. running: Claude is confirmed started. awaitingInput: the agent sat
-// idle or blocked without a PR. stale: herdr says working but the pane stopped changing. error: the agent exited or
-// vanished, or the run never started. ended: the run is over and its tab closed; the worktree stays until the epic
-// ships or its PR is merged or closed. kept: cleanup found work that is not on origin, so the worktree stays.
-export const RunStatus = Schema.Literals(['claimed', 'running', 'awaitingInput', 'stale', 'error', 'ended', 'kept']);
+// claimed: recorded before the run is started. running: its T3 thread was launched. stale: the thread showed no
+// progress even after a nudge. error: the result could not be posted, or the run never started. ended: the run is
+// over; the worktree stays until the epic ships or its PR is merged or closed. kept: cleanup found work that is not on
+// origin, so the worktree stays.
+export const RunStatus = Schema.Literals(['claimed', 'running', 'stale', 'error', 'ended', 'kept']);
 
 export type RunStatus = typeof RunStatus.Type;
 
-export const AgentStatus = Schema.Literals(['working', 'idle', 'done', 'blocked', 'unknown', 'exited', 'vanished']);
+// blocked: a question or approval waits for the user.
+export const AgentStatus = Schema.Literals(['working', 'idle', 'blocked']);
 
 export type AgentStatus = typeof AgentStatus.Type;
 
@@ -36,20 +37,20 @@ export type Session = typeof Session.Type;
 
 export const sessionName = (identifier: string) => identifier.toLowerCase();
 
-// Made when a run or command is claimed and kept from then on, so a start after a crash resumes into the same session.
+// Made when a run is claimed; the agent event server replaces the id with the session the agent runs in.
 export const newSession = (identifier: string) => Effect.sync((): Session => ({ id: randomUUID(), name: sessionName(identifier) }));
 
-// The run's agent handing its work to a fresh session once its context filled up: asked to write the handoff doc, its
-// session cleared once the doc exists and the turn ended, then the new session told to read the doc. Each step is
-// recorded before it is typed, so none is typed twice.
-export const HandoffStep = Schema.Literals(['requested', 'cleared', 'resumed']);
+// The run's agent handing its work to a fresh thread once its context filled up: asked to write the handoff doc, then,
+// once the doc exists and the thread stopped, a new thread told to read it. Each step is recorded before it is sent, so
+// none is sent twice.
+export const HandoffStep = Schema.Literals(['requested', 'resumed']);
 
 // `sessionId` is the session that hands off.
 export const Handoff = Schema.Struct({ sessionId: Schema.String, step: HandoffStep });
 
 export type Handoff = typeof Handoff.Type;
 
-// Only what cannot be observed from Linear, herdr, git or GitHub. Times are epoch milliseconds.
+// Only what cannot be observed from Linear, T3, git or GitHub. Times are epoch milliseconds.
 export const Run = Schema.Struct({
 	epicId: Schema.String,
 	identifier: Schema.String,
@@ -60,32 +61,34 @@ export const Run = Schema.Struct({
 	repo: Schema.String,
 	branch: Schema.String,
 	worktreePath: Schema.NullOr(Schema.String),
-	tabId: Schema.NullOr(Schema.String),
-	paneId: Schema.NullOr(Schema.String),
-	// None for a run claimed before sessions were recorded, or adopted from a tab Claude already ran in.
+	// None for a run claimed before sessions were recorded.
 	session: Schema.NullOr(Schema.fromJsonString(Session)),
-	// The Claude session that asked for the run (`ctl.sh start --reply-to`), which its agent asks its questions. None asks in the epic's topic.
+	// The Claude session that asked for the run (`ctl.sh dispatch --reply-to`), which its agent asks its questions. None asks on Linear.
 	replyTo: Schema.NullOr(Schema.String),
 	claimedAt: Millis,
-	// When Claude was confirmed started in the pane.
+	// When its T3 thread was launched.
 	startedAt: Schema.NullOr(Millis),
 	agentStatus: Schema.NullOr(AgentStatus),
-	// When the agent status or, while working, the pane tail last changed.
+	// When the thread, its timeline, its subagents or the agent's hook events last showed progress.
 	agentStatusSince: Schema.NullOr(Millis),
-	// When the current stale episode's nudge was sent; cleared once the pane changes.
+	// When the current stale episode's nudge was sent; cleared once the agent acts again.
 	nudgedAt: Schema.NullOr(Millis),
-	tailHash: Schema.NullOr(Schema.String),
 	result: Schema.NullOr(Schema.fromJsonString(ResultFile)),
 	// The latest handoff; none before the first.
 	handoff: Schema.NullOr(Schema.fromJsonString(Handoff)),
+	// The run's T3 thread and the run of that thread it started; none until the launch.
+	threadId: Schema.NullOr(Schema.String),
+	threadRunId: Schema.NullOr(Schema.String),
+	// When cleanup settled the run's thread, or found T3 had. Found un-settled after that, the user un-settled it.
+	threadSettledAt: Schema.NullOr(Millis),
 });
 
 export type Run = typeof Run.Type;
 
 // ignored: the comment's author is not in bot.allowedUsers, so nothing runs. queued: waiting for its turn, as commands
-// run one at a time. claimed: its turn came and it is being started. running: Claude is confirmed started. ended: the agent said it was done and its tab is closed.
-// error: it failed to start, exited, went quiet or stale without saying it was done, or ran over the cap; the comment
-// it answers got a reply saying so and its tab is closed.
+// run one at a time. claimed: its turn came and it is being started. running: its T3 thread was launched. ended: the
+// agent said it was done and its thread is settled. error: it failed to start, lost its thread, went quiet without
+// saying it was done, or ran over the cap; the comment it answers got a reply saying so and its thread is settled.
 export const CommandStatus = Schema.Literals(['ignored', 'queued', 'claimed', 'running', 'ended', 'error']);
 
 export type CommandStatus = typeof CommandStatus.Type;
@@ -101,22 +104,16 @@ export const NewCommand = Schema.Struct({
 	repo: Schema.String,
 	number: Schema.Int,
 	status: CommandStatus,
-	// The local clone the agent runs in, once found.
+	// The checkout the agent runs in, once made.
 	cwd: Schema.NullOr(Schema.String),
-	tabId: Schema.NullOr(Schema.String),
-	paneId: Schema.NullOr(Schema.String),
-	// Made when it is claimed.
-	session: Schema.NullOr(Schema.fromJsonString(Session)),
 	recordedAt: Millis,
 	// When its turn came. Keys its markers, starts its start timeout and its wall-clock cap.
 	claimedAt: Schema.NullOr(Millis),
 	startedAt: Schema.NullOr(Millis),
-	agentStatus: Schema.NullOr(AgentStatus),
-	agentStatusSince: Schema.NullOr(Millis),
-	nudgedAt: Schema.NullOr(Millis),
-	tailHash: Schema.NullOr(Schema.String),
 	// When the comment got the App's thumbs-up, which tells its author the bot has it before any reply.
 	acknowledgedAt: Schema.NullOr(Millis),
+	// The T3 thread the command runs in; none until the launch.
+	threadId: Schema.NullOr(Schema.String),
 });
 
 export type NewCommand = typeof NewCommand.Type;
@@ -129,19 +126,11 @@ export type Command = typeof Command.Type;
 export const commandIdentifier = (command: Pick<Command, 'id'>) => `CMD-${command.id}`;
 
 // A Linear team sapphire-agent watches, by its exact name, and the local clone its epics run in.
-export const ProjectSettings = Schema.Struct({
+export const Project = Schema.Struct({
 	team: Schema.String,
 	repo: Schema.String,
 	// An epic labelled `<repoPrefix><name>` runs in `<labelReposDirectory>/<name>` instead of `repo`.
 	labelReposDirectory: Schema.NullOr(Schema.String),
-});
-
-export type ProjectSettings = typeof ProjectSettings.Type;
-
-export const Project = Schema.Struct({
-	...ProjectSettings.fields,
-	// The project's own chat thread, once one is opened for it.
-	thread: Schema.NullOr(ThreadRef),
 });
 
 export type Project = typeof Project.Type;
@@ -155,15 +144,13 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('follow-up', { identifier: Schema.String, instruction: Schema.NullOr(Schema.String), threadIds: Schema.Array(Schema.String) }),
 	Schema.TaggedStruct('reply', { commandId: Schema.Int, body: Schema.String }),
 	Schema.TaggedStruct('done', { commandId: Schema.Int }),
-	// Recorded by the agent event server when a run's agent starts another session in its pane.
+	// Recorded by the agent event server when a run's agent starts another session.
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
-	// Recorded by the agent event server when a run's agent starts a phase.
-	Schema.TaggedStruct('phase', { identifier: Schema.String, phase: Phase }),
 	// Recorded by the agent event server when a run's agent's context reached handoffAtTokens in that session.
 	Schema.TaggedStruct('handoff', { identifier: Schema.String, sessionId: Schema.String }),
 	// `sapphire project add`, `edit` and `remove`, checked by the CLI before they are recorded.
-	Schema.TaggedStruct('project-add', { project: ProjectSettings }),
-	Schema.TaggedStruct('project-edit', { project: ProjectSettings }),
+	Schema.TaggedStruct('project-add', { project: Project }),
+	Schema.TaggedStruct('project-edit', { project: Project }),
 	Schema.TaggedStruct('project-remove', { team: Schema.String }),
 ]);
 
@@ -173,39 +160,7 @@ export const RequestRow = Schema.Struct({ id: Schema.Int, request: Schema.fromJs
 
 export type RequestRow = typeof RequestRow.Type;
 
-// An epic's thread in the chat: made when its run is dispatched, gone once the epic ships or its run stops.
-export const Topic = Schema.Struct({
-	epicId: Schema.String,
-	identifier: Schema.String,
-	thread: ThreadRef,
-	// What the thread shows now.
-	state: EpicState,
-	// The PR whose link was posted, so it is posted once.
-	pullRequestUrl: Schema.NullOr(Schema.String),
-	// The slice milestones posted, `<sub-issue id>:<progress>`, so each is posted once.
-	milestones: Schema.fromJsonString(Schema.Array(Schema.String)),
-});
-
-export type Topic = typeof Topic.Type;
-
-// A chat turn's Claude session and the directory it runs in; Claude keeps sessions per directory, so a resume runs there too.
-export const ChatSession = Schema.Struct({ sessionId: Schema.String, cwd: Schema.String });
-
-export type ChatSession = typeof ChatSession.Type;
-
-// turn: the bot's answer to a message. reminder: the bot said the session's prompt cache is about to expire.
-export const ChatMessageKind = Schema.Literals(['turn', 'reminder']);
-
-// Bot messages written in one session: in the main chat (no thread) or in a project's thread.
-export const ChatPost = Schema.Struct({ ...ChatSession.fields, thread: Schema.NullOr(ThreadRef), kind: ChatMessageKind });
-
-export type ChatPost = typeof ChatPost.Type;
-
-export const ChatMessage = Schema.Struct({ messageRef: MessageRef, ...ChatPost.fields, createdAt: Millis });
-
-export type ChatMessage = typeof ChatMessage.Type;
-
-// A notice in the outbox, oldest first, until the notices rule sent it.
+// A notice in the outbox, oldest first, until the notices rule posted it.
 export const UnsentNotice = Schema.Struct({ id: Schema.Int, ...Marker.fields, text: Schema.String });
 
 export type UnsentNotice = typeof UnsentNotice.Type;
@@ -214,7 +169,27 @@ export const SubagentHandoff = Schema.Struct({ agentId: Schema.String, identifie
 
 export type SubagentHandoff = typeof SubagentHandoff.Type;
 
+// The T3 project a local clone was found or created as.
+const T3ProjectRow = Schema.Struct({ repo: Schema.String, projectId: Schema.String });
+
+type T3ProjectRow = typeof T3ProjectRow.Type;
+
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
+
+export const journalPath = (stateDirectory: string) => join(stateDirectory, 'journal.db');
+
+const clientLayer = (filename: string, options: { readonly readonly?: boolean } = {}) =>
+	SqliteClient.layer({ filename, ...options, transformQueryNames: String.camelToSnake, transformResultNames: String.snakeToCamel });
+
+const selectProjects = (sql: SqlClient.SqlClient) =>
+	SqlSchema.findAll({
+		Request: Schema.Void,
+		Result: Project,
+		execute: () => sql`SELECT * FROM projects ORDER BY team`,
+	})(undefined);
+
+// The projects as the service last wrote them, read without migrating, by a process beside it (the run hooks).
+export const readProjects = (filename: string) => SqlClient.SqlClient.pipe(Effect.flatMap(selectProjects), Effect.provide(clientLayer(filename, { readonly: true })));
 
 const migrations = SqliteMigrator.layer({
 	loader: SqliteMigrator.fromRecord({
@@ -423,6 +398,59 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0013_drop_chat': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`DROP TABLE chat_sessions`;
+			yield* sql`DROP TABLE topics`;
+			yield* sql`DROP TABLE archive_thread`;
+			yield* sql`DROP TABLE delivery_mark`;
+			yield* sql`ALTER TABLE projects DROP COLUMN thread`;
+			yield* sql`DELETE FROM requests WHERE json_extract(request, '$._tag') = 'phase'`;
+			// Command replies and failures are posted on GitHub, so their notices left in the outbox are dropped.
+			yield* sql`UPDATE notices SET sent_at = created_at WHERE sent_at IS NULL AND identifier LIKE 'CMD-%'`;
+		}),
+		'0014_create_t3_projects': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`
+				CREATE TABLE t3_projects (
+					repo TEXT PRIMARY KEY,
+					project_id TEXT NOT NULL
+				)
+			`;
+		}),
+		'0015_add_threads': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN thread_id TEXT`;
+			yield* sql`ALTER TABLE runs ADD COLUMN thread_run_id TEXT`;
+		}),
+		'0016_add_thread_settling_and_command_threads': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs ADD COLUMN thread_settled_at INTEGER`;
+			yield* sql`ALTER TABLE commands ADD COLUMN thread_id TEXT`;
+		}),
+		'0017_drop_tabs': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`ALTER TABLE runs DROP COLUMN tab_id`;
+			yield* sql`ALTER TABLE runs DROP COLUMN pane_id`;
+			yield* sql`ALTER TABLE runs DROP COLUMN tail_hash`;
+			yield* sql`UPDATE runs SET status = 'running' WHERE status = 'awaitingInput'`;
+			yield* sql`UPDATE runs SET agent_status = NULL WHERE agent_status NOT IN ('working', 'idle', 'blocked')`;
+			yield* sql`UPDATE runs SET handoff = NULL WHERE json_extract(handoff, '$.step') = 'cleared'`;
+			yield* sql`ALTER TABLE commands DROP COLUMN tab_id`;
+			yield* sql`ALTER TABLE commands DROP COLUMN pane_id`;
+			yield* sql`ALTER TABLE commands DROP COLUMN session`;
+			yield* sql`ALTER TABLE commands DROP COLUMN agent_status`;
+			yield* sql`ALTER TABLE commands DROP COLUMN agent_status_since`;
+			yield* sql`ALTER TABLE commands DROP COLUMN nudged_at`;
+			yield* sql`ALTER TABLE commands DROP COLUMN tail_hash`;
+			// Notices no rule writes any more are not posted.
+			yield* sql`UPDATE notices SET sent_at = created_at WHERE sent_at IS NULL AND purpose IN ('awaitingInput', 'error', 'workingOrphan')`;
+		}),
 	}),
 });
 
@@ -453,22 +481,6 @@ export class Journal extends Context.Service<
 		// Records the claim and drops the requests that asked for it in one transaction, so a crash never claims one twice
 		// or loses it.
 		readonly claimRun: (run: Run, requestIds: ReadonlyArray<number>) => Effect.Effect<void, JournalError>;
-		// When the newest webhook delivery the last complete scan saw was delivered, in ms; none before the first scan.
-		readonly deliveryMark: Effect.Effect<Option.Option<number>, JournalError>;
-		readonly setDeliveryMark: (deliveredAt: number) => Effect.Effect<void, JournalError>;
-		// Records that the bot messages were written in the Claude session.
-		readonly addChatSession: (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) => Effect.Effect<void, JournalError>;
-		readonly chatSession: (messageRef: MessageRef) => Effect.Effect<Option.Option<ChatSession>, JournalError>;
-		// The session of the main chat's newest bot message.
-		readonly latestChatSession: Effect.Effect<Option.Option<ChatSession>, JournalError>;
-		// The newest bot message in the thread.
-		readonly lastChatMessage: (thread: ThreadRef) => Effect.Effect<Option.Option<ChatMessage>, JournalError>;
-		readonly listTopics: Effect.Effect<ReadonlyArray<Topic>, JournalError>;
-		// Inserts the topic or replaces the one of the same epic.
-		readonly putTopic: (topic: Topic) => Effect.Effect<void, JournalError>;
-		readonly deleteTopic: (epicId: string) => Effect.Effect<void, JournalError>;
-		readonly archiveThread: Effect.Effect<Option.Option<ThreadRef>, JournalError>;
-		readonly setArchiveThread: (thread: ThreadRef) => Effect.Effect<void, JournalError>;
 		// By team name.
 		readonly listProjects: Effect.Effect<ReadonlyArray<Project>, JournalError>;
 		// Inserts each project or replaces the one of the same team, all in one transaction.
@@ -482,6 +494,10 @@ export class Journal extends Context.Service<
 		readonly markNoticeSent: (id: number) => Effect.Effect<void, JournalError>;
 		// Records that the run's subagent was told to hand off; false when it was already.
 		readonly addSubagentHandoff: (handoff: SubagentHandoff) => Effect.Effect<boolean, JournalError>;
+		readonly getT3Project: (repo: string) => Effect.Effect<Option.Option<string>, JournalError>;
+		readonly listT3Projects: Effect.Effect<ReadonlyArray<T3ProjectRow>, JournalError>;
+		// Inserts the row or replaces the one of the same repo.
+		readonly putT3Project: (row: T3ProjectRow) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -578,79 +594,7 @@ export class Journal extends Context.Service<
 				const claimRun = (run: Run, requestIds: ReadonlyArray<number>) =>
 					sql.withTransaction(putRun(run).pipe(Effect.andThen(Effect.forEach(requestIds, deleteRequest, { discard: true }))));
 
-				const deliveryMark = SqlSchema.findOneOption({
-					Request: Schema.Void,
-					Result: Schema.Struct({ deliveredAt: Millis }),
-					execute: () => sql`SELECT delivered_at FROM delivery_mark`,
-				})(undefined).pipe(Effect.map(Option.map(({ deliveredAt }) => deliveredAt)));
-
-				const setDeliveryMark = SqlSchema.void({
-					Request: Millis,
-					execute: (deliveredAt) => sql`INSERT OR REPLACE INTO delivery_mark (id, delivered_at) VALUES (1, ${deliveredAt})`,
-				});
-
-				const insertChatSession = SqlSchema.void({
-					Request: ChatMessage,
-					execute: (row) => sql`INSERT OR REPLACE INTO chat_sessions ${sql.insert(row)}`,
-				});
-
-				const addChatSession = (messageRefs: ReadonlyArray<MessageRef>, post: ChatPost) =>
-					Clock.currentTimeMillis.pipe(
-						Effect.flatMap((createdAt) =>
-							sql.withTransaction(Effect.forEach(messageRefs, (messageRef) => insertChatSession({ messageRef, ...post, createdAt }), { discard: true })),
-						),
-					);
-
-				const chatSession = SqlSchema.findOneOption({
-					Request: MessageRef,
-					Result: ChatSession,
-					execute: (ref) => sql`SELECT session_id, cwd FROM chat_sessions WHERE message_ref = ${ref}`,
-				});
-
-				const latestChatSession = SqlSchema.findOneOption({
-					Request: Schema.Void,
-					Result: ChatSession,
-					execute: () => sql`SELECT session_id, cwd FROM chat_sessions WHERE thread IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-				})(undefined);
-
-				const lastChatMessage = SqlSchema.findOneOption({
-					Request: ThreadRef,
-					Result: ChatMessage,
-					execute: (thread) => sql`SELECT * FROM chat_sessions WHERE thread = ${thread} ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-				});
-
-				const listTopics = SqlSchema.findAll({
-					Request: Schema.Void,
-					Result: Topic,
-					execute: () => sql`SELECT * FROM topics ORDER BY rowid`,
-				})(undefined);
-
-				const putTopic = SqlSchema.void({
-					Request: Topic,
-					execute: (row) => sql`INSERT OR REPLACE INTO topics ${sql.insert(row)}`,
-				});
-
-				const deleteTopic = SqlSchema.void({
-					Request: EpicId,
-					execute: (epicId) => sql`DELETE FROM topics WHERE epic_id = ${epicId}`,
-				});
-
-				const archiveThread = SqlSchema.findOneOption({
-					Request: Schema.Void,
-					Result: Schema.Struct({ thread: ThreadRef }),
-					execute: () => sql`SELECT thread FROM archive_thread`,
-				})(undefined).pipe(Effect.map(Option.map(({ thread }) => thread)));
-
-				const setArchiveThread = SqlSchema.void({
-					Request: ThreadRef,
-					execute: (thread) => sql`INSERT OR REPLACE INTO archive_thread (id, thread) VALUES (1, ${thread})`,
-				});
-
-				const listProjects = SqlSchema.findAll({
-					Request: Schema.Void,
-					Result: Project,
-					execute: () => sql`SELECT * FROM projects ORDER BY team`,
-				})(undefined);
+				const listProjects = selectProjects(sql);
 
 				const putProject = SqlSchema.void({
 					Request: Project,
@@ -709,6 +653,25 @@ export class Journal extends Context.Service<
 						Effect.map(Option.isSome),
 					);
 
+				const findT3Project = SqlSchema.findOneOption({
+					Request: Schema.String,
+					Result: T3ProjectRow,
+					execute: (repo) => sql`SELECT * FROM t3_projects WHERE repo = ${repo}`,
+				});
+
+				const getT3Project = (repo: string) => findT3Project(repo).pipe(Effect.map(Option.map(({ projectId }) => projectId)));
+
+				const listT3Projects = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: T3ProjectRow,
+					execute: () => sql`SELECT * FROM t3_projects ORDER BY repo`,
+				})(undefined);
+
+				const putT3Project = SqlSchema.void({
+					Request: T3ProjectRow,
+					execute: (row) => sql`INSERT OR REPLACE INTO t3_projects ${sql.insert(row)}`,
+				});
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -723,17 +686,6 @@ export class Journal extends Context.Service<
 					listRequests,
 					deleteRequest,
 					claimRun,
-					deliveryMark,
-					setDeliveryMark,
-					addChatSession,
-					chatSession,
-					latestChatSession,
-					lastChatMessage,
-					listTopics,
-					putTopic,
-					deleteTopic,
-					archiveThread,
-					setArchiveThread,
 					listProjects,
 					putProjects,
 					deleteProject,
@@ -742,12 +694,13 @@ export class Journal extends Context.Service<
 					unsentNotices,
 					markNoticeSent,
 					addSubagentHandoff,
+					getT3Project,
+					listT3Projects,
+					putT3Project,
 				});
 			}),
 		).pipe(
 			Layer.provide(migrations),
-			Layer.provide(
-				SqliteClient.layer({ filename, transformQueryNames: String.camelToSnake, transformResultNames: String.snakeToCamel }),
-			),
+			Layer.provide(clientLayer(filename)),
 		);
 }

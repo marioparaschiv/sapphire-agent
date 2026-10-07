@@ -1,104 +1,94 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { Transient } from './call-policy.ts';
-import { deliveries, type Harness, makeHarness } from './test-harness.ts';
+import { Journal } from './journal.ts';
+import { LinearFixture } from './linear-fixture.ts';
+import { noticesRule } from './notices.ts';
+import { Planner } from './planner.ts';
+import { type Harness, makeHarness, markerKeys, plannerDependencies } from './test-harness.ts';
 
-const greet = (h: Harness) => h.telegram.write({ from: h.telegramUser, text: 'hi' });
+const invalid = '🔴 **TEST-10 wrote an invalid result file**';
 
-const topicOf = (h: Harness, title: string) => {
-	const topic = h.telegram.topics().find((candidate) => candidate.title === title);
+// A run whose agent stopped and left a result file that is not JSON, which the results rule flags with a notice.
+const invalidResultRun = (h: Harness) =>
+	Effect.gen(function* () {
+		const started = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
 
-	if (!topic) {
-		throw new Error(`no topic ${title}`);
-	}
+		yield* h.t3.setRunStatus(started.run.threadId, 'completed');
+		h.writeResultFile(started.run, '{ "summary": ');
 
-	return topic.topicId;
-};
-
-// Where each sent message landed: the title of its topic, or main.
-const placed = (h: Harness) =>
-	h.telegram.sent.map(({ text, topicId }) => [text.split('\n')[0], topicId === null ? 'main' : (h.telegram.topics().find((topic) => topic.topicId === topicId)?.title ?? 'deleted')]);
+		return started;
+	});
 
 describe('notices', () => {
-	it.effect("sends a notice to the epic's topic while it is open, else to its project's topic, else to the main chat", () =>
+	it.effect('posts a notice as a comment on its epic, ending with its marker, and marks it sent', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync', tail: '$ claude\nSegmentation fault' });
+			const { epic } = yield* invalidResultRun(h);
 
-			greet(h);
 			yield* h.tick;
 
-			// TEST-10 has a topic; TEST-21 has none, so its project's topic gets it; CMD-1 runs in a repo of no project.
-			h.herdr.setAgent(run.paneId, null);
-			h.linear.addEpic({ identifier: 'TEST-21', title: 'Still busy', state: 'Shipped' });
-			h.herdr.addTab({ label: 'TEST-21 Still busy', agentStatus: 'working' });
-			h.herdr.setStartBehaviour('no-agent');
-
-			const { number } = h.github.addPullRequest({ repo: 'acme/elsewhere', branch: 'mario/test-30-docs', author: 'marioparaschiv' });
-
-			yield* h.deliver(deliveries.issueComment('acme/elsewhere', number, h.github.addComment('acme/elsewhere', number, '@orchestratorbot what is running?')));
-			yield* h.tick;
-			yield* h.tick;
-
-			assert.deepStrictEqual(placed(h), [
-				['👻 An untracked agent works on TEST-21: no run of the epic tracks it.', '📁 Test'],
-				['🔴 TEST-10 stopped: the agent exited without writing its result file.', '🔴 TEST-10 Plugin settings sync'],
-				[placed(h)[2][0], 'main'],
-			]);
-			assert.match(placed(h)[2][0], /^🔴 CMD-1 could not start: /);
-			assert.isTrue([...h.notices('TEST-10'), ...h.notices('TEST-21'), ...h.notices('CMD-1')].every(({ sent }) => sent));
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['invalidResult:0']);
+			assert.isTrue(h.linear.comments(epic.id)[0].body.startsWith(`${invalid}\n`));
+			assert.deepStrictEqual(
+				h.notices('TEST-10').map(({ marker, sent }) => [marker, sent]),
+				[['invalidResult:0', true]],
+			);
 		}),
 	);
 
-	it.effect('sends a notice whose topic the user deleted to the main chat', () =>
+	it.effect('tries a notice Linear refused again next tick', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { epic } = yield* invalidResultRun(h);
 
-			greet(h);
-			yield* h.tick;
-			h.telegram.deleteTopic(topicOf(h, '🟢 TEST-10 Plugin settings sync'));
-			h.herdr.setAgent(run.paneId, null);
+			// The stuck label is created and added first, then the comment is refused.
+			h.linear.failWrite(h.linear.mutations.length + 3, 400);
 			yield* h.tick;
 
-			assert.deepStrictEqual(placed(h), [["🔴 TEST-10 stopped: the agent exited without writing its result file.", 'main']]);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), []);
+			assert.deepStrictEqual(h.notices('TEST-10').map(({ sent }) => sent), [false]);
+
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['invalidResult:0']);
 			assert.deepStrictEqual(h.notices('TEST-10').map(({ sent }) => sent), [true]);
 		}),
 	);
 
-	it.effect('sends a notice exactly once after a restart, when the process died before sending it or before marking it sent', () =>
+	it.effect('posts a notice exactly once when the process died after posting it and before marking it sent', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
-			const { run } = yield* h.startedRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const { epic } = yield* invalidResultRun(h);
 
-			// The user never wrote to the bot, so Telegram refuses every send, as when it is down; then the process dies.
-			h.herdr.setAgent(run.paneId, null);
+			h.linear.failWrite(h.linear.mutations.length + 3, 400);
 			yield* h.tick;
+			h.crashAtJournalWrite(1);
 			yield* h.tick;
 
-			assert.deepStrictEqual(
-				h.notices('TEST-10').map(({ marker, sent }) => [marker, sent]),
-				[['error:0', false]],
-			);
-			assert.deepStrictEqual(placed(h), []);
-
-			yield* h.restart;
-			greet(h);
-			// The project's topic is made, then the notice goes through and the process dies before marking it sent.
-			h.telegram.crashAfterWrite(2, new Transient({ message: 'the process died' }));
-			yield* h.tick;
-			assert.deepStrictEqual(placed(h), [['🔴 TEST-10 stopped: the agent exited without writing its result file.', '📁 Test']]);
+			assert.isTrue(h.crashed());
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['invalidResult:0']);
 			assert.deepStrictEqual(h.notices('TEST-10').map(({ sent }) => sent), [false]);
 
 			yield* h.restart;
 			yield* h.tick;
-			yield* h.tick;
 
-			assert.deepStrictEqual(placed(h), [['🔴 TEST-10 stopped: the agent exited without writing its result file.', '📁 Test']]);
-			assert.deepStrictEqual(
-				h.notices('TEST-10').map(({ marker, sent }) => [marker, sent]),
-				[['error:0', true]],
-			);
+			assert.deepStrictEqual(h.epicMarkers(epic.id), ['invalidResult:0']);
+			assert.deepStrictEqual(h.notices('TEST-10').map(({ sent }) => sent), [true]);
 		}),
+	);
+
+	it.effect('posts a notice on an epic the tick did not observe, and drops one whose epic Linear does not have', () =>
+		Effect.gen(function* () {
+			const linear = yield* LinearFixture;
+			const journal = yield* Journal;
+			const epic = linear.addEpic({ identifier: 'TEST-30', title: 'Docs', state: 'Shipped' });
+
+			yield* journal.addNotice({ marker: { identifier: 'TEST-30', purpose: 'keptWorktree', key: '/worktrees/test-30' }, text: '📦 **Kept TEST-30\'s worktree**' });
+			yield* journal.addNotice({ marker: { identifier: 'TEST-99', purpose: 'keptWorktree', key: '/worktrees/test-99' }, text: '📦 **Kept TEST-99\'s worktree**' });
+			yield* Planner.use((planner) => planner.tick({ paused: false })).pipe(Effect.provide(Planner.layer(Effect.all([noticesRule]))));
+
+			assert.deepStrictEqual(markerKeys(linear.comments(epic.id).map(({ body }) => body)), ['keptWorktree:/worktrees/test-30']);
+			assert.deepStrictEqual(yield* journal.unsentNotices, []);
+		}).pipe(Effect.provide(plannerDependencies('/tmp/sapphire-agent-notices-test'))),
 	);
 });

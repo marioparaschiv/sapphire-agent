@@ -1,24 +1,24 @@
 # Config
 
-Where configuration lives, every field with its default (`src/config.ts`), the projects (team-to-repo mapping), the API key, the Linear webhook secret, the GitHub App key and webhook secret files, the Telegram bot token, api_id and api_hash files, the env vars, and how startup reports problems.
+Where configuration lives, every field with its default (`src/config.ts`), the projects (team-to-repo mapping), the API key, the Linear webhook secret, the GitHub App key and webhook secret files, the Pushover app token and user key files, the T3 token, the env vars, and how startup reports problems.
 
 ## Files
 
 | What | Path |
 | --- | --- |
-| Config | `$HERDR_PLUGIN_CONFIG_DIR/config.json` = `~/.config/herdr/plugins/config/sapphire-agent/config.json` |
+| Config directory | `~/.config/sapphire-agent` (override `SAPPHIRE_AGENT_CONFIG_DIR`) |
+| State directory | `~/.local/state/sapphire-agent` (override `SAPPHIRE_AGENT_STATE_DIR`) |
+| Config | `config.json` in the config directory |
 | Linear API key | `~/.config/sapphire-agent/linear-key` (override `SAPPHIRE_AGENT_LINEAR_KEY_FILE`) |
-| GitHub App private key | `bot.app.privateKeyFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/app.pem` |
-| GitHub App webhook secret | `bot.app.webhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/webhook-secret` |
-| Linear webhook secret | `linearWebhookSecretFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/linear-webhook-secret` |
-| Telegram bot token, api_id, api_hash | `telegram.botTokenFile`, `telegram.apiIdFile`, `telegram.apiHashFile`; live: `$HERDR_PLUGIN_CONFIG_DIR/telegram-bot-token`, `telegram-api-id`, `telegram-api-hash` |
-| Telegram session (mtcute) | `$HERDR_PLUGIN_STATE_DIR/telegram.session` |
-| Claude config (trust) | `~/.claude.json` (override `CLAUDE_CONFIG_PATH`) |
+| GitHub App private key | `bot.app.privateKeyFile`; live: `app.pem` in the config directory |
+| GitHub App webhook secret | `bot.app.webhookSecretFile`; live: `webhook-secret` in the config directory |
+| Linear webhook secret | `linearWebhookSecretFile`; live: `linear-webhook-secret` in the config directory |
+| Pushover app token, user key | `pushover.appTokenFile`, `pushover.userKeyFile`; default `~/.config/sapphire-agent/pushover-app-token`, `~/.config/sapphire-agent/pushover-user-key` |
+| T3 token | `t3.tokenFile`; default `~/.config/sapphire-agent/t3-token`, written by `scripts/mint-t3-token.sh` |
 | Claude session transcripts | `~/.claude/projects` (override the directory holding `projects` with `CLAUDE_CONFIG_DIR`) |
-| Claude settings | `~/.claude/settings.json` (same override): the chat settings check and `promptCacheTtl` (`architecture.md`, The chat) |
 | Projects | The journal's `projects` table, managed with `sapphire project` (below) |
-| Journal | `$HERDR_PLUGIN_STATE_DIR/journal.db` |
-| Pause file | `$HERDR_PLUGIN_STATE_DIR/paused` |
+| Journal | `journal.db` in the state directory |
+| Pause file | `paused` in the state directory |
 
 Config is read once at startup. Restart the service after editing (see `operations.md`).
 
@@ -28,19 +28,17 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `pollSeconds` | `600` | int, min 5. The backstop poll: the tick interval when nothing else wakes the reconciler. Linear webhook deliveries, herdr events and `ctl.sh` requests trigger extra ticks in between. Monitoring timers (`awaitingInputAfterSeconds`, `staleAfterSeconds` and the others) are checked only on ticks, so they can fire up to this long late, and an epic's transient failure is retried only on the next tick. |
-| `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `awaitingInput`, `stale` runs, follow-ups included. Command runs do not count (`rules.md`). |
+| `pollSeconds` | `600` | int, min 5. The backstop poll: the tick interval when nothing else wakes the reconciler. Linear webhook deliveries, ended thread waits, agent events and `sapphire` requests trigger extra ticks in between. Monitoring timers (`awaitingInputAfterSeconds`, `staleAfterSeconds` and the others) are checked only on ticks, so they can fire up to this long late, and an epic's transient failure is retried only on the next tick. |
+| `maxInFlight` | `1` | int, min 1. Counts `claimed`, `running`, `stale` runs, follow-ups included. Command runs do not count (`rules.md`). |
 | `dispatchSettleSeconds` | `60` | int, min 0. How old a ready epic must be (from its `createdAt`) before it is claimed, since an epic is often created before its sub-issues. |
-| `awaitingInputAfterSeconds` | `180` | int, min 30. Quiet (`idle`, `done`, `blocked`) time without a result file before the pane tail is asked in the epic's topic, or the epic is flagged `awaitingInput` when it has none. The old name `stuckAfterSeconds` is still read as this key. |
-| `startTimeoutSeconds` | `300` | int, min 60. Time from the claim (or the process start, if later) for Claude to be confirmed started before the start fails. Covers waiting behind other starts, the fetch and herdr's 30 s start wait. |
-| `staleAfterSeconds` | `600` | int, min 60. herdr says `working` but the pane output has not changed for this long: nudge once. Also how long a run waits quietly for a reply to its message before its question is asked in its epic's topic. |
-| `nudgeGraceSeconds` | `600` | int, min 60. Output still unchanged this long after the nudge: run `stale`, epic flagged. |
+| `awaitingInputAfterSeconds` | `180` | int, min 30. How long a command's thread may sit stopped without its agent saying it is done before the command fails. The old name `stuckAfterSeconds` is still read as this key. |
+| `startTimeoutSeconds` | `300` | int, min 60. Time from the claim (or the process start, if later) for the run's T3 thread to be launched before the start fails. |
+| `staleAfterSeconds` | `600` | int, min 60. A run's thread shows no progress for this long: nudge once. |
+| `nudgeGraceSeconds` | `600` | int, min 60. Nothing the agent did itself this long after the nudge: run `stale`, epic flagged. |
 | `maxRunSeconds` | `5400` | int, min 600. Wall-clock cap from the claim; the epic is flagged once, in any in-flight state. The run keeps going. |
 | `handoffAtTokens` | `250000` | int, min 10000. Context (input, cache read and cache creation tokens of the latest assistant entry) at which a run's agent, or one of its subagents, hands its work to a fresh session (`rules.md`, Handoff). |
-| `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` notice is sent once (see `failure-policy.md`). |
-| `deliveryScanSeconds` | `300` | int, min 60. How often the App's failed webhook deliveries are looked for and redelivered, besides once at startup (`rules.md`, Missed deliveries). |
-| `worktreesDirectory` | `~/.herdr/worktrees` | `~` expanded. |
-| `workspaceLabel` | `agents` | herdr workspace for command tabs whose repo belongs to no project. Run tabs go in a workspace named after their project's team. |
+| `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` notice is sent once (see `failure-policy.md`). Also how long observing may keep failing before Pushover is told once. |
+| `worktreesDirectory` | `~/.t3/worktrees` | `~` expanded. Where T3 creates worktrees (T3's own setting, keep the two equal); the run guards treat `<worktreesDirectory>/<repo>/<branch slug>` as a dispatched run's worktree. |
 | `states.*` | see below | Exact Linear workflow state names. |
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; the label group name is this without the trailing `:`. |
@@ -52,10 +50,11 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `bot.app.webhookSecretFile` | required | `~` expanded. The App's webhook secret, see below. |
 | `bot.app.webhookPort` | `3790` | int, 0 to 65535. The webhook server listens on `127.0.0.1:<port>`; nginx forwards `https://webhook.marioparaschiv.com/github` to it, and Tailscale Funnel forwards `/linear` (`operations.md`). 0 picks a free port (tests). |
 | `bot.allowedUsers` | required | Non-empty array of GitHub logins (any case). Only their mentions of the bot start a command; anyone else's is recorded as ignored and does nothing. |
-| `telegram.botTokenFile` | required | `~` expanded. The Telegram bot's token, see below. |
-| `telegram.apiIdFile`, `telegram.apiHashFile` | required | `~` expanded. The `api_id` and `api_hash` of a Telegram app (my.telegram.org), which the bot logs in over MTProto with, see below. |
-| `telegram.allowedUserIds` | required | Non-empty array of numeric Telegram user ids. Only their messages in their private chat with the bot reach the service; anyone else's are dropped and logged (`architecture.md`, The chat). Epic and project topics and notices go to the private chat of the first id. |
-| `telegram.transcriptionModelDirectory` | `$HERDR_PLUGIN_STATE_DIR/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | `~` expanded. The sherpa-onnx Parakeet TDT 0.6B v3 int8 model voice notes are transcribed with: `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt`. Transcription also needs `ffmpeg` on `PATH`. |
+| `pushover.appTokenFile` | `~/.config/sapphire-agent/pushover-app-token` | `~` expanded. The token of the Pushover application the service's notices about itself are sent with, see below. |
+| `pushover.userKeyFile` | `~/.config/sapphire-agent/pushover-user-key` | `~` expanded. The Pushover user key they are sent to, see below. |
+| `t3.url` | `http://127.0.0.1:3773` | The T3 Code server; its MCP endpoint is `<url>/mcp`. |
+| `t3.tokenFile` | `~/.config/sapphire-agent/t3-token` | `~` expanded. The full-access T3 token, see below. |
+| `t3.settingsFile` | `~/.t3/userdata/settings.json` | `~` expanded. T3's own settings, read at startup to check its worktree cleanup and auto-settle (`operations.md`, T3 settings). A missing file is T3's defaults. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 
@@ -67,7 +66,7 @@ A project is a Linear team sapphire-agent watches, by its exact name, and the lo
 sapphire project list
 sapphire project add Unbound ~/unbound --label-repos ~/unbound-app
 sapphire project edit Unbound --repo ~/unbound
-sapphire project remove Telecord   # refused while a run of the team is in flight; deletes its topic
+sapphire project remove Telecord   # refused while a run of the team is in flight
 ```
 
 - `repo`: local clone used by default. Must have a GitHub `origin`.
@@ -83,15 +82,15 @@ While the table is empty, the service imports config `teams` at startup (`import
 }
 ```
 
-Live config today: `teams` Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Sapphire Agent (this repo, `~/sapphire-agent`, so the plugin works on itself), imported as projects on the first start that has none, then to be deleted; `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
+Live config today: `teams` Unbound (with `labelReposDirectory`), Telecord, Hivemind, and Sapphire Agent (this repo, `~/sapphire-agent`, so the service works on itself), imported as projects on the first start that has none, then to be deleted; `maxInFlight` 3, all other fields at their defaults. It needs `"linearWebhookSecretFile": "~/.config/sapphire-agent/linear-webhook-secret"` and this `bot` entry before this version starts:
 
 ```json
 "bot": {
 	"login": "orchestratorbot",
 	"app": {
 		"id": 123456,
-		"privateKeyFile": "~/.config/herdr/plugins/config/sapphire-agent/app.pem",
-		"webhookSecretFile": "~/.config/herdr/plugins/config/sapphire-agent/webhook-secret"
+		"privateKeyFile": "~/.config/sapphire-agent/app.pem",
+		"webhookSecretFile": "~/.config/sapphire-agent/webhook-secret"
 	},
 	"allowedUsers": ["marioparaschiv"]
 }
@@ -99,17 +98,7 @@ Live config today: `teams` Unbound (with `labelReposDirectory`), Telecord, Hivem
 
 with the App's real ID (`operations.md` covers creating and installing the App).
 
-It also needs a `telegram` entry, with the bot's files and the user's numeric Telegram id:
-
-```json
-"telegram": {
-	"botTokenFile": "~/.config/herdr/plugins/config/sapphire-agent/telegram-bot-token",
-	"apiIdFile": "~/.config/herdr/plugins/config/sapphire-agent/telegram-api-id",
-	"apiHashFile": "~/.config/herdr/plugins/config/sapphire-agent/telegram-api-hash",
-	"allowedUserIds": [123456789]
-}
-```
-
+The service also needs the two Pushover files at their default paths (or a `pushover` entry naming others); the CLI does not.
 ## API key
 
 - Plain text file containing a Linear personal API key; whitespace trimmed.
@@ -132,39 +121,40 @@ It also needs a `telegram` entry, with the bot's files and the user's numeric Te
 - The signing secret Linear shows on the webhook's page (Settings, API, Webhooks), as plain text; whitespace trimmed. Every Linear delivery's `Linear-Signature` is checked against it.
 - Same rules as the API key: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no Linear webhook secret: create <path> with mode 600`; empty fails.
 
-## Telegram bot token, api_id and api_hash
+## Pushover app token and user key
 
-- The token BotFather gives the bot (`123456:ABC...`), as plain text; whitespace trimmed.
-- `api_id` (a number) and `api_hash` come from the Telegram app registered at my.telegram.org, each as plain text in its own file.
-- Same rules as the API key for all three: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no Telegram bot token: create <path> with mode 600` (or `api_id`, `api_hash`); empty fails; an `api_id` that is no number fails with `<path> is not a number`.
-- The bot logs in at startup; a refused login stops startup with `Telegram refused to log in as the bot: ...`, outside the `StartupError`.
+- The API token of a Pushover application (pushover.net, Create an Application) and the user key from the Pushover dashboard, each as plain text in its own file; whitespace trimmed.
+- Same rules as the API key for both: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no Pushover app token: create <path> with mode 600` (or `user key`); empty fails; anything but 30 letters and digits fails with `<path> is not a Pushover app token: expected 30 letters and digits`.
+- Only the service reads them (`PushoverConfig`); the CLI runs without them.
+
+## T3 token
+
+- A T3 session token (`<base64url JSON claims>.<signature>`) whose runtime-mode ceiling is full-access, so it may create projects and launch full-access threads. `scripts/mint-t3-token.sh` issues one with `t3 auth session issue` and re-signs its claims with `rtc: full-access`; T3 has no flag for that ceiling. No OAuth.
+- Same rules as the API key: mode 600, else `... is readable by other users; run chmod 600 ...`; missing: `no T3 token: create <path> with mode 600`; a file whose claims do not decode, or carry no `exp`, fails with `<path> is not a T3 session token; run scripts/mint-t3-token.sh`. Its `exp` claim (epoch ms) is when it expires.
+- Read by the service and the CLI (`T3Config`). When T3 rejects it (HTTP 401), see `failure-policy.md`.
 
 ## Env vars
 
-Read with Effect `Config`; set by `systemd/sapphire-agent.service`. `scripts/ctl.sh` defaults the four required ones to the same values, and a command's tab gets the service's own values (`rules.md`).
+Read with Effect `Config`. None is required: each has a default in code (`src/config.ts`, `src/directories.ts`), so neither `systemd/sapphire-agent.service` nor `scripts/ctl.sh` sets them, and a command thread's `ctl.sh` reaches the same journal and config. An empty value counts as unset.
 
-| Var | Required | Value in the unit |
-| --- | --- | --- |
-| `HERDR_BIN_PATH` | yes | `%h/.local/bin/herdr` |
-| `HERDR_SOCKET_PATH` | yes | `%h/.config/herdr/herdr.sock` (default session) |
-| `HERDR_PLUGIN_CONFIG_DIR` | yes | `%h/.config/herdr/plugins/config/sapphire-agent` |
-| `HERDR_PLUGIN_STATE_DIR` | yes | `%h/.local/state/herdr/plugins/sapphire-agent` |
-| `SAPPHIRE_AGENT_LINEAR_KEY_FILE` | no | default `~/.config/sapphire-agent/linear-key` |
-| `CLAUDE_CONFIG_PATH` | no | default `~/.claude.json` |
-| `CLAUDE_CONFIG_DIR` | no | default `~/.claude`, as Claude Code reads it |
+| Var | Default |
+| --- | --- |
+| `SAPPHIRE_AGENT_CONFIG_DIR` | `~/.config/sapphire-agent` |
+| `SAPPHIRE_AGENT_STATE_DIR` | `~/.local/state/sapphire-agent` |
+| `SAPPHIRE_AGENT_LINEAR_KEY_FILE` | `~/.config/sapphire-agent/linear-key` |
+| `CLAUDE_CONFIG_DIR` | `~/.claude`, as Claude Code reads it |
 
 ## Startup errors
 
-Env, the config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Telegram bot token, `api_id` and `api_hash` are all checked, and the transcription model's files looked for, before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero. The CLI (`ctl.ts`) checks the same minus the Telegram files and the model, which only the service uses. The chat settings check and `promptCacheTtl` are read after startup and only warn (`architecture.md`, The chat):
+The config file, the API key, the Linear webhook secret, the App's private key and webhook secret and the Pushover app token and user key are all checked before anything runs, and every problem is reported together in one `StartupError`, logged once, after which the process exits non-zero. The CLI (`ctl.ts`) checks the same minus the Pushover files, which only the service uses:
 
 ```
 StartupError: cannot start, fix these and restart:
-- HERDR_BIN_PATH: Expected string
-- /home/dev/.config/herdr/plugins/config/sapphire-agent/config.json pollSeconds: Expected a value greater than or equal to 5
-- /home/dev/.config/herdr/plugins/config/sapphire-agent/config.json maxInflight: Expected no excess property
+- /home/dev/.config/sapphire-agent/config.json pollSeconds: Expected a value greater than or equal to 5
+- /home/dev/.config/sapphire-agent/config.json maxInflight: Expected no excess property
 - no Linear API key: create /home/dev/.config/sapphire-agent/linear-key with mode 600
-- /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem is readable by other users; run chmod 600 /home/dev/.config/herdr/plugins/config/sapphire-agent/app.pem
-- no transcription model in /home/dev/.local/state/herdr/plugins/sapphire-agent/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8: encoder.int8.onnx, tokens.txt missing; download sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 there
+- /home/dev/.config/sapphire-agent/app.pem is readable by other users; run chmod 600 /home/dev/.config/sapphire-agent/app.pem
+- no Pushover user key: create /home/dev/.config/sapphire-agent/pushover-user-key with mode 600
 ```
 
-A file whose path comes from a missing env var or an invalid config file is not read; that problem is already reported. Startup also stops while the old dispatcher's `claims.json` still holds claims (`operations.md`).
+A file whose path comes from an invalid config file is not read; that problem is already reported. Startup also stops while the old dispatcher's `claims.json` still holds claims (`operations.md`).

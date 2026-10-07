@@ -1,11 +1,11 @@
 import { Effect, Option } from 'effect';
 import type { CallError } from './call-policy.ts';
 import { AppConfig } from './config.ts';
-import { Herdr } from './herdr.ts';
 import { Journal, type JournalError, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
 import type { Notice } from './markers.ts';
-import { type Observation, stuckLabelOf, tabOf } from './observation.ts';
+import { type Observation, stuckLabelOf } from './observation.ts';
+import { T3, type T3Error } from './t3.ts';
 
 // The epic a flag goes on.
 export type FlagTarget = { readonly epicId: string; readonly teamId: string };
@@ -34,37 +34,51 @@ export const makeFlag = Effect.gen(function* () {
 		});
 });
 
-export const makeTabActions = Effect.gen(function* () {
-	const herdr = yield* Herdr;
+// The run is over.
+export const makeEndRun = Effect.gen(function* () {
 	const journal = yield* Journal;
 
-	// Closes the run's tab if the observation still shows it. Matched by tab and pane id, so a tab the user renamed
-	// closes too, while a tab that only reuses the id does not.
-	const closeRunTab = (observation: Observation, run: Run): Effect.Effect<void, CallError> =>
-		Option.match(tabOf(observation, run), {
-			onNone: () => Effect.void,
-			onSome: (tab) => herdr.closeTab(tab.tabId).pipe(Effect.andThen((closed) => (closed ? Effect.log(`closed tab ${tab.tabId}`) : Effect.void))),
-		});
-
-	// The run is over: its tab is closed first, so a crash in between leaves a run that is ended again next tick.
-	const endRun = (observation: Observation, run: Run, reason: string): Effect.Effect<void, CallError | JournalError> =>
-		closeRunTab(observation, run).pipe(
-			Effect.andThen(journal.putRun({ ...run, status: 'ended' })),
-			Effect.andThen(Effect.log(`${reason}; ended the run`)),
-		);
-
-	return { closeRunTab, endRun };
+	return (run: Run, reason: string): Effect.Effect<void, JournalError> =>
+		journal.putRun({ ...run, status: 'ended' }).pipe(Effect.andThen(Effect.log(`${reason}; ended the run`)));
 });
 
-// Esc, then the prompt `continue`, for an agent whose pane stopped changing. The stale handling follows after its grace
-// period whether or not the nudge got through, so a failure is only logged.
-export const makeNudge = Effect.gen(function* () {
-	const herdr = yield* Herdr;
+// Interrupts the newest run of a run's or command's T3 thread, if it has one. clientRequestId makes a retry land once.
+// A thread that is gone or has nothing left to interrupt is fine.
+export const makeInterrupt = Effect.gen(function* () {
+	const t3 = yield* T3;
 
-	return (paneId: string): Effect.Effect<void> =>
-		herdr.sendKeys(paneId, ['esc']).pipe(
-			Effect.andThen(herdr.prompt(paneId, 'continue')),
-			Effect.andThen(Effect.log(`nudged ${paneId}`)),
-			Effect.catch((error) => Effect.logWarning(`nudging ${paneId} failed: ${error.message}`)),
+	return ({ threadId }: { readonly threadId: string | null }, reason: string, clientRequestId: string): Effect.Effect<void, T3Error> =>
+		threadId === null
+			? Effect.void
+			: t3.interruptThread({ threadId, reason, clientRequestId }).pipe(
+					Effect.andThen(({ status }) => Effect.log(`interrupted T3 thread ${threadId}: ${status}`)),
+					Effect.catchTag('T3ToolFailure', (error) =>
+						error.code === 'thread_not_found' || error.code === 'thread_not_interruptible' ? Effect.log(`T3 thread ${threadId} has nothing to interrupt: ${error.message}`) : Effect.fail(error),
+					),
+				);
+});
+
+// Settles the T3 thread; one that is gone has nothing left to settle.
+export const makeSettle = Effect.gen(function* () {
+	const t3 = yield* T3;
+
+	return (threadId: string): Effect.Effect<void, T3Error> =>
+		t3.organizeThread({ threadId, action: 'settle' }).pipe(
+			Effect.andThen(Effect.log(`settled T3 thread ${threadId}`)),
+			Effect.catchTag('T3ToolFailure', (error) => (error.code === 'thread_not_found' ? Effect.void : Effect.fail(error))),
+		);
+});
+
+// Sends a message to the run's T3 thread, keyed so a retry lands once; the run follows the thread's newest run. T3
+// refusing it is logged.
+export const makeSend = Effect.gen(function* () {
+	const t3 = yield* T3;
+	const journal = yield* Journal;
+
+	return (run: Run & { readonly threadId: string }, message: string, { mode, clientRequestId }: { readonly mode: 'auto' | 'restart'; readonly clientRequestId: string }) =>
+		t3.sendThread({ threadId: run.threadId, message, mode, clientRequestId }).pipe(
+			Effect.tap(({ runId }) => (runId === run.threadRunId ? Effect.void : journal.putRun({ ...run, threadRunId: runId }))),
+			Effect.andThen(({ delivery }) => Effect.log(`sent ${clientRequestId} to T3 thread ${run.threadId} (${delivery})`)),
+			Effect.catchTag('T3ToolFailure', (error) => Effect.logWarning(`sending ${clientRequestId} to T3 thread ${run.threadId} failed: ${error.message}`)),
 		);
 });

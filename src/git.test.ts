@@ -128,11 +128,12 @@ describe('Git', () => {
 		git(noHead, 'remote', 'add', 'origin', origin);
 
 		return Effect.gen(function* () {
-			const { prepareWorktree } = yield* Git;
+			const { prepareWorktree, defaultBranch } = yield* Git;
 			const path = yield* prepareWorktree(noHead, 'mario/unb-14');
 
 			assert.strictEqual(git(path, 'log', '-1', '--format=%s'), 'after clone');
 			assert.strictEqual(git(noHead, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'), 'origin/main');
+			assert.strictEqual(yield* defaultBranch(noHead), 'main');
 
 			const error = yield* Effect.flip(prepareWorktree(missing, 'mario/unb-15'));
 
@@ -302,7 +303,7 @@ describe('Git', () => {
 			const { prepareWorktree, readResultFile, removeResultFile } = yield* Git;
 			const path = yield* prepareWorktree(repo, 'mario/unb-14');
 			const worktree: Worktree = { repo, branch: 'mario/unb-14', path };
-			const resultPath = join(repo, '.git', 'worktrees', 'mario-unb-14', 'herdr-result.json');
+			const resultPath = join(repo, '.git', 'worktrees', 'mario-unb-14', 'sapphire-agent-result.json');
 
 			assert.deepStrictEqual(yield* readResultFile(worktree), Option.none());
 

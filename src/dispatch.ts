@@ -1,19 +1,19 @@
 import { join } from 'node:path';
-import { Clock, Effect, Option, Result, Semaphore } from 'effect';
+import { Clock, Effect, Option, Result } from 'effect';
 import { type CallError, Permanent } from './call-policy.ts';
-import { ClaudeTrust } from './claude-trust.ts';
 import { Comments } from './comments.ts';
 import { AppConfig, type AppConfigShape } from './config.ts';
 import { Git } from './git.ts';
 import { GitHub, type PullRequest } from './github.ts';
-import { Herdr, type OpenedTab, type Pane } from './herdr.ts';
 import { Journal, type Job, newSession, type Project, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { activeRoles, hasRole, isInFlight, isOver, type Observation, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, isInFlight, isOver, type Observation, observedWorktreePath, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
-import { makeFlag } from './run-actions.ts';
+import { makeFlag, makeInterrupt } from './run-actions.ts';
+import { hasActiveRun, hasFailedRun, T3, type T3ToolFailure, type WorkspaceStrategy } from './t3.ts';
+import { T3Projects } from './t3-projects.ts';
 
 const repoNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -51,7 +51,7 @@ const resolveRepo = (config: AppConfigShape, { repo, labelReposDirectory }: Proj
 	return Result.succeed(join(labelReposDirectory, name));
 };
 
-export const repoOf = (config: AppConfigShape, projects: Projects['Service'], epic: Epic) =>
+const repoOf = (config: AppConfigShape, projects: Projects['Service'], epic: Epic) =>
 	projects.get(epic.team.name).pipe(
 		Effect.flatMap(
 			Option.match({
@@ -71,8 +71,6 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session:
 	repo,
 	branch: epic.branchName,
 	worktreePath: null,
-	tabId: null,
-	paneId: null,
 	session,
 	replyTo: null,
 	claimedAt,
@@ -80,21 +78,12 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session:
 	agentStatus: null,
 	agentStatusSince: null,
 	nudgedAt: null,
-	tailHash: null,
 	result: null,
 	handoff: null,
+	threadId: null,
+	threadRunId: null,
+	threadSettledAt: null,
 });
-
-// Takes over a tab that is already open for the run, e.g. one opened just before a crash.
-export const adoptTab = (run: Run, tab: OpenedTab): Run => ({ ...run, tabId: tab.tabId, paneId: tab.paneId });
-
-// An owned tab of the epic that no run tracks yet.
-const adoptableTab = (observation: Observation, runs: ReadonlyArray<Run>, identifier: string) =>
-	Option.fromUndefinedOr(
-		observation.tabs.find(
-			(tab) => Option.contains(tab.identifier, identifier) && !runs.some((run) => run.tabId === tab.tabId || run.paneId === tab.paneId),
-		),
-	);
 
 // Claims ready epics up to maxInFlight, in Linear's order: a top-level epic in the ready state of a resolved team,
 // without the stuck label, created at least dispatchSettleSeconds ago, and with no run or only one that is over.
@@ -150,34 +139,23 @@ export const dispatchRule = Effect.gen(function* () {
 	return { name: 'dispatch', pausable: true, plan } satisfies Rule;
 });
 
-// Claude starts in the agent's recorded session, so other sessions reach it by name.
-export const sessionClaudeArgs = (session: Session | null) => (session === null ? [] : ['--session-id', session.id, '--name', session.name]);
+const refusedByT3 = (error: T3ToolFailure) => new Permanent({ message: `T3 refused ${error.tool}: ${error.message} (${error.code})` });
 
-export const runsClaude = (pane: Option.Option<Pane>) => Option.exists(pane, (found) => Option.contains(found.agent, 'claude'));
-
-export const describeAgent = (pane: Option.Option<Pane>) =>
-	Option.match(Option.flatMap(pane, (found) => Option.map(found.agent, (agent) => `${agent} is ${found.agentStatus}`)), {
-		onNone: () => 'no agent is running',
-		onSome: (state) => state,
-	});
-
-// Takes each claimed run through worktree, trust, tab, Claude and the move to implementing. Each step looks at what is
-// already there, so after a crash the next tick carries on where it stopped: an existing worktree is reused, an owned
-// tab of the epic is adopted, and Claude found in the pane is not started again. Not paused, so a claim made before a
-// pause still starts.
+// Takes each claimed run through its T3 thread and the move to implementing. The thread is recorded before the move,
+// and a thread T3 has for the claim is not launched again, so after a crash the next tick carries on where it stopped.
+// Not paused, so a claim made before a pause still starts. Also records the worktree of a run once T3 made it.
 export const startRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
 	const git = yield* Git;
-	const trust = yield* ClaudeTrust;
-	const herdr = yield* Herdr;
 	const linear = yield* Linear;
 	const github = yield* GitHub;
 	const prompts = yield* Prompts;
 	const comments = yield* Comments;
+	const t3 = yield* T3;
+	const t3Projects = yield* T3Projects;
 	const flag = yield* makeFlag;
-	// Starts race on ~/.claude.json and on creating the workspace.
-	const starts = yield* Semaphore.make(1);
+	const interrupt = yield* makeInterrupt;
 	// After a restart a claimed run gets a full start window again.
 	const bootedAt = yield* Clock.currentTimeMillis;
 
@@ -205,10 +183,9 @@ export const startRule = Effect.gen(function* () {
 	// request starts a new one once the label is removed.
 	const failStart = (observation: Observation, run: Run, epic: Epic, error: string) =>
 		Effect.gen(function* () {
-			const tail = run.paneId === null ? Option.none<string>() : yield* herdr.readTail(run.paneId);
-
 			yield* Effect.logError(`failed to start: ${error}`);
-			yield* flag(observation, run, comments.startFailed({ identifier: run.identifier, claimedAt: run.claimedAt, error, tail }));
+			yield* flag(observation, run, comments.startFailed({ identifier: run.identifier, claimedAt: run.claimedAt, error }));
+			yield* interrupt(run, 'the start failed', `start-failed-${run.claimedAt}`);
 
 			if (run.job._tag === 'orchestrate') {
 				return yield* journal.putRun({ ...run, status: 'error' });
@@ -224,66 +201,104 @@ export const startRule = Effect.gen(function* () {
 			yield* journal.putRun({ ...run, status: 'ended', worktreePath: run.worktreePath ?? git.worktreePath(run.repo, run.branch) });
 		});
 
-	const start = (observation: Observation, runs: ReadonlyArray<Run>, claimed: Run, epic: Epic) => {
-		let run = claimed;
+	// A thread T3 has for the epic already: one launched for this claim (e.g. just before a crash), or one still working.
+	// An older thread that is done belongs to an earlier run.
+	const existingThread = (run: Run, projectId: string) =>
+		t3.listThreads({ projectId, titleContains: run.identifier, includeSubagents: false }).pipe(
+			Effect.map((threads) =>
+				Option.fromUndefinedOr(
+					threads.find(
+						(thread) =>
+							thread.title.startsWith(`${run.identifier} `) &&
+							(Date.parse(thread.createdAt) >= run.claimedAt || hasActiveRun(thread.status)),
+					),
+				),
+			),
+		);
 
-		const prepare = Effect.gen(function* () {
-			const path = yield* git.prepareWorktree(run.repo, run.branch);
-			const worktree = { repo: run.repo, branch: run.branch, path };
+	const worktreeOnBranch = (observation: Observation, run: Run) =>
+		Option.map(Option.fromUndefinedOr(observation.worktrees.find((worktree) => worktree.repo === run.repo && worktree.branch === run.branch)), ({ path }) => path);
+
+	// A follow-up works in the epic's worktree (restored from origin if it was cleaned up), pulled up to date. A new run
+	// reuses a worktree already on the branch, otherwise T3 makes one from the default branch as fetched from origin.
+	const workspaceFor = (observation: Observation, run: Run): Effect.Effect<{ readonly worktreePath: string | null; readonly workspaceStrategy: WorkspaceStrategy }, CallError> =>
+		Effect.gen(function* () {
+			const existing = run.job._tag === 'follow-up' ? Option.some(yield* git.prepareWorktree(run.repo, run.branch)) : worktreeOnBranch(observation, run);
+
+			if (Option.isNone(existing)) {
+				return { worktreePath: null, workspaceStrategy: { type: 'worktree', baseRef: yield* git.defaultBranch(run.repo), branch: run.branch, startFromOrigin: true } };
+			}
+
+			const worktree = { repo: run.repo, branch: run.branch, path: existing.value };
 
 			if (run.job._tag === 'follow-up') {
 				yield* git.pull(worktree);
 			}
 
 			yield* git.removeResultFile(worktree);
-			run = { ...run, worktreePath: path };
-			yield* journal.putRun(run);
 
-			return path;
+			return { worktreePath: worktree.path, workspaceStrategy: { type: 'existing_worktree', worktreePath: worktree.path, branch: run.branch } };
 		});
 
-		const openTab = (path: string) =>
-			Effect.gen(function* () {
-				yield* trust.trustFolder(path);
+	const launch = (observation: Observation, run: Run, epic: Epic, projectId: string) =>
+		Effect.gen(function* () {
+			const { worktreePath, workspaceStrategy } = yield* workspaceFor(observation, run);
+			const message = yield* promptFor(run, epic);
 
-				const found = adoptableTab(observation, runs, run.identifier);
-				// The observation is from the start of the tick; an earlier rule may have closed the tab since.
-				const live = Option.isSome(found) && Option.isSome(yield* herdr.pane(found.value.paneId)) ? found : Option.none();
-				const tab = yield* Option.match(live, {
-					onNone: () => herdr.openTab(epic.team.name, prompts.tabLabel(epic), path),
-					onSome: (adopted) => Effect.log(`adopting tab ${adopted.tabId}`).pipe(Effect.as(adopted)),
-				});
+			yield* Effect.log(`launching a T3 thread in project ${projectId}`);
 
-				run = adoptTab(run, tab);
-				yield* journal.putRun(run);
+			const launched = yield* t3.launchThread({ projectId, title: prompts.threadTitle(epic, 1), message, workspaceStrategy, runtimeMode: 'full-access' });
 
-				return tab;
-			});
+			return { threadId: launched.threadId, threadRunId: launched.runId, worktreePath, status: launched.status };
+		});
 
-		const steps = Effect.gen(function* () {
-			const path = run.worktreePath ?? (yield* prepare);
-			const { tabId, paneId } = run.tabId !== null && run.paneId !== null ? { tabId: run.tabId, paneId: run.paneId } : yield* openTab(path);
-			if (!runsClaude(yield* herdr.agent(paneId))) {
-				yield* Effect.log(`starting Claude in ${tabId} (${path})`);
-				yield* herdr.startClaude(paneId, run.identifier.toLowerCase(), yield* promptFor(run, epic), sessionClaudeArgs(run.session));
-
-				const agent = yield* herdr.agent(paneId);
-
-				if (!runsClaude(agent) || Option.exists(agent, (found) => found.agentStatus === 'blocked')) {
-					return yield* new Permanent({ message: `Claude did not start in ${tabId}: ${describeAgent(agent)}` });
-				}
-			}
-
+	const markRunning = (observation: Observation, run: Run, epic: Epic) =>
+		Effect.gen(function* () {
 			const team = observation.teams.get(run.teamId);
 
 			if (team && !Option.contains(roleOf(observation, epic), 'implementing')) {
 				yield* linear.moveIssue(epic.id, team.stateIds.implementing);
 			}
 
-			run = { ...run, status: 'running', startedAt: yield* Clock.currentTimeMillis };
-			yield* journal.putRun(run);
-			yield* Effect.log(`agent started in tab ${tabId}`);
+			const started: Run = { ...run, status: 'running', startedAt: yield* Clock.currentTimeMillis };
+
+			yield* journal.putRun(started);
+
+			return started;
 		});
+
+	const start = (observation: Observation, claimed: Run, epic: Epic) => {
+		let run = claimed;
+
+		// The thread is recorded before anything else, so a crash after the launch never launches a second one.
+		const steps = Effect.gen(function* () {
+			if (run.threadId === null) {
+				const projectId = yield* t3Projects.projectFor(run.repo);
+				const found = yield* existingThread(run, projectId);
+				const thread = yield* Option.match(found, {
+					onNone: () => launch(observation, run, epic, projectId),
+					onSome: (summary) =>
+						Effect.log(`adopting T3 thread ${summary.threadId}`).pipe(
+							Effect.as({
+								threadId: summary.threadId,
+								threadRunId: summary.latestRunId,
+								worktreePath: run.worktreePath ?? Option.getOrNull(worktreeOnBranch(observation, run)),
+								status: summary.status,
+							}),
+						),
+				});
+
+				run = { ...run, threadId: thread.threadId, threadRunId: thread.threadRunId, worktreePath: thread.worktreePath };
+				yield* journal.putRun(run);
+
+				if (hasFailedRun(thread.status)) {
+					return yield* new Permanent({ message: `the run of T3 thread ${thread.threadId} ended at once: ${thread.status}` });
+				}
+			}
+
+			run = yield* markRunning(observation, run, epic);
+			yield* Effect.log(`agent started in T3 thread ${run.threadId}`);
+		}).pipe(Effect.catchTag('T3ToolFailure', (error) => Effect.fail(refusedByT3(error))));
 
 		return Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
@@ -292,21 +307,32 @@ export const startRule = Effect.gen(function* () {
 				return yield* failStart(observation, claimed, epic, `the agent was not confirmed running within ${config.startTimeoutSeconds} s`);
 			}
 
-			yield* starts.withPermit(steps).pipe(Effect.catchTag('Permanent', (error) => failStart(observation, run, epic, error.message)));
+			yield* steps.pipe(Effect.catchTag('Permanent', (error) => failStart(observation, run, epic, error.message)));
 		});
 	};
+
+	// T3 makes a new worktree after the launch answered, so its path is recorded once T3 reports it.
+	const recordWorktree = (observation: Observation, run: Run) =>
+		Option.map(Option.fromNullishOr(observedWorktreePath(observation, run)), (worktreePath) =>
+			journal.putRun({ ...run, worktreePath }).pipe(Effect.andThen(Effect.log(`T3 made the worktree ${worktreePath}`))),
+		);
 
 	const plan = (observation: Observation) =>
 		journal.listRuns.pipe(
 			Effect.map((runs) =>
 				runs.flatMap((run): Array<EpicWork> => {
 					const epic = observation.epics.get(run.epicId);
+					const work = { epicId: run.epicId, identifier: run.identifier, teamId: run.teamId };
 
-					if (run.status !== 'claimed' || !epic || !observation.teams.has(run.teamId) || !hasRole(observation, epic, activeRoles(run))) {
+					if (run.status !== 'claimed') {
+						return run.worktreePath === null && isInFlight(run) ? Option.toArray(Option.map(recordWorktree(observation, run), (apply) => ({ ...work, apply }))) : [];
+					}
+
+					if (!epic || !observation.teams.has(run.teamId) || !hasRole(observation, epic, activeRoles(run))) {
 						return [];
 					}
 
-					return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: start(observation, runs, run, epic) }];
+					return [{ ...work, apply: start(observation, run, epic) }];
 				}),
 			),
 		);

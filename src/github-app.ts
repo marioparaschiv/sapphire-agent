@@ -1,5 +1,5 @@
 import { type KeyObject, sign } from 'node:crypto';
-import { Clock, Context, Duration, Effect, Layer, Option, Redacted, Schema, SchemaGetter } from 'effect';
+import { Clock, Context, Duration, Effect, Layer, Option, Redacted, Schema } from 'effect';
 import { HttpClient, type HttpClientError, HttpClientRequest, HttpClientResponse } from 'effect/http';
 import { type CallError, callTimeouts, Permanent, Transient, transportFailure, withCallPolicy } from './call-policy.ts';
 import { AppConfig } from './config.ts';
@@ -11,35 +11,6 @@ const Installation = Schema.Struct({ id: Schema.Int });
 const AccessToken = Schema.Struct({ token: Schema.String, expiresAt: Schema.String }).pipe(Schema.encodeKeys({ expiresAt: 'expires_at' }));
 
 const ErrorJson = Schema.Struct({ message: Schema.String });
-
-// One attempt to deliver a webhook event. A redelivery is a new attempt with the event's `guid`.
-export const Delivery = Schema.Struct({
-	// Its exact decimal digits, as read by `keepIdDigits`.
-	id: Schema.String.check(Schema.isPattern(/^\d+$/)),
-	guid: Schema.String,
-	// In ms.
-	deliveredAt: Schema.String.pipe(
-		Schema.decodeTo(Schema.Int, { decode: SchemaGetter.transform(Date.parse), encode: SchemaGetter.transform((millis) => new Date(millis).toISOString()) }),
-	),
-	statusCode: Schema.Int,
-}).pipe(
-	Schema.encodeKeys({ deliveredAt: 'delivered_at', statusCode: 'status_code' }),
-);
-
-export type Delivery = typeof Delivery.Type;
-
-// Delivery ids are above Number.MAX_SAFE_INTEGER, and GitHub answers 404 for an id JSON.parse rounded, so an `id` is
-// kept as the digits GitHub sent.
-const keepIdDigits = (key: string, value: unknown, context?: { readonly source?: string }) => (key === 'id' && typeof value === 'number' ? context?.source : value);
-
-export type DeliveryPage = { readonly deliveries: ReadonlyArray<Delivery>; readonly next: Option.Option<string> };
-
-// GitHub's maximum.
-const deliveriesPerPage = 100;
-
-// The `cursor` of the `rel="next"` URL in a Link header.
-const nextCursor = (link: string | undefined) =>
-	Option.fromNullishOr(/<([^>]+)>;\s*rel="next"/.exec(link ?? '')?.[1]).pipe(Option.flatMap((url) => Option.fromNullishOr(new URL(url).searchParams.get('cursor'))));
 
 // A token is minted again this long before GitHub expires it, so a write that starts with it has time to finish.
 const tokenRefreshMargin = Duration.minutes(5);
@@ -63,10 +34,6 @@ export class GitHubApp extends Context.Service<
 		// A token acting as the App on the installation that covers the repo (`owner/name`). Each installation's token is
 		// reused until shortly before it expires.
 		readonly installationToken: (repo: string) => Effect.Effect<Redacted.Redacted<string>, CallError>;
-		// A page of the App's webhook deliveries, newest first: the first page, or the one at `cursor`.
-		readonly deliveries: (cursor: Option.Option<string>) => Effect.Effect<DeliveryPage, CallError>;
-		// Asks GitHub to send the delivery again, as a new attempt with the same `guid`.
-		readonly redeliver: (id: string) => Effect.Effect<void, CallError>;
 	}
 >()('sapphire-agent/GitHubApp') {
 	// Reads the App's slug from GitHub, so it fails to build when the App id, key or GitHub is wrong.
@@ -131,13 +98,6 @@ export class GitHubApp extends Context.Service<
 
 							return minted.token;
 						}),
-
-					deliveries: (cursor) =>
-						call(HttpClientRequest.get('/app/hook/deliveries', { urlParams: { per_page: deliveriesPerPage, ...Option.match(cursor, { onNone: () => ({}), onSome: (at) => ({ cursor: at }) }) } }), (response) =>
-							HttpClientResponse.schemaBodyJson(Schema.Array(Delivery), { reviver: keepIdDigits })(response).pipe(Effect.map((deliveries) => ({ deliveries, next: nextCursor(response.headers.link) }))),
-						),
-
-					redeliver: (id) => call(HttpClientRequest.post(`/app/hook/deliveries/${id}/attempts`), () => Effect.void),
 				});
 			}),
 		);

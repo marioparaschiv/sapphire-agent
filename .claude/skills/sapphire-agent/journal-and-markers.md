@@ -4,15 +4,13 @@ What sapphire-agent stores locally and why, and how markers on its comments and 
 
 ## Reality first
 
-Linear, herdr, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the tab and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the last pane output hash, the parsed result file, the ids that tie a run to its tab and session, a handoff's progress, which mentions were handled, what `ctl.sh` asked for, how far back the App's webhook deliveries were checked, the projects, and the notices for the chat.
+Linear, T3, git and GitHub are the source of truth. Every tick observes them again, so state that can be observed is never stored: the epic's state and labels, the thread and its agent, the worktree, the PR, its threads and comments. The journal holds only what cannot be observed: timers, the parsed result file, the ids that tie a run to its T3 thread and session, a handoff's progress, which mentions were handled, what `sapphire` asked for, the projects, and the notices waiting to be posted.
 
-The Telegram bot's MTProto session and update state are not in the journal: mtcute keeps them in its own SQLite file, `$HERDR_PLUGIN_STATE_DIR/telegram.session` (`architecture.md`, The chat). Chat message text is never stored: the journal keeps only which Claude session (and directory) each bot message was written in, and the threads of epics and projects. Notice texts are kept, as the outbox.
-
-Idempotency comes from markers on external writes: before a write, look for its marker (or its effect) and skip it when present. Notices are the exception: the journal's outbox is unique on the marker, and Telegram ignores a send keyed again.
+Idempotency comes from markers on external writes: before a write, look for its marker (or its effect) and skip it when present. Notices get a second guard: the journal's outbox is unique on the marker, so a notice is written there once, and its Linear comment carries the marker too.
 
 ## The journal
 
-SQLite through `@effect/sql-sqlite-node` (the built-in `node:sqlite`), with its migrator. Rows are typed with Effect `Schema`; there is no ORM. The file is `$HERDR_PLUGIN_STATE_DIR/journal.db` (live: `~/.local/state/herdr/plugins/sapphire-agent/journal.db`). Tests use `':memory:'` or a temp file. Columns are snake_case in SQLite and camelCase in code. Times are epoch milliseconds.
+SQLite through `@effect/sql-sqlite-node` (the built-in `node:sqlite`), with its migrator. Rows are typed with Effect `Schema`; there is no ORM. The file is `journal.db` in the state directory (`config.md`; live: `~/.local/state/sapphire-agent/journal.db`). Tests use `':memory:'` or a temp file. Columns are snake_case in SQLite and camelCase in code. Times are epoch milliseconds.
 
 ### `runs`
 
@@ -21,20 +19,20 @@ One row per epic (`epic_id` is the primary key); a new claim replaces the old ro
 | Column | What and why |
 | --- | --- |
 | `epic_id`, `identifier`, `team_id` | Which epic, for lookups, log annotations and flags. |
-| `status` | `claimed`, `running`, `awaitingInput`, `stale`, `error`, `ended`, `kept` (see `rules.md`). |
+| `status` | `claimed`, `running`, `stale`, `error`, `ended`, `kept` (see `rules.md`). |
 | `job` | JSON: `{ "_tag": "orchestrate" }` or `{ "_tag": "follow-up", "threadIds": [...], "instruction": "..." or null }`. What a follow-up was asked for; the threads stay unresolved on GitHub until it is posted. |
 | `repo`, `branch` | The local clone and the epic's branch, so cleanup finds the worktree and PR even once the epic is gone from the ready list. |
 | `worktree_path` | Set once the worktree exists. |
-| `tab_id`, `pane_id` | Set once the tab exists. Both must match herdr for the tab to count as the run's. |
-| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, made at the claim and kept, so a start after a crash uses the same one. Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded, or adopted from an untracked tab Claude already ran in, whose session is unknown. A session the agent starts in the run's pane later (resume, clear, fork) replaces the id (`rules.md`, Agent events). |
-| `reply_to` | The Claude session that asked for the run (`ctl.sh start --reply-to`), taken from the newest `start` request at the claim. The prompt names it and the agent asks it its questions. Null: the question is asked in the epic's thread (`rules.md`, Questions). |
+| `thread_id`, `thread_run_id` | The run's thread and the run of it the start launched, recorded right after the launch (before the epic moves), so a restart waits on it and never launches another; a handoff moves them to the next thread, and a send or nudge that starts a turn to its run. Null until the launch. `worktree_path` is T3's worktree, recorded once T3 made it. |
+| `thread_settled_at` | When cleanup settled the run's thread, or found T3 had. A thread found un-settled after that was un-settled by the user, so cleanup leaves it alone. |
+| `session` | JSON `{ "id": "<uuid>", "name": "<identifier lowercased>" }`: the Claude session, named at the claim. T3 chooses the session its thread's agent runs in, so the agent event server replaces the id with the session of the run's first hook event, and with any later one (`rules.md`, Agent events). Other Claude sessions message the agent by its name. Null for a run claimed before sessions were recorded. |
+| `reply_to` | The Claude session that asked for the run (`sapphire dispatch --reply-to`), taken from the newest `start` request at the claim. The prompt names it and the agent asks it its questions. Null: the agent asks on Linear. |
 | `claimed_at` | Claim time. Keys most markers, starts the wall-clock cap and the start timeout. |
-| `started_at` | When Claude was confirmed started. Decides the run's states and whether it ever started. |
-| `agent_status`, `agent_status_since` | Last observed agent status and when it or (while working) the output last changed: the awaitingInput and stale timers. |
-| `nudged_at` | When the current stale episode's nudge was sent, so a restart does not nudge again. |
-| `tail_hash` | Hash of the last pane output without tickers, to see whether the agent made progress. |
+| `started_at` | When the run's T3 thread was launched. Decides the run's states and whether it ever started. |
+| `agent_status`, `agent_status_since` | Last observed agent status (`working`, `idle`, or `blocked` while a question or approval waits) and when the thread, its timeline, its subagents or the agent's hook events last showed progress: the stale timer. |
+| `nudged_at` | When the current stale episode's nudge was sent, which keys it, so a restart or a later tick sends only that nudge again. |
 | `result` | The parsed result file, stored before anything is posted, so posting resumes after a crash even if the file is gone. |
-| `handoff` | JSON `{ "sessionId": "<uuid>", "step": "requested" \| "cleared" \| "resumed" }`: the latest handoff of the run's agent, each step recorded before it is typed (`rules.md`, Handoff). Null before the first. |
+| `handoff` | JSON `{ "sessionId": "<uuid>", "step": "requested" \| "resumed" }`: the latest handoff of the run's agent, each step recorded before it is sent (`rules.md`, Handoff). Null before the first. |
 
 ### `transient_failures`
 
@@ -46,53 +44,43 @@ One row per comment that mentioned the bot, written by the webhook server before
 
 | Column | What and why |
 | --- | --- |
-| `comment_id`, `url`, `author`, `body` | The comment: what the agent is asked, and which comment its notices answer. |
+| `comment_id`, `url`, `author`, `body` | The comment: what the agent is asked, and which comment its replies answer. |
 | `repo`, `number` | The issue or PR it is on, as `owner/name` and number. |
 | `status` | `ignored`, `queued`, `claimed`, `running`, `ended`, `error` (see `rules.md`). |
-| `cwd` | The directory the agent runs in, once found. |
-| `tab_id`, `pane_id` | Set once the tab exists. |
-| `session` | As for runs, named `cmd-<id>`; made when its turn comes. |
-| `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when Claude was confirmed started. |
-| `agent_status`, `agent_status_since`, `nudged_at`, `tail_hash` | As for runs: the quiet and stale timers. |
+| `cwd` | The checkout the agent runs in, once made. |
+| `thread_id` | The command's T3 thread, recorded right after the launch. |
+| `recorded_at`, `claimed_at`, `started_at` | When the comment was recorded, when its turn came (keys its `commandFailed` marker, starts the start timeout and the cap) and when its thread was launched. |
 | `acknowledged_at` | When the comment got the App's thumbs-up; null until then, and for ignored commands. Adding a reaction twice changes nothing on GitHub, so a crash before this is written only repeats the call. |
 
 ### `requests`
 
-What `scripts/ctl.sh` asked for (`id`, `request` JSON, `created_at`): `start` (with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id), `project-add` and `project-edit` (with the project's settings) and `project-remove` (by team), plus the `session` changes, `phase` starts (`sreview`, `review-verify`, `pr`) and `handoff`s (by session) the agent event server saw (by epic identifier); a chat message in an epic's thread is recorded as a `send`. Both only append rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
-
-### `delivery_mark`
-
-At most one row: `delivered_at` (ms), when the newest App webhook delivery the last complete scan saw was delivered. Every delivery listed before it either succeeded, has a later successful attempt of the same event, or was redelivered as a newer attempt. GitHub can list a slow attempt after a newer one was scanned; the next scan pages back to 10 minutes before the mark (and never more than 3 days, GitHub's retention). It is moved only after every redelivery request of the scan succeeded; without a row, a scan goes back the full 3 days (`rules.md`, Missed deliveries).
-
-### `chat_sessions`
-
-One row per bot message of the main chat or a project's thread (`message_ref`, the platform's ref, e.g. `<chat id>:<message id>`), with the Claude `session_id` it was written in, the `cwd` that session ran in (Claude keeps sessions per directory, so a fork runs there too), its `thread` (null for the main chat), its `kind` (`turn`, an answer, or `reminder`, the cache expiry reminder) and `created_at`. A reply to the message forks that session in that directory; the main chat's newest row's session is kept warm, and a project thread's newest row arms its reminder. Written once the reply is kept, so a reply cut short by a crash is not there and a reply to it gets the short explanation.
-
-### `topics` and `archive_thread`
-
-One row per epic with a chat thread (`epic_id`, `identifier`, `thread` the platform's ref, `state` it shows, `pull_request_url` posted, if any, `milestones` the slice milestones posted, as a JSON array of `<sub-issue id>:started|done`), written right after the thread is made and dropped right after it is deleted (`rules.md`, Topics). `archive_thread` holds at most one row: the `✅ Done` thread shipped epics are summed up in.
+What `sapphire` asked for (`id`, `request` JSON, `created_at`): `start` (by `sapphire dispatch`, with the session to reply to, or none), `stop`, `send`, `follow-up` (by epic identifier), `reply` and `done` (by command id), `project-add` and `project-edit` (with the project's settings) and `project-remove` (by team), plus the `session` changes and `handoff`s (by session) the agent event server saw (by epic identifier). Both only append rows, so it never overwrites a row a rule is updating; the rule that acts on a request deletes it. `id` is never handed out again (AUTOINCREMENT), since a reply's marker is keyed by it.
 
 ### `projects`
 
-One row per project (`team` the exact Linear team name, primary key; `repo`; `label_repos_directory` or null; `thread`, its permanent chat thread, null until the project topics rule opens it). Written only by the `Projects` service: the import of config `teams` into an empty table at startup, and the requests rule applying `sapphire project` requests (`config.md`, Projects).
+One row per project (`team` the exact Linear team name, primary key; `repo`; `label_repos_directory` or null). Written only by the `Projects` service: the import of config `teams` into an empty table at startup, and the requests rule applying `sapphire project` requests (`config.md`, Projects).
 
 ### `notices`
 
-The outbox of messages for the chat (`id` AUTOINCREMENT, `identifier`, `purpose`, `key`, `text` in markdown, `created_at`, `sent_at`), unique on (`identifier`, `purpose`, `key`), the notice's marker: adding one whose marker exists does nothing. Sent rows stay, so a notice written again for the same marker is never sent again. The notices rule sends the unsent ones, oldest first, and sets `sent_at` (`rules.md`, Notices).
+The outbox of notices for the Linear epics (`id` AUTOINCREMENT, `identifier`, `purpose`, `key`, `text` in markdown, `created_at`, `sent_at`), unique on (`identifier`, `purpose`, `key`), the notice's marker: adding one whose marker exists does nothing. Sent rows stay, so a notice written again for the same marker is never posted again. The notices rule posts the unsent ones on their epics, oldest first, and sets `sent_at` (`rules.md`, Notices).
 
 ### `subagent_handoffs`
 
 `agent_id` (primary key), `identifier`, `requested_at`: the subagents told to hand off, so each is told once (`rules.md`, Handoff).
 
+### `t3_projects`
+
+`repo` (primary key, a team repo or a label repo), `project_id`: the T3 project `T3Projects` found or created for it, so it is created once.
+
 ### Migrations
 
-`0001_create_journal` (runs, transient failures, commands, mention tables since dropped, requests), `0002_drop_mention_threads`, `0003_create_delivery_mark`, `0004_add_sessions`, `0005_add_reply_to`, `0006_add_command_acknowledged_at`, `0007_create_chat_sessions`, `0008_create_topics` (and `archive_thread`), `0009_create_projects`, `0010_add_chat_session_cwd_and_thread` (rebuilds `chat_sessions`; earlier rows get the home directory, no thread and kind `turn`), `0011_create_notices` (and drops `runs.question_comment_id` and `runs.delivered_reply_ids`), `0012_add_handoffs` (`runs.handoff`, `subagent_handoffs`). They run at startup, in the service and the CLI alike.
+`0001_create_journal` (runs, transient failures, commands, mention tables since dropped, requests), `0002_drop_mention_threads`, `0003_create_delivery_mark`, `0004_add_sessions`, `0005_add_reply_to`, `0006_add_command_acknowledged_at`, `0007_create_chat_sessions`, `0008_create_topics` (and `archive_thread`), `0009_create_projects`, `0010_add_chat_session_cwd_and_thread` (rebuilds `chat_sessions`; earlier rows get the home directory, no thread and kind `turn`), `0011_create_notices` (and drops `runs.question_comment_id` and `runs.delivered_reply_ids`), `0012_add_handoffs` (`runs.handoff`, `subagent_handoffs`), `0013_drop_chat` (drops `chat_sessions`, `topics`, `archive_thread`, `delivery_mark` and `projects.thread`, deletes pending `phase` requests, and marks the unsent `CMD-<n>` notices sent), `0014_create_t3_projects`, `0015_add_threads` (`runs.thread_id`, `runs.thread_run_id`), `0016_add_thread_settling_and_command_threads` (`runs.thread_settled_at`, `commands.thread_id`), `0017_drop_tabs` (drops `runs.tab_id`, `pane_id` and `tail_hash` and `commands.tab_id`, `pane_id`, `session`, `agent_status`, `agent_status_since`, `nudged_at` and `tail_hash`; turns `awaitingInput` runs into `running`, clears an `agent_status` other than `working`, `idle` or `blocked` and a handoff at step `cleared`, and marks the unsent `awaitingInput`, `error` and `workingOrphan` notices sent). They run at startup, in the service and the CLI alike.
 
 ### Journal service
 
-`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimRun` (records the claim and drops its requests in one transaction); `deliveryMark`, `setDeliveryMark`; `addChatSession` (the messages, with session, directory, thread and kind), `chatSession` (session and directory), `latestChatSession` (main chat only), `lastChatMessage` (a thread's newest); `listTopics`, `putTopic`, `deleteTopic`, `archiveThread`, `setArchiveThread`; `listProjects`, `putProjects` (one transaction), `deleteProject`; `addNotice` (a no-op, returning false, for a marker it has), `hasNotice`, `unsentNotices`, `markNoticeSent`; `addSubagentHandoff` (false when told already). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
+`getRun`, `listRuns` (ordered by claim time), `putRun` (insert or replace), `deleteRun`, `recordTransient` (returns the streak start), `clearTransient`; `listCommands`, `addCommand` (a no-op for a comment recorded already), `putCommand`; `addRequest`, `listRequests`, `deleteRequest`, `claimRun` (records the claim and drops its requests in one transaction); `listProjects`, `putProjects` (one transaction), `deleteProject`; `addNotice` (a no-op, returning false, for a marker it has), `hasNotice`, `unsentNotices`, `markNoticeSent`; `addSubagentHandoff` (false when told already); `getT3Project`, `listT3Projects`, `putT3Project` (insert or replace). Rules read the journal when they plan, so each sees what the rules before it wrote this tick.
 
-The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `ctl.sh status` prints the projects, the runs (identifier, status, job, the epic's Linear state, claim time, tab, session, worktree), the commands in flight and the requests waiting.
+The CLI (`src/ctl.ts`, behind `scripts/ctl.sh`) opens the same file while the service runs. SQLite runs in WAL mode with a 5 s busy timeout (the client's defaults), so its reads never block the service and its few writes wait for the service's. `sapphire status` prints whether dispatching is paused, the projects, the runs (identifier, status, job, the epic's Linear state, claim time, T3 thread, session, worktree), the commands in flight and the requests waiting.
 
 ## Markers
 
@@ -102,13 +90,13 @@ A marker names one write: the epic's identifier, or the command's (`CMD-<n>`), a
 <!-- sapphire-agent:<IDENTIFIER>:<purpose>:<key> -->
 ```
 
-The key is URI-encoded. A marker inside a quote (`> <!-- ... -->`) does not count, so a user quoting one of our comments is not mistaken for it. A notice carries no visible marker: it is the notice's key in the outbox, and Telegram's `random_id` key is `notice:<IDENTIFIER>:<purpose>:<key>`. Purpose and key together name one write: a retry or restart finds it and skips, while a later occurrence (a new question in the same run, a new summary from a follow-up run) has a new key and is written. The `Comments` service builds every body and key; `claimedAt` is the run's claim time.
+The key is URI-encoded. A marker inside a quote (`> <!-- ... -->`) does not count, so a user quoting one of our comments is not mistaken for it. A notice's marker is its key in the outbox and ends its comment on the epic. Purpose and key together name one write: a retry or restart finds it and skips, while a later occurrence (a new stall in the same run, a new summary from a follow-up run) has a new key and is written. The `Comments` service builds every body and key; `claimedAt` is the run's claim time.
 
 On the Linear epic:
 
 | Purpose | Key | Posted |
 | --- | --- | --- |
-| `pullRequestOpened` | `<url>` | Once per PR, `PR opened: <url>`, by the topics or the results rule, whichever sees it first. |
+| `pullRequestOpened` | `<url>` | Once per PR, `PR opened: <url>`, by the results rule. |
 
 On the GitHub PR, as the GitHub App:
 
@@ -117,38 +105,39 @@ On the GitHub PR, as the GitHub App:
 | `reply` | `<threadId>.<claimedAt>` | Once per thread per run, among the thread's comments. |
 | `addressed` | `<claimedAt>` | Once per run that replied to threads, `Addressed your concerns inline.`, among the PR's newest 100 comments. |
 
-Notices, in the journal's outbox (`notices`), sent to the chat (`rules.md`, Notices):
+On the issue or PR of a command's comment, as the GitHub App, among its newest 100 comments:
+
+| Purpose | Key | Posted |
+| --- | --- | --- |
+| `commandReply` | `<requestId>` | Once per `sapphire reply`. |
+| `commandFailed` | `<claimedAt>` of the command | Once per failed command. |
+
+Notices, in the journal's outbox (`notices`), then posted as comments on the Linear epic (`rules.md`, Notices):
 
 | Purpose | Key | Sent |
 | --- | --- | --- |
-| `awaitingInput` | `<claimedAt>-<agentStatusSince>` | Once per quiet episode of a run without an epic thread: the flag, or the question a run asked by message and got no reply to. |
 | `stale` | `<claimedAt>-<nudgedAt>` | Once per nudged episode of a run. |
-| `error`, `startFailed`, `invalidResult`, `noPullRequest`, `threadMismatch`, `overCap`, `permanentFailure` | `<claimedAt>` | Once per run (`permanentFailure` without a run: once per failure streak). |
+| `startFailed`, `invalidResult`, `noPullRequest`, `threadMismatch`, `overCap`, `permanentFailure` | `<claimedAt>` | Once per run (`permanentFailure` without a run: once per failure streak). |
 | `summary`, `flags` | `<claimedAt>` | Once per run that posted its result; `flags` only with unfixed flags. |
 | `keptWorktree` | `<claimedAt>`, or the worktree path for an orphan | Once per run or orphan worktree. |
 | `transientFailure` | `<streakStartedAt>` | Once per streak of transient failures. |
-| `workingOrphan` | `<tabId>` | Once per untracked tab whose agent is working. |
-| `commandReply` | `<requestId>` | Once per `ctl.sh reply`. |
-| `commandFailed` | `<claimedAt>` of the command | Once per failed command. |
 | `handoffMissing` | `<sessionId>` | Once per run session that wrote no handoff doc in time. |
 | `subagentOverContext` | `<agentId>` | Once per subagent still going at 1.2 times `handoffAtTokens` after it was told to hand off. |
 
-Writes without a marker are idempotent by their effect: a move is skipped when the epic is already in that state, a label is added only if missing, a thumbs-up only once per comment (GitHub keeps one of each kind per user), a thread is resolved only if unresolved, a tab close of a missing tab is a no-op, and worktree removal skips what is already gone. Chat messages that are not notices are keyed by what they are for (`rules.md`, Topics).
+Writes without a marker are idempotent by their effect: a move is skipped when the epic is already in that state, a label is added only if missing, a thumbs-up only once per comment (GitHub keeps one of each kind per user), a thread is resolved only if unresolved, settling a settled thread changes nothing, and worktree removal skips what is already gone.
 
 ## Crash safety
 
 Every multi-step action is ordered so that a crash at any step leaves something the next tick finishes, without posting twice or skipping a step:
 
-- Claim before start; record the worktree, then the tab, then `running`. An unrecorded tab is adopted, and Claude found in the pane is not started again. Commands start the same way.
+- Claim before start; record the launched thread, then move the epic and record `running`. A thread launched just before a crash is found by its title and not launched again. Commands start the same way.
 - A claim and the drop of its requests (a follow-up's, or an epic's `start` requests) are one transaction.
-- A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, and the next delivery scan redelivers it; a command is keyed by its comment, so a redelivery records nothing twice.
-- The delivery scan requests every redelivery before it moves the delivery mark, so a crash mid-scan leaves the mark where it was and the next scan looks at the same deliveries again; a redelivery that already went through shows as a later success and is not repeated.
-- A reply or a failure notice of a command is put in the outbox before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
-- Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, close the tab, and only then mark the run `ended`.
+- A webhook delivery is answered 2xx only after its command is recorded, so a crash or a journal error leaves it failed in the App's delivery log, where it can be redelivered by hand; a command is keyed by its comment, so a redelivery records nothing twice.
+- A reply or a failure of a command is posted on GitHub before its request is dropped or the command is recorded `error`, and its marker keeps it to one.
+- Store the result before posting it; post each part only when its marker is missing; remove the label, move the epic, and only then mark the run `ended`.
 - Flags put the label on first, then the notice, then the run update.
-- A notice is sent (keyed), then marked sent; a crash in between sends it again, which Telegram ignores.
-- A handoff step is recorded on the run, then typed, so none is typed twice; a crash in between leaves it untyped (`rules.md`, Known limits).
-- Cleanup closes the tab, removes the worktree and branch, and only then drops the row.
-- A chat thread (an epic's, a project's or the archive) is made, then recorded; renamed, then its state recorded; its PR posted (keyed `random_id`s), then recorded; deleted, then its row dropped. A crash between making a thread and recording it leaves a stray one (`rules.md`, Known limits).
+- A notice is posted on the epic, then marked sent; a crash in between finds its marker on the epic next tick and only marks it sent.
+- A handoff step is recorded on the run, then sent; the `handoff` request is dropped only once the send landed, so a crash or a failed send sends it again on a later tick, under a `clientRequestId` T3 dedupes. A thread launched for it just before a crash is found by its title.
+- Cleanup settles the thread, removes the worktree and branch, and only then drops the row.
 
-`src/lifecycle.test.ts` proves it: it runs one epic through dispatch, a question answered in its topic, results, a mention whose command asks for a follow-up, the follow-up and cleanup, and repeats that with a crash injected at every journal, Linear, GitHub, herdr and Telegram write, asserting the same end state and no double posts (`development.md`). The known exceptions are a `send` typed into the pane right before a crash, which is typed again, and a chat thread made right before a crash, which is left behind (`rules.md`).
+`src/lifecycle.test.ts` proves it: it runs one epic through dispatch, a question waiting in the agent's thread and answered there, results, a mention whose command asks for a follow-up, the follow-up and cleanup, and repeats that with a crash injected at every journal, Linear and GitHub write, asserting the same end state and no double posts (`development.md`).

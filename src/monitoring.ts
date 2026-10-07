@@ -1,117 +1,84 @@
-import { createHash } from 'node:crypto';
 import { Clock, Effect, Option } from 'effect';
-import { Chat } from './chat.ts';
-import { ClaudeTranscript } from './claude-transcript.ts';
-import { Comments, type FlaggedRun, shownTail } from './comments.ts';
+import { AgentActivity } from './agent-activity.ts';
+import { Comments, type FlaggedThread } from './comments.ts';
 import { AppConfig } from './config.ts';
-import { Herdr } from './herdr.ts';
-import { type AgentStatus, Journal, type Run, type Topic } from './journal.ts';
+import { type AgentStatus, Journal, type Run } from './journal.ts';
 import type { Epic } from './linear.ts';
-import { activeRoles, hasRole, isStarted, type Observation, observedAgentStatus, type StartedRun, tabOf } from './observation.ts';
+import { activeRoles, hasRole, isAgentWorking, isThreaded, type ObservedThread, type Observation, type ThreadedRun } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
-import { Prompts } from './prompts.ts';
-import { makeFlag, makeNudge, makeTabActions } from './run-actions.ts';
+import { Pushover, sendOrLog } from './pushover.ts';
+import { makeFlag, makeSend } from './run-actions.ts';
 
-export const quietStatuses: ReadonlyArray<AgentStatus> = ['idle', 'done', 'blocked'];
+const watchedStatuses: ReadonlyArray<Run['status']> = ['running', 'stale'];
 
-// Claude's spinner glyph, its elapsed timer and the status line's counters tick even while a turn hangs, so they are
-// not progress.
-const withoutTickers = (tail: string) => tail.replace(/[\d·✢✳✶✻✽]/g, '');
+const sameRun = (a: Run, b: Run) => a.status === b.status && a.agentStatus === b.agentStatus && a.agentStatusSince === b.agentStatusSince && a.nudgedAt === b.nudgedAt;
 
-export const tailHash = (tail: string) => createHash('sha256').update(withoutTickers(tail)).digest('hex');
-
-const watchedStatuses: ReadonlyArray<Run['status']> = ['running', 'awaitingInput', 'stale'];
-
-// What runs and commands record of their agent between ticks.
-export type AgentWatch = Pick<Run, 'agentStatus' | 'agentStatusSince' | 'tailHash' | 'nudgedAt'>;
-
-// What the agent did since the last tick, and whether that was progress. `since` restarts on every change, except
-// between quiet statuses (idle to done keeps the quiet timer) and while status and tail stay the same. Any change
-// clears the nudge.
-export const trackAgent = <W extends AgentWatch>(watch: W, status: AgentStatus, hash: string, now: number): { readonly tracked: W; readonly progressed: boolean } => {
-	const previous = watch.agentStatus;
-	const stillQuiet = previous !== null && quietStatuses.includes(previous) && quietStatuses.includes(status);
-	const unchanged = previous === status && watch.tailHash === hash;
-	const progressed = !stillQuiet && !unchanged;
-
-	return {
-		tracked: {
-			...watch,
-			agentStatus: status,
-			agentStatusSince: progressed || watch.agentStatusSince === null ? now : watch.agentStatusSince,
-			tailHash: hash,
-			nudgedAt: progressed ? null : watch.nudgedAt,
-		},
-		progressed,
-	};
-};
-
-export const isSameWatch = (a: AgentWatch, b: AgentWatch) =>
-	a.agentStatus === b.agentStatus && a.agentStatusSince === b.agentStatusSince && a.tailHash === b.tailHash && a.nudgedAt === b.nudgedAt;
-
-// See trackAgent. Progress also ends a stale episode, and working again ends an awaitingInput one.
-export const track = <R extends Run>(run: R, status: AgentStatus, hash: string, now: number): R => {
-	const { tracked, progressed } = trackAgent(run, status, hash, now);
-	const resumed = (run.status === 'awaitingInput' && status === 'working') || (run.status === 'stale' && progressed);
-
-	return { ...tracked, status: resumed ? 'running' : run.status };
-};
-
-const sameRun = (a: Run, b: Run) => a.status === b.status && isSameWatch(a, b);
-
-// Watches started runs in herdr. Every tick reads herdr afresh, so an event that never arrived changes nothing: the
-// poll always wins. Flags, once each: awaitingInput (quiet too long without a result file), stale (working with an
-// unchanged pane even after a nudge), error (agent exited or vanished; its tab is then closed) and the wall-clock cap.
-// A run that asked its reply-to session by message is not flagged while it waits for the reply; after staleAfterSeconds
-// its question is asked in its epic's chat thread instead. A run without one asks there at once. The user's messages in
-// the thread go to the agent. An epic without a thread is flagged instead, to be answered in the agent's tab.
+// Watches runs by their thread as the observation read it: its last progress is the newest change of the thread, its
+// timeline and its subagents' threads, or the newest hook event of its agent or its subagents (`AgentActivity`), so a
+// long-running subagent keeps its run going. A run without progress for staleAfterSeconds gets `continue` sent to its
+// thread with mode restart, once; still nothing the agent did itself nudgeGraceSeconds later, the epic is flagged stale
+// and Pushover is told, and what the agent does next ends the episode. A thread waiting on questions or approvals is
+// not stalled: Pushover is told once per wait. Past maxRunSeconds the epic is flagged once.
 export const monitoringRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
-	const chat = yield* Chat;
-	const herdr = yield* Herdr;
 	const comments = yield* Comments;
-	const prompts = yield* Prompts;
-	const transcript = yield* ClaudeTranscript;
 	const flag = yield* makeFlag;
-	const { closeRunTab } = yield* makeTabActions;
-	const nudge = yield* makeNudge;
+	const send = yield* makeSend;
+	const pushover = yield* Pushover;
+	const activity = yield* AgentActivity;
 
-	const flaggedRun = (observation: Observation, run: StartedRun, epic: Epic, tail: string, now: number): FlaggedRun => ({
+	const flaggedThread = (run: ThreadedRun, thread: ObservedThread, agentActiveAt: number, now: number): FlaggedThread => ({
 		identifier: run.identifier,
 		claimedAt: run.claimedAt,
-		tabLabel: Option.match(tabOf(observation, run), { onNone: () => prompts.tabLabel(epic), onSome: (tab) => tab.label }),
-		tabId: run.tabId,
-		paneId: run.paneId,
+		threadTitle: thread.title ?? run.identifier,
+		threadId: run.threadId,
 		worktreePath: run.worktreePath,
 		branch: run.branch,
-		agentStatus: run.agentStatus ?? 'unknown',
-		agentStatusSince: run.agentStatusSince ?? now,
-		tail,
+		agentStatusSince: agentActiveAt,
 		now,
 	});
 
-	// The question the agent sent its reply-to session and ended its turn on, while no reply came.
-	const pendingMessage = (run: StartedRun) =>
-		run.replyTo === null || run.session === null ? Effect.succeedNone : transcript.pendingMessage({ id: run.session.id, cwd: run.worktreePath }, run.replyTo);
+	// `continue`, restarting the thread's turn. The nudge is recorded first, and keyed by when it was, so sending it again
+	// until the grace period is over makes one lost to a crash or a failure land, while T3 drops a repeat.
+	const nudgeThread = (run: ThreadedRun, nudgedAt: number) => send(run, 'continue', { mode: 'restart', clientRequestId: `nudge-${run.claimedAt}-${nudgedAt}` });
 
-	const monitor = (observation: Observation, watched: StartedRun, epic: Epic, topic: Option.Option<Topic>) =>
+	const monitorThread = (observation: Observation, watched: ThreadedRun, epic: Epic) =>
 		Effect.gen(function* () {
 			const now = yield* Clock.currentTimeMillis;
-			const status = observedAgentStatus(observation, watched);
-			const tail = status === 'vanished' ? '' : Option.getOrElse(yield* herdr.readTail(watched.paneId), () => '');
-			let run = track(watched, status, tailHash(tail), now);
+			const thread = observation.threads.get(watched.threadId);
+
+			if (now - watched.claimedAt >= config.maxRunSeconds * 1000) {
+				yield* flag(observation, watched, comments.overCap({ identifier: watched.identifier, claimedAt: watched.claimedAt, status: watched.status, now }));
+			}
+
+			// T3 could not be asked, or no longer has the thread: there is nothing to judge progress by.
+			if (thread === undefined || thread.lastProgressAt === null || thread.lastAgentActivityAt === null) {
+				return;
+			}
+
+			// The newest hook event of the run's agent or its subagents, which T3 may not show. Before the first one since a
+			// restart, the restart, so the stall timer starts afresh; it is no progress after a nudge, though.
+			const hookedAt = yield* activity.lastAt(watched.epicId);
+			const lastAgentActivityAt = Math.max(thread.lastAgentActivityAt, Option.getOrElse(hookedAt, () => 0));
+			const lastProgressAt = Math.max(thread.lastProgressAt, Option.getOrElse(hookedAt, () => activity.startedAt));
+			const status: AgentStatus = thread.pendingRequests > 0 ? 'blocked' : isAgentWorking(observation, watched) ? 'working' : 'idle';
+			const progressed = watched.nudgedAt !== null && lastAgentActivityAt > watched.nudgedAt;
+			const resumed = watched.status === 'stale' && progressed;
+			let run: ThreadedRun = {
+				...watched,
+				status: resumed ? 'running' : watched.status,
+				agentStatus: status,
+				agentStatusSince: lastProgressAt,
+				nudgedAt: progressed ? null : watched.nudgedAt,
+			};
 
 			if (!sameRun(watched, run)) {
 				yield* journal.putRun(run);
 
-				if (run.status === 'running' && watched.status !== 'running') {
+				if (resumed) {
 					yield* Effect.log('agent is working again');
 				}
-			}
-
-			if (now - run.claimedAt >= config.maxRunSeconds * 1000) {
-				yield* flag(observation, run, comments.overCap({ identifier: run.identifier, claimedAt: run.claimedAt, status: run.status, tail, now }));
 			}
 
 			// The results rule owns a run with a result file, or whose epic moved on.
@@ -119,89 +86,60 @@ export const monitoringRule = Effect.gen(function* () {
 				return;
 			}
 
-			const since = run.agentStatusSince ?? now;
+			const quietFor = now - lastProgressAt;
+			const title = thread.title ?? run.identifier;
 
-			if (status === 'exited' || status === 'vanished') {
-				yield* Effect.log(`agent ${status} without a result file; flagging it as error`);
-				yield* flag(observation, run, comments.agentStopped(flaggedRun(observation, run, epic, tail, now)));
-				yield* closeRunTab(observation, run);
-				yield* journal.putRun({ ...run, status: 'error' });
-
-				return;
-			}
-
-			if (run.status === 'running' && quietStatuses.includes(status) && now - since >= Math.min(config.awaitingInputAfterSeconds, config.staleAfterSeconds) * 1000) {
-				const message = yield* pendingMessage(run);
-
-				if (now - since < (Option.isSome(message) ? config.staleAfterSeconds : config.awaitingInputAfterSeconds) * 1000) {
-					return;
-				}
-
-				// The question is posted before the status records it, and the chat shows it once, so a crash in between is safe.
-				if (Option.isSome(topic)) {
-					yield* Effect.log(
-						Option.isSome(message)
-							? `no reply to the agent's message for ${config.staleAfterSeconds} s; asking in its chat thread`
-							: `agent ${status} without a result file; asking in its chat thread`,
-					);
-					yield* chat.send({ _tag: 'question', thread: topic.value.thread, text: Option.getOrElse(message, () => shownTail(tail)), askedAt: since });
-					yield* journal.putRun({ ...run, status: 'awaitingInput' });
-
-					return;
-				}
-
-				yield* Effect.log(`agent ${status} without a result file and its epic has no chat thread; flagging it as awaitingInput`);
-				yield* flag(
-					observation,
-					run,
-					Option.match(message, {
-						onNone: () => comments.awaitingInput(flaggedRun(observation, run, epic, tail, now)),
-						onSome: (text) => comments.messageQuestion({ identifier: run.identifier, claimedAt: run.claimedAt, agentStatusSince: since, message: text }),
-					}),
-				);
-
-				yield* journal.putRun({ ...run, status: 'awaitingInput' });
-
-				return;
-			}
-
-			if (run.status === 'running' && status === 'working') {
-				if (run.nudgedAt === null) {
-					if (now - since >= config.staleAfterSeconds * 1000) {
-						yield* Effect.log(`no new output for ${config.staleAfterSeconds} s; nudging the agent`);
-						run = { ...run, nudgedAt: now };
-						yield* journal.putRun(run);
-						yield* nudge(run.paneId);
-					}
-
-					return;
-				}
-
-				if (now - run.nudgedAt >= config.nudgeGraceSeconds * 1000) {
-					yield* Effect.log('still no new output after the nudge; flagging it as stale');
-					yield* flag(observation, run, comments.stale({ ...flaggedRun(observation, run, epic, tail, now), nudgedAt: run.nudgedAt }));
-					yield* journal.putRun({ ...run, status: 'stale' });
+			if (status === 'blocked') {
+				if (watched.agentStatus !== 'blocked') {
+					yield* Effect.log(`T3 thread ${run.threadId} waits for the user`);
 				}
 
 				return;
 			}
+
+			if (run.status !== 'running') {
+				return;
+			}
+
+			if (run.nudgedAt === null) {
+				if (quietFor >= config.staleAfterSeconds * 1000) {
+					yield* Effect.log(`no progress in T3 thread ${run.threadId} for ${config.staleAfterSeconds} s; nudging the agent`);
+					run = { ...run, nudgedAt: now };
+					yield* journal.putRun(run);
+					yield* nudgeThread(run, now);
+				}
+
+				return;
+			}
+
+			// A restart since the nudge gives the agent a full grace period, as its hook events in between went unseen.
+			if (now - Math.max(run.nudgedAt, activity.startedAt) < config.nudgeGraceSeconds * 1000) {
+				return yield* nudgeThread(run, run.nudgedAt);
+			}
+
+			// The nudge itself moved the thread; the agent did nothing since this.
+			const agentActiveAt = Math.max(lastAgentActivityAt, run.startedAt ?? run.claimedAt);
+
+			yield* Effect.log('still no progress after the nudge; flagging it as stale');
+			yield* flag(observation, run, comments.threadStale({ ...flaggedThread(run, thread, agentActiveAt, now), nudgedAt: run.nudgedAt }));
+			yield* journal.putRun({ ...run, status: 'stale' });
+			yield* sendOrLog(pushover, {
+				title: `${run.identifier} looks stuck`,
+				message: `No progress in T3 thread "${title}" for ${Math.round((now - agentActiveAt) / 60_000)} min, even after a nudge. The epic is flagged.`,
+				url: epic.url,
+				priority: 'normal',
+			});
 		});
 
 	const plan = (observation: Observation) =>
 		Effect.gen(function* () {
-			const runs = (yield* journal.listRuns).filter(
-				(run): run is StartedRun => watchedStatuses.includes(run.status) && isStarted(run) && observation.teams.has(run.teamId) && observation.epics.has(run.epicId),
-			);
-			const topics = yield* journal.listTopics;
+			const runs = (yield* journal.listRuns).filter((run) => watchedStatuses.includes(run.status) && observation.teams.has(run.teamId));
 
 			return runs.flatMap((run): Array<EpicWork> => {
 				const epic = observation.epics.get(run.epicId);
+				const work = { epicId: run.epicId, identifier: run.identifier, teamId: run.teamId };
 
-				if (!epic) {
-					return [];
-				}
-
-				return [{ epicId: run.epicId, identifier: run.identifier, teamId: run.teamId, apply: monitor(observation, run, epic, Option.fromUndefinedOr(topics.find((topic) => topic.epicId === run.epicId))) }];
+				return epic && isThreaded(run) ? [{ ...work, apply: monitorThread(observation, run, epic) }] : [];
 			});
 		});
 

@@ -1,6 +1,6 @@
 import { createPublicKey, randomUUID, verify } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Clock, Context, Effect, Layer, Option, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
+import { Context, Effect, Layer, Option, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
 import { AppConfig } from './config.ts';
 import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
@@ -8,42 +8,28 @@ import { GitHubApp } from './github-app.ts';
 
 // A stand-in for the GitHub App endpoints of api.github.com. Like GitHub, it accepts a request only with an App JWT
 // signed by the key whose public half it holds (that of the configured App key), and it times what it mints by the
-// JWT's clock, so tokens follow TestClock. It also sends webhook deliveries, as GitHub does, and keeps the App's
-// delivery log.
+// JWT's clock, so tokens follow TestClock.
 
 // A GitHub App webhook delivery: the X-GitHub-Event header and the JSON payload.
 export type WebhookDelivery = { readonly event: string; readonly payload: unknown };
 
 export const signDelivery = (secret: Redacted.Redacted<string>, body: string) => `sha256=${hmacHex(secret, body)}`;
 
-const sendDelivery = (url: string, secret: Redacted.Redacted<string>, { event, payload }: WebhookDelivery, guid: string, signature?: string | null) => {
-	const body = JSON.stringify(payload);
-	const header = signature === undefined ? signDelivery(secret, body) : signature;
-
-	return postJson(url, body, { 'x-github-event': event, 'x-github-delivery': guid, ...(header === null ? {} : { 'x-hub-signature-256': header }) });
-};
-
 // POSTs the delivery as GitHub does, signed with `secret` unless `signature` overrides the header (null leaves it out),
 // and returns the HTTP status.
-export const postDelivery = (url: string, secret: Redacted.Redacted<string>, delivery: WebhookDelivery, signature?: string | null) =>
-	Effect.promise(() => sendDelivery(url, secret, delivery, randomUUID(), signature));
+export const postDelivery = (url: string, secret: Redacted.Redacted<string>, { event, payload }: WebhookDelivery, signature?: string | null) =>
+	Effect.promise(() => {
+		const body = JSON.stringify(payload);
+		const header = signature === undefined ? signDelivery(secret, body) : signature;
 
-// An entry of the App's delivery log, as `GET /app/hook/deliveries` lists it, with what was sent.
-export type FixtureDelivery = {
-	// The id's exact decimal digits: GitHub's delivery ids are above Number.MAX_SAFE_INTEGER.
-	readonly id: string;
-	readonly guid: string;
-	readonly deliveredAt: string;
-	readonly redelivery: boolean;
-	readonly statusCode: number;
-	readonly delivery: WebhookDelivery;
-};
+		return postJson(url, body, { 'x-github-event': event, 'x-github-delivery': randomUUID(), ...(header === null ? {} : { 'x-hub-signature-256': header }) });
+	});
 
 export type AppJwtClaims = { readonly iat: number; readonly exp: number; readonly iss: number };
 
 export type FixtureToken = { readonly installationId: number; readonly token: string; readonly expiresAt: string };
 
-export type GitHubAppFixtureShape = {
+type GitHubAppFixtureShape = {
 	// The API base URL on 127.0.0.1.
 	readonly url: string;
 	// Installs the App on the repo (`owner/name`) and returns the installation's id.
@@ -52,25 +38,6 @@ export type GitHubAppFixtureShape = {
 	readonly jwts: () => ReadonlyArray<AppJwtClaims>;
 	// Every installation token minted, in order.
 	readonly tokens: () => ReadonlyArray<FixtureToken>;
-	// Where deliveries are sent; until set, or once that server is gone, a delivery fails with 502, as nginx answers
-	// when the listener is down.
-	readonly setWebhookUrl: (url: string) => void;
-	// Sends the delivery to the webhook URL as a new event and logs the attempt.
-	readonly deliver: (delivery: WebhookDelivery) => Effect.Effect<FixtureDelivery>;
-	// Logs an attempt with the given status without sending it, as a new event unless `guid` names an earlier one's.
-	readonly addDelivery: (delivery: WebhookDelivery, statusCode: number, guid?: string) => Effect.Effect<FixtureDelivery>;
-	// Like addDelivery, but the attempt is listed only once `list` runs, as GitHub can list a slow attempt after newer ones.
-	readonly addSlowDelivery: (delivery: WebhookDelivery, statusCode: number) => Effect.Effect<{ readonly attempt: FixtureDelivery; readonly list: Effect.Effect<void> }>;
-	// Answers `POST /app/hook/deliveries/{id}/attempts` for the delivery with 422 and sends nothing, `times` times.
-	readonly refuseRedelivery: (id: string, times: number) => void;
-	// The delivery log, newest first.
-	readonly deliveries: () => ReadonlyArray<FixtureDelivery>;
-	// Answers the next `times` `GET /app/hook/deliveries` with 403, as GitHub does without the permission.
-	readonly refuseDeliveryPages: (times: number) => void;
-	// The ids of the deliveries GitHub was asked to redeliver and did, in order.
-	readonly redelivered: () => ReadonlyArray<string>;
-	// The `cursor` of each `GET /app/hook/deliveries`, null for the first page, in order.
-	readonly deliveryPages: () => ReadonlyArray<string | null>;
 	// Completes once the fixture's GitHubApp layer has got n answers (a response or a transport error) in total, so
 	// TestClock.adjust cannot time out a call in flight.
 	readonly awaitAnswers: (n: number) => Effect.Effect<void>;
@@ -89,109 +56,15 @@ const fromBase64url = (part: string) => Buffer.from(part, 'base64url').toString(
 
 const isoSeconds = (millis: number) => new Date(millis).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-const Action = Schema.Struct({ action: Schema.String });
-
-declare global {
-	interface JSON {
-		// Node 24; not in TypeScript's lib yet. JSON.stringify writes `text` as is.
-		rawJSON(text: string): unknown;
-	}
-}
-
-type Answer = { readonly status: number; readonly body: unknown; readonly link?: string };
+type Answer = { readonly status: number; readonly body: unknown };
 
 const make = Effect.gen(function* () {
-	const { bot, appPrivateKey, webhookSecret } = yield* AppConfig;
+	const { bot, appPrivateKey } = yield* AppConfig;
 	const publicKey = createPublicKey(appPrivateKey);
 	const installations = new Map<string, number>();
 	const jwts: Array<AppJwtClaims> = [];
 	const tokens: Array<FixtureToken> = [];
-	const log: Array<FixtureDelivery> = [];
-	const refusals = new Map<string, number>();
-	let pageRefusals = 0;
 	const answers = yield* SubscriptionRef.make(0);
-	const redelivered: Array<string> = [];
-	const deliveryPages: Array<string | null> = [];
-	let webhookUrl: string | undefined;
-	// A real delivery id. Ids this size are a few apart in a double, so one read through JSON.parse is another's or none.
-	let lastDeliveryId = 3_846_482_596_114_464_768n;
-
-	const attempt = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number): FixtureDelivery => {
-		lastDeliveryId += 1n;
-
-		return { id: String(lastDeliveryId), guid, deliveredAt: isoSeconds(nowMillis), redelivery: log.some((earlier) => earlier.guid === guid), statusCode, delivery };
-	};
-
-	const record = (delivery: WebhookDelivery, guid: string, nowMillis: number, statusCode: number) => {
-		const entry = attempt(delivery, guid, nowMillis, statusCode);
-
-		log.unshift(entry);
-
-		return entry;
-	};
-
-	const send = async (delivery: WebhookDelivery, guid: string, nowMillis: number) => {
-		const statusCode = webhookUrl === undefined ? 502 : await sendDelivery(webhookUrl, webhookSecret, delivery, guid).catch(() => 502);
-
-		return record(delivery, guid, nowMillis, statusCode);
-	};
-
-	const listed = ({ id, guid, deliveredAt, redelivery, statusCode, delivery }: FixtureDelivery) => ({
-		id: JSON.rawJSON(id),
-		guid,
-		delivered_at: deliveredAt,
-		redelivery,
-		duration: 0.27,
-		status: statusCode >= 200 && statusCode < 300 ? 'OK' : `Invalid HTTP Response: ${statusCode}`,
-		status_code: statusCode,
-		event: delivery.event,
-		action: Option.getOrNull(Option.map(Schema.decodeUnknownOption(Action)(delivery.payload), ({ action }) => action)),
-		installation_id: 1001,
-		repository_id: 1_000_001,
-	});
-
-	const deliveriesPage = (url: URL): Answer => {
-		const perPage = Number(url.searchParams.get('per_page') ?? 30);
-		const cursor = url.searchParams.get('cursor');
-		const after = cursor === null ? undefined : BigInt(cursor.replace(/^v1_/, ''));
-		const older = log.filter(({ id }) => after === undefined || BigInt(id) < after);
-		const page = older.slice(0, perPage);
-
-		deliveryPages.push(cursor);
-
-		if (pageRefusals > 0) {
-			pageRefusals -= 1;
-
-			return { status: 403, body: { message: 'Resource not accessible by integration' } };
-		}
-
-		return {
-			status: 200,
-			body: page.map(listed),
-			...(older.length > perPage ? { link: `<${url.origin}/app/hook/deliveries?per_page=${perPage}&cursor=v1_${page[page.length - 1].id}>; rel="next"` } : {}),
-		};
-	};
-
-	const redeliver = async (id: string, nowMillis: number): Promise<Answer> => {
-		const original = log.find((entry) => entry.id === id);
-
-		if (original === undefined) {
-			return { status: 404, body: { message: 'Not Found' } };
-		}
-
-		const refusalsLeft = refusals.get(id) ?? 0;
-
-		if (refusalsLeft > 0) {
-			refusals.set(id, refusalsLeft - 1);
-
-			return { status: 422, body: { message: 'Validation Failed' } };
-		}
-
-		redelivered.push(id);
-		await send(original.delivery, original.guid, nowMillis);
-
-		return { status: 202, body: {} };
-	};
 
 	const verifiedClaims = (authorization: string | undefined): Option.Option<AppJwtClaims> => {
 		const [header = '', payload = '', signature = ''] = (authorization ?? '').replace(/^Bearer /, '').split('.');
@@ -206,7 +79,7 @@ const make = Effect.gen(function* () {
 		);
 	};
 
-	const answer = async (request: IncomingMessage): Promise<Answer> => {
+	const answer = (request: IncomingMessage): Answer => {
 		const claims = verifiedClaims(request.headers.authorization);
 
 		if (Option.isNone(claims)) {
@@ -219,7 +92,6 @@ const make = Effect.gen(function* () {
 		const path = url.pathname;
 		const installationOf = /^\/repos\/([^/]+\/[^/]+)\/installation$/.exec(path);
 		const accessTokensOf = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(path);
-		const attemptsOf = /^\/app\/hook\/deliveries\/(\d+)\/attempts$/.exec(path);
 		// GitHub's clock is the one the JWT was signed with: `iat` is backdated 60 s.
 		const nowMillis = (claims.value.iat + 60) * 1000;
 
@@ -243,23 +115,16 @@ const make = Effect.gen(function* () {
 			return { status: 201, body: { token: minted.token, expires_at: expiresAt, permissions: { issues: 'write', pull_requests: 'write' }, repository_selection: 'selected' } };
 		}
 
-		if (request.method === 'GET' && path === '/app/hook/deliveries') {
-			return deliveriesPage(url);
-		}
-
-		if (request.method === 'POST' && attemptsOf) {
-			return redeliver(attemptsOf[1], nowMillis);
-		}
-
 		return { status: 404, body: { message: 'Not Found' } };
 	};
 
 	const handle = (request: IncomingMessage, response: ServerResponse) => {
 		request.resume();
-		void answer(request).then(({ status, body, link }) => {
-			response.writeHead(status, { 'content-type': 'application/json', ...(link === undefined ? {} : { link }) });
-			response.end(JSON.stringify(body));
-		});
+
+		const { status, body } = answer(request);
+
+		response.writeHead(status, { 'content-type': 'application/json' });
+		response.end(JSON.stringify(body));
 	};
 
 	const url = yield* serveFixture(handle);
@@ -275,31 +140,6 @@ const make = Effect.gen(function* () {
 		},
 		jwts: () => [...jwts],
 		tokens: () => [...tokens],
-		setWebhookUrl: (url) => {
-			webhookUrl = url;
-		},
-		deliver: (delivery) => Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.promise(() => send(delivery, randomUUID(), now))),
-		addDelivery: (delivery, statusCode, guid = randomUUID()) => Effect.map(Clock.currentTimeMillis, (now) => record(delivery, guid, now, statusCode)),
-		addSlowDelivery: (delivery, statusCode) =>
-			Effect.map(Clock.currentTimeMillis, (now) => {
-				const entry = attempt(delivery, randomUUID(), now, statusCode);
-				const list = Effect.sync(() => {
-					const olderAt = log.findIndex(({ id }) => BigInt(id) < BigInt(entry.id));
-
-					log.splice(olderAt === -1 ? log.length : olderAt, 0, entry);
-				});
-
-				return { attempt: entry, list };
-			}),
-		refuseRedelivery: (id, times) => {
-			refusals.set(id, times);
-		},
-		refuseDeliveryPages: (times) => {
-			pageRefusals = times;
-		},
-		deliveries: () => [...log],
-		redelivered: () => [...redelivered],
-		deliveryPages: () => [...deliveryPages],
 		awaitAnswers: (n) => SubscriptionRef.changes(answers).pipe(Stream.takeUntil((count) => count >= n), Stream.runDrain),
 	} satisfies GitHubAppFixtureShape;
 	const client = Layer.effect(

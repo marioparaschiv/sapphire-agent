@@ -15,21 +15,20 @@ The `Linear` service (`src/linear.ts`), how team states and labels are resolved,
 | `teams(names)` | Teams by exact name with all workflow states. Every tick. |
 | `readyEpics(stateIds)` | Top-level issues (`parent: null`) in the ready states, first 50. Every tick. More than 50 are cut off. |
 | `epics(ids)` | The journal's epics wherever they are now. Every tick. More than 250 fails Permanently, because a truncated page would make epics that still exist look gone. |
-| `epicsByIdentifier(identifiers)` | Epics named by owned tabs and worktree branches that are not known otherwise (matched by team key and number), and by `ctl.sh start`. |
-| `subIssues(parentIds)` | The sub-issues of the epics with chat threads, in one paged request, for the topics rule's slices and shipped summary. |
-| `moveIssue(issueId, stateId)` | Move the epic to Implementing or To Review (or to Ready, by `ctl.sh start`). |
-| `comment(issueId, comment)` | Post `PR opened: <url>` unless a comment on the epic (every one, paged) carries its marker already. |
+| `epicsByIdentifier(identifiers)` | Epics named by worktree branches that are not known otherwise (matched by team key and number), by `sapphire dispatch`, and the epics of notices the tick did not observe. |
+| `moveIssue(issueId, stateId)` | Move the epic to Implementing or To Review (or to Ready, by `sapphire dispatch`). |
+| `comment(issueId, comment)` | Post `PR opened: <url>` and every notice, unless a comment on the epic (every one, paged) carries its marker already. |
 | `addLabel(issueId, teamId, name)` | Add `agent-stuck`. |
 | `removeLabel(issueId, labelId)` | Remove `agent-stuck` once the result is posted. |
 
-Epic fields: id, identifier, title, url, `branchName`, `sortOrder`, `createdAt` (for `dispatchSettleSeconds`), team, state, labels (with their parent group name), and `children(first: 1)`, only to know whether it has sub-issues.
+Epic fields: id, identifier, title, url, `branchName`, `sortOrder`, `createdAt` (for `dispatchSettleSeconds`), team, state, labels (with their parent group name), `parent { identifier }` (set for a sub-issue, which `sapphire dispatch` refuses), and `children(first: 1)`, only to know whether it has sub-issues.
 
 ## State resolution
 
 - Each tick the `Observer` reads `teams(<the projects' team names>)`, matched by exact team name. `sapphire project add` checks the team exists the same way.
 - Each role in `config.states` is matched by exact state name in that team.
 - Team not found, or any state missing: the team is skipped and logged once per process, e.g. `team Unbound has no workflow state "To Review"; skipping it until it does`.
-- Skipped teams: nothing is claimed, and their runs, tabs and worktrees are left untouched.
+- Skipped teams: nothing is claimed, and their runs and worktrees are left untouched.
 - State ids are kept per team id; moves use the run's team.
 - An epic is finished (for the orphan worktree sweep) when its state's type is `completed` or `canceled`.
 
@@ -71,12 +70,12 @@ Writes (only the reconciler writes to GitHub, always as the GitHub App; the agen
 
 | Method | Call |
 | --- | --- |
-| `postComment` | On the PR (`Addressed your concerns inline.`): `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. The marker is looked for among its newest 100 conversation comments. |
+| `postComment` | On the PR (`Addressed your concerns inline.`), or on the issue or PR of a command's comment (its replies and its failure): `gh api --method POST repos/<repo>/issues/<n>/comments --input -` with `{ body }`. The marker is looked for among the newest 100 conversation comments of the issue or PR (`issueOrPullRequest`). |
 | `addThumbsUp` | A `THUMBS_UP` reaction on a mention's comment or review, by node id: GraphQL `addReaction`. No marker is needed, as GitHub keeps one reaction of each kind per user. |
 | `replyToThread` | `gh api graphql`, mutation `addPullRequestReviewThreadReply`. |
 | `resolveThread` | `gh api graphql`, mutation `resolveReviewThread`; skipped when already resolved. |
 
-- The summary and the self-review flags are not posted on GitHub: they are notices in the chat (`rules.md`, Results).
+- The summary and the self-review flags are not posted on GitHub: they are notices, posted on the Linear epic (`rules.md`, Results).
 
 ## Branch name
 

@@ -31,17 +31,11 @@ export const makeRecordMention = Effect.gen(function* () {
 				...comment,
 				status: allowed ? 'queued' : 'ignored',
 				cwd: null,
-				tabId: null,
-				paneId: null,
-				session: null,
 				recordedAt: yield* Clock.currentTimeMillis,
 				claimedAt: null,
 				startedAt: null,
-				agentStatus: null,
-				agentStatusSince: null,
-				nudgedAt: null,
-				tailHash: null,
 				acknowledgedAt: null,
+				threadId: null,
 			});
 			yield* Effect.log(allowed ? `queued the mention by @${comment.author} in ${comment.url}` : `ignored the mention by @${comment.author} in ${comment.url}: not an allowed user`);
 

@@ -6,17 +6,17 @@ import { Git } from './git.ts';
 import { GitHub, type PullRequest } from './github.ts';
 import { Journal, type JournalError, type Run } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { activeRoles, hasRole, isAgentWorking, type Observation, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, isAgentWorking, type Observation, observedWorktreePath, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import type { ResultFile } from './result-file.ts';
-import { makeFlag, makeTabActions } from './run-actions.ts';
+import { makeEndRun, makeFlag } from './run-actions.ts';
 
 // A run whose result is posted, or whose epic moved on, keeps a slot until then.
-const watchedStatuses: ReadonlyArray<Run['status']> = ['claimed', 'running', 'awaitingInput', 'stale', 'error'];
+const watchedStatuses: ReadonlyArray<Run['status']> = ['claimed', 'running', 'stale', 'error'];
 
 // Hands finished runs over and ends runs whose epic moved on. Once the agent is not working: a run whose epic left its
-// active states is ended (tab closed); otherwise a valid result file is stored, posted to the PR, the epic moves to
-// To Review and the run is ended. Only the tab closes; the cleanup rule removes the worktree later.
+// active states is ended; otherwise a valid result file is stored, posted to the PR, the epic moves to To Review and
+// the run is ended. The cleanup rule settles the thread and removes the worktree later.
 export const resultsRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
@@ -25,13 +25,13 @@ export const resultsRule = Effect.gen(function* () {
 	const linear = yield* Linear;
 	const comments = yield* Comments;
 	const flag = yield* makeFlag;
-	const { endRun } = yield* makeTabActions;
+	const endRun = yield* makeEndRun;
 
 	const fail = (run: Run): Effect.Effect<void, JournalError> => (run.status === 'error' ? Effect.void : journal.putRun({ ...run, status: 'error' }));
 
-	// The PR link on the epic, in case no topic saw the PR open; the replies as marked PR writes, each skipped when its
-	// marker is already there (a resolved thread is not resolved again); then the summary and the flags as notices, once
-	// each. Once this returns, every part is posted.
+	// The PR link on the epic; the replies as marked PR writes, each skipped when its marker is already there (a resolved
+	// thread is not resolved again); then the summary and the flags as notices, once each. Once this returns, every part
+	// is posted.
 	const postResult = (run: Run, result: ResultFile, repo: string, pullRequest: PullRequest): Effect.Effect<void, CallError | JournalError> =>
 		Effect.gen(function* () {
 			const { identifier, claimedAt } = run;
@@ -91,7 +91,7 @@ export const resultsRule = Effect.gen(function* () {
 				yield* linear.moveIssue(epic.id, team.stateIds.toReview);
 			}
 
-			yield* endRun(observation, run, 'the agent finished');
+			yield* endRun(run, 'the agent finished');
 		});
 
 	// The agent writes the file as its last step, so it is read only once the agent stopped, never half-written.
@@ -117,25 +117,27 @@ export const resultsRule = Effect.gen(function* () {
 		);
 
 	const workFor = (observation: Observation, run: Run, epic: Epic): Option.Option<Effect.Effect<void, unknown>> => {
-		// Closing a working agent's tab would kill it mid-turn.
+		// A working agent keeps its run, and its slot, until it stops.
 		if (isAgentWorking(observation, run)) {
 			return Option.none();
 		}
 
 		if (!hasRole(observation, epic, activeRoles(run))) {
-			return Option.some(endRun(observation, run, `the epic moved to ${epic.state.name}`));
+			return Option.some(endRun(run, `the epic moved to ${epic.state.name}`));
 		}
 
 		if (run.result !== null) {
 			return Option.some(finishRun(observation, run, run.result, epic));
 		}
 
+		const worktreePath = observedWorktreePath(observation, run);
+
 		// An errored run already had its result file read, or its agent never started.
-		if (run.status === 'claimed' || run.status === 'error' || run.worktreePath === null) {
+		if (run.status === 'claimed' || run.status === 'error' || worktreePath === null) {
 			return Option.none();
 		}
 
-		return Option.some(readResult(observation, run, run.worktreePath, epic));
+		return Option.some(readResult(observation, { ...run, worktreePath }, worktreePath, epic));
 	};
 
 	const plan = (observation: Observation) =>

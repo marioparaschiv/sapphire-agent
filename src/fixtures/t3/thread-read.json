@@ -1,0 +1,99 @@
+{
+	"content": [
+		{
+			"type": "text",
+			"text": "{\"thread\":{\"threadId\":\"4bdef28a-d833-4584-89e6-bff19d0fbcc4\",\"projectId\":\"8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd\",\"title\":\"Orchestrate HL-60 Sapphire Agent Token\",\"createdBy\":\"system\",\"creationSource\":\"server\",\"status\":\"completed\",\"latestRunId\":\"run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:2\",\"activeRunId\":null,\"providerInstanceId\":\"claudeAgent\",\"model\":\"claude-opus-5-5\",\"runtimeMode\":\"full-access\",\"interactionMode\":\"default\",\"linkedPullRequest\":null,\"titleRegeneration\":null,\"branch\":\"mario/hl-60-sapphire-agent-dispatches-linear-epics-to-t3-code-threads\",\"worktreePath\":null,\"parentThreadId\":null,\"relationshipToParent\":null,\"runCount\":2,\"itemCount\":79,\"pendingRequestCount\":0,\"archived\":false,\"settled\":false,\"settledAt\":null,\"createdAt\":\"2026-10-07T06:01:07.428Z\",\"updatedAt\":\"2026-10-07T07:10:46.104Z\"},\"recentRuns\":[{\"runId\":\"run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:2\",\"ordinal\":2,\"status\":\"completed\",\"providerInstanceId\":\"claudeAgent\",\"model\":\"claude-opus-5-5\",\"requestedAt\":\"2026-10-07T07:10:42.906Z\",\"startedAt\":\"2026-10-07T07:10:42.921Z\",\"completedAt\":\"2026-10-07T07:10:46.104Z\"},{\"runId\":\"run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:1\",\"ordinal\":1,\"status\":\"completed\",\"providerInstanceId\":\"claudeAgent\",\"model\":\"claude-opus-5-5\",\"requestedAt\":\"2026-10-07T06:59:24.460Z\",\"startedAt\":\"2026-10-07T06:59:24.480Z\",\"completedAt\":\"2026-10-07T07:06:07.006Z\"}],\"items\":[{\"position\":0,\"visibility\":\"local\",\"sourceThreadId\":\"4bdef28a-d833-4584-89e6-bff19d0fbcc4\",\"itemId\":\"migration:v1:turn-item:a06a096a-97f6-4625-88d0-0b01fc0f3252\",\"runId\":null,\"messageId\":\"a06a096a-97f6-4625-88d0-0b01fc0f3252\",\"createdBy\":\"user\",\"creationSource\":\"server\",\"type\":\"user_message\",\"status\":\"completed\",\"title\":null,\"text\":\"$orchestrate HL-60\",\"textTruncated\":false,\"nextTextOffset\":null,\"updatedAt\":\"2026-10-07T06:01:07.428Z\"},{\"position\":1,\"visibility\":\"local\",\"sourceThreadId\":\"4bdef28a-d833-4584-89e6-bff19d0fbcc4\",\"itemId\":\"migration:v1:turn-item:assistant:82671194-edd2-437e-b853-f973304ac85f\",\"runId\":null,\"messageId\":\"assistant:82671194-edd2-437e-b853-f973304ac85f\",\"createdBy\":\"agent\",\"creationSource\":\"server\",\"type\":\"assistant_message\",\"status\":\"completed\",\"title\":null,\"text\":\"`systemctl --user restart t3code.service` is your step: the t3 nightly (`0.0.46-nightly.20261007.2761`) is installed, bu\",\"textTruncated\":true,\"nextTextOffset\":120,\"updatedAt\":\"2026-10-07T06:24:44.007Z\"}],\"nextPosition\":1,\"hasMore\":true}"
+		}
+	],
+	"structuredContent": {
+		"thread": {
+			"threadId": "4bdef28a-d833-4584-89e6-bff19d0fbcc4",
+			"projectId": "8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd",
+			"title": "Orchestrate HL-60 Sapphire Agent Token",
+			"createdBy": "system",
+			"creationSource": "server",
+			"status": "completed",
+			"latestRunId": "run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:2",
+			"activeRunId": null,
+			"providerInstanceId": "claudeAgent",
+			"model": "claude-opus-5-5",
+			"runtimeMode": "full-access",
+			"interactionMode": "default",
+			"linkedPullRequest": null,
+			"titleRegeneration": null,
+			"branch": "mario/hl-60-sapphire-agent-dispatches-linear-epics-to-t3-code-threads",
+			"worktreePath": null,
+			"parentThreadId": null,
+			"relationshipToParent": null,
+			"runCount": 2,
+			"itemCount": 79,
+			"pendingRequestCount": 0,
+			"archived": false,
+			"settled": false,
+			"settledAt": null,
+			"createdAt": "2026-10-07T06:01:07.428Z",
+			"updatedAt": "2026-10-07T07:10:46.104Z"
+		},
+		"recentRuns": [
+			{
+				"runId": "run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:2",
+				"ordinal": 2,
+				"status": "completed",
+				"providerInstanceId": "claudeAgent",
+				"model": "claude-opus-5-5",
+				"requestedAt": "2026-10-07T07:10:42.906Z",
+				"startedAt": "2026-10-07T07:10:42.921Z",
+				"completedAt": "2026-10-07T07:10:46.104Z"
+			},
+			{
+				"runId": "run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:1",
+				"ordinal": 1,
+				"status": "completed",
+				"providerInstanceId": "claudeAgent",
+				"model": "claude-opus-5-5",
+				"requestedAt": "2026-10-07T06:59:24.460Z",
+				"startedAt": "2026-10-07T06:59:24.480Z",
+				"completedAt": "2026-10-07T07:06:07.006Z"
+			}
+		],
+		"items": [
+			{
+				"position": 0,
+				"visibility": "local",
+				"sourceThreadId": "4bdef28a-d833-4584-89e6-bff19d0fbcc4",
+				"itemId": "migration:v1:turn-item:a06a096a-97f6-4625-88d0-0b01fc0f3252",
+				"runId": null,
+				"messageId": "a06a096a-97f6-4625-88d0-0b01fc0f3252",
+				"createdBy": "user",
+				"creationSource": "server",
+				"type": "user_message",
+				"status": "completed",
+				"title": null,
+				"text": "$orchestrate HL-60",
+				"textTruncated": false,
+				"nextTextOffset": null,
+				"updatedAt": "2026-10-07T06:01:07.428Z"
+			},
+			{
+				"position": 1,
+				"visibility": "local",
+				"sourceThreadId": "4bdef28a-d833-4584-89e6-bff19d0fbcc4",
+				"itemId": "migration:v1:turn-item:assistant:82671194-edd2-437e-b853-f973304ac85f",
+				"runId": null,
+				"messageId": "assistant:82671194-edd2-437e-b853-f973304ac85f",
+				"createdBy": "agent",
+				"creationSource": "server",
+				"type": "assistant_message",
+				"status": "completed",
+				"title": null,
+				"text": "`systemctl --user restart t3code.service` is your step: the t3 nightly (`0.0.46-nightly.20261007.2761`) is installed, bu",
+				"textTruncated": true,
+				"nextTextOffset": 120,
+				"updatedAt": "2026-10-07T06:24:44.007Z"
+			}
+		],
+		"nextPosition": 1,
+		"hasMore": true
+	},
+	"isError": false
+}

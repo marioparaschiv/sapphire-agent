@@ -1,0 +1,15 @@
+{
+	"content": [
+		{
+			"type": "text",
+			"text": "{\"threadId\":\"4bdef28a-d833-4584-89e6-bff19d0fbcc4\",\"runId\":\"run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:2\",\"status\":\"completed\",\"timedOut\":false}"
+		}
+	],
+	"structuredContent": {
+		"threadId": "4bdef28a-d833-4584-89e6-bff19d0fbcc4",
+		"runId": "run:thread:4bdef28a-d833-4584-89e6-bff19d0fbcc4:ordinal:2",
+		"status": "completed",
+		"timedOut": false
+	},
+	"isError": false
+}

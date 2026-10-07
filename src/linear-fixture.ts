@@ -117,7 +117,6 @@ const variableSchemas = {
 		filter: Schema.Struct({ or: Schema.Array(Schema.Struct({ team: Schema.Struct({ key: Schema.Struct({ eq: Schema.String }) }), number: Schema.Struct({ eq: Schema.Number }) })) }),
 	}),
 	Comments: Schema.Struct({ issueId: Schema.String, after: Schema.NullOr(Schema.String) }),
-	SubIssues: Schema.Struct({ parentIds: Ids, after: Schema.NullOr(Schema.String) }),
 	Labels: Schema.Struct({ name: Schema.String }),
 	Move: Schema.Struct({ id: Schema.String, stateId: Schema.String }),
 	Comment: Schema.Struct({ issueId: Schema.String, body: Schema.String }),
@@ -216,6 +215,7 @@ const make = Effect.gen(function* () {
 			labels: {
 				nodes: found.labelIds.map(label).map(({ id, name, parentName }) => ({ id, name, parent: parentName === null ? null : { name: parentName } })),
 			},
+			parent: found.parentId === null ? null : { identifier: issue(found.parentId).identifier },
 			children: { nodes: child ? [{ id: child.id }] : [] },
 		};
 	};
@@ -251,20 +251,6 @@ const make = Effect.gen(function* () {
 					filter.or.some(({ team: { key }, number }) => team(candidate.teamId).key === key.eq && candidate.identifier === `${key.eq}-${number.eq}`);
 
 				return { issues: { nodes: issueList.filter(matches).slice(0, MAX_PAGE_SIZE).map(toEpic) } };
-			}
-
-			case 'SubIssues': {
-				const { parentIds, after } = Schema.decodeUnknownSync(variableSchemas.SubIssues)(variables);
-				const children = issueList.filter((candidate) => candidate.parentId !== null && parentIds.includes(candidate.parentId));
-				const start = after === null ? 0 : children.findIndex((candidate) => candidate.id === after) + 1;
-				const page = children.slice(start, start + MAX_PAGE_SIZE);
-
-				return {
-					issues: {
-						nodes: page.map((child) => ({ id: child.id, identifier: child.identifier, title: child.title, parent: { id: child.parentId }, state: stateOf(child) })),
-						pageInfo: { hasNextPage: start + MAX_PAGE_SIZE < children.length, endCursor: page.at(-1)?.id ?? null },
-					},
-				};
 			}
 
 			case 'Comments': {

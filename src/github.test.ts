@@ -101,7 +101,7 @@ const pullRequestServer = () => {
 		const { query, variables } = graphqlRequest(call);
 
 		if (query.includes('query ConversationBodies')) {
-			return data({ repository: { pullRequest: { comments: page(state.comments) } } });
+			return data({ repository: { issueOrPullRequest: { comments: page(state.comments) } } });
 		}
 
 		if (query.includes('query ReviewThread')) {
@@ -136,6 +136,7 @@ const pullRequestJson = (number: number, state: string) => ({
 	state,
 	author: { login: 'mario' },
 	headRefName: 'mario/hl-11-github',
+	headRefOid: `5f2c9a41d7e3b8c06a1f4e2d9b7c3a5e8f1d${String(number).padStart(4, '0')}`,
 });
 
 describe('GitHub live layer', () => {
@@ -154,11 +155,11 @@ describe('GitHub live layer', () => {
 				found.map(Option.map(({ number, state }) => `${number} ${state}`)),
 				[Option.some('8 OPEN'), Option.some('5 MERGED'), Option.some('3 CLOSED'), Option.none()],
 			);
-			assert.deepStrictEqual(calls[0].args, ['pr', 'list', '--repo', repo, '--head', 'mario/hl-11-github', '--state', 'all', '--json', 'number,url,state,author']);
+			assert.deepStrictEqual(calls[0].args, ['pr', 'list', '--repo', repo, '--head', 'mario/hl-11-github', '--state', 'all', '--json', 'number,url,state,author,headRefOid']);
 		}),
 	);
 
-	it.effect("posts a comment once on a PR, as the GitHub App with its installation's token", () =>
+	it.effect("posts a comment once on an issue or PR, as the GitHub App with its installation's token", () =>
 		Effect.gen(function* () {
 			const server = pullRequestServer();
 			const { calls, layer } = liveWithGh(server.respond);
@@ -184,7 +185,7 @@ describe('GitHub live layer', () => {
 					['api graphql --input -', undefined, undefined],
 				],
 			);
-			assert.match(graphqlRequest(calls[0]).query, /pullRequest\(number: \$number\)/);
+			assert.match(graphqlRequest(calls[0]).query, /issueOrPullRequest\(number: \$number\)/);
 		}),
 	);
 
@@ -260,7 +261,7 @@ describe('GitHub live layer', () => {
 	it.effect('refuses to look for a marker past the 100 newest comments', () =>
 		Effect.gen(function* () {
 			const { calls, layer } = liveWithGh(() =>
-				data({ repository: { pullRequest: { comments: { totalCount: 140, nodes: Array.from({ length: 100 }, (_, n) => ({ body: `LGTM ${n}` })) } } } }),
+				data({ repository: { issueOrPullRequest: { comments: { totalCount: 140, nodes: Array.from({ length: 100 }, (_, n) => ({ body: `LGTM ${n}` })) } } } }),
 			);
 			const exit = yield* Effect.gen(function* () {
 				(yield* GitHubAppFixture).install(repo);
@@ -298,7 +299,7 @@ describe('GitHub live layer', () => {
 				exit,
 				Exit.fail(
 					new Permanent({
-						message: `gh pr list --repo acme/missing --head mario/hl-11-github --state all --json number,url,state,author exited with 1: ${stderr.trim()}`,
+						message: `gh pr list --repo acme/missing --head mario/hl-11-github --state all --json number,url,state,author,headRefOid exited with 1: ${stderr.trim()}`,
 					}),
 				),
 			);
@@ -314,7 +315,7 @@ describe('GitHub live layer', () => {
 			assert.strictEqual(error._tag, 'Permanent');
 			assert.strictEqual(
 				error.message,
-				'gh pr list --repo acme/web --head mario/hl-11-github --state all --json number,url,state,author: Expected "OPEN" | "CLOSED" | "MERGED"\n  at [0]["state"]',
+				'gh pr list --repo acme/web --head mario/hl-11-github --state all --json number,url,state,author,headRefOid: Expected "OPEN" | "CLOSED" | "MERGED"\n  at [0]["state"]',
 			);
 		}),
 	);
