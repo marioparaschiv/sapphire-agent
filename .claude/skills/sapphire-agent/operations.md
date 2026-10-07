@@ -49,6 +49,7 @@ No T3 MCP tool reads or changes them, so set once by hand in T3 (they live in `~
 
 - For each project sapphire-agent dispatches to (each `sapphire project` repo and label repo), project settings, **Automatic worktree cleanup**: **Off**. Cleanup removes a run's worktree once every commit is on origin; T3's own cleanup (`storageCleanup`, e.g. "no commits beyond the default branch") could remove one under a run.
 - **Settings → General**, **Auto-settle merged threads**: on (the default).
+- A **default model** (the model picker's default, `defaultModelSelection`). Every thread is launched with it, read from the file at each launch: T3 does not fall back to it over MCP for a project without a default model of its own, and refuses the launch. Without one, every start fails permanently with `set a default model in T3`.
 - **Settings → Notifications**, **Device Notifications**: on, with T3 Connect linked. T3 pushes a run finishing, failing or waiting for input to the phone; Pushover only carries the service's own notices.
 
 At startup the service reads that file (`t3.settingsFile`) and sends one Pushover notice `T3's settings need a change for sapphire-agent` naming each project to fix. A project T3 has no project for yet is checked against the environment settings it will inherit. Command threads run in checkouts under `$STATE/commands`, which T3 does not manage.

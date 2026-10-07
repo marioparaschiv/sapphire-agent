@@ -54,7 +54,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `pushover.userKeyFile` | `~/.config/sapphire-agent/pushover-user-key` | `~` expanded. The Pushover user key they are sent to, see below. |
 | `t3.url` | `http://127.0.0.1:3773` | The T3 Code server; its MCP endpoint is `<url>/mcp`. |
 | `t3.tokenFile` | `~/.config/sapphire-agent/t3-token` | `~` expanded. The full-access T3 token, see below. |
-| `t3.settingsFile` | `~/.t3/userdata/settings.json` | `~` expanded. T3's own settings, read at startup to check its worktree cleanup and auto-settle (`operations.md`, T3 settings). A missing file is T3's defaults. |
+| `t3.settingsFile` | `~/.t3/userdata/settings.json` | `~` expanded. T3's own settings, read at startup to check its worktree cleanup and auto-settle (`operations.md`, T3 settings), and at each launch for T3's default model. A missing file is T3's defaults for the check, but fails every launch: T3 must have a default model. |
 
 `states` defaults: `ready` "Ready For Agent", `implementing` "Implementing", `inReview` "In Review", `toReview` "To Review", `shipped` "Shipped". All five must exist in a team or it is skipped.
 

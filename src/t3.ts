@@ -1,7 +1,8 @@
-import { Context, Duration, Effect, Layer, Option, Redacted, Schema, SynchronizedRef } from 'effect';
+import { Context, Duration, Effect, FileSystem, Layer, Option, Redacted, Schema, SynchronizedRef } from 'effect';
 import { Headers, HttpClient, HttpClientRequest, type HttpClientResponse } from 'effect/http';
 import { type CallError, callTimeouts, Permanent, Transient, timeoutAsTransient, transportFailure, withCallPolicy } from './call-policy.ts';
 import { T3Config } from './config.ts';
+import { defaultModelSelection, type ModelSelection } from './t3-settings.ts';
 
 const mcpProtocolVersion = '2025-06-18';
 
@@ -181,7 +182,8 @@ type T3Shape = {
 	readonly listProjects: Effect.Effect<ReadonlyArray<T3Project>, T3Error>;
 	// T3 refuses a workspace root that belongs to a project already.
 	readonly createProject: (input: { readonly title: string; readonly workspaceRoot: string }) => Effect.Effect<T3Project, T3Error>;
-	// Has no retry key: after a failure, list the project's threads before launching again.
+	// With T3's default model, read from its settings at each launch. Has no retry key: after a failure, list the
+	// project's threads before launching again.
 	readonly launchThread: (input: LaunchInput) => Effect.Effect<Launched, T3Error>;
 	// Newest first, every page.
 	readonly listThreads: (filter: ThreadFilter) => Effect.Effect<ReadonlyArray<ThreadSummary>, T3Error>;
@@ -243,7 +245,8 @@ const unreadable = (what: string) => (cause: Schema.SchemaError) => new Permanen
 
 const make = Effect.gen(function* () {
 	const client = yield* HttpClient.HttpClient;
-	const { url, token } = yield* T3Config;
+	const { url, token, settingsFile } = yield* T3Config;
+	const fs = yield* FileSystem.FileSystem;
 	const endpoint = `${url}/mcp`;
 	const session = yield* SynchronizedRef.make(Option.none<string>());
 	let lastRequestId = 0;
@@ -397,7 +400,11 @@ const make = Effect.gen(function* () {
 
 		createProject: ({ title, workspaceRoot }) => callTool('t3_project_create', { title, workspaceRoot }, T3Project).pipe(t3Policy.once),
 
-		launchThread: (input) => callTool('t3_thread_launch', input, Launched).pipe(t3Policy.once),
+		launchThread: (input) =>
+			defaultModelSelection(settingsFile).pipe(
+				Effect.provideService(FileSystem.FileSystem, fs),
+				Effect.flatMap((modelSelection) => callTool('t3_thread_launch', { ...input, modelSelection }, Launched).pipe(t3Policy.once)),
+			),
 
 		listThreads: (filter) =>
 			allPages((cursor) =>

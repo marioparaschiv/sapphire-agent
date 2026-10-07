@@ -166,6 +166,7 @@ describe('dispatch', () => {
 					message: '/orchestrate Linear epic TEST-10 autonomously',
 					workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: 'mario/test-10-plugin-settings-sync', startFromOrigin: true },
 					runtimeMode: 'full-access',
+					modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' },
 				},
 			]);
 			assert.isNotNull(run.threadId);
@@ -291,6 +292,26 @@ describe('dispatch', () => {
 			assert.lengthOf(yield* h.t3.launches, 1);
 			assert.notInclude(yield* h.t3.calls, 't3_thread_interrupt');
 			assert.strictEqual(h.linear.stateName(epic.id), 'Ready For Agent');
+		}),
+	);
+
+	it.effect("fails the start without launching when T3's settings have no default model", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const settingsFile = join(h.dir, 't3-settings.json');
+
+			writeFileSync(settingsFile, JSON.stringify({ defaultAutoPull: true, branchNamePrefix: 'agent/', pullRequestMergeMethod: 'squash' }, null, 2));
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(h.notices(epic.identifier).map(({ marker }) => marker), ['startFailed:0']);
+			assert.include(h.notices(epic.identifier)[0].text, `T3's settings in ${settingsFile} have no default model: set a default model in T3`);
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.status, run.threadId]),
+				[['error', null]],
+			);
+			assert.notInclude(yield* h.t3.calls, 't3_thread_launch');
 		}),
 	);
 

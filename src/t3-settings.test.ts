@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect } from 'effect';
+import { Permanent } from './call-policy.ts';
 import { onTestFinished } from 'vitest';
-import { t3SettingsProblems } from './t3-settings.ts';
+import { defaultModelSelection, t3SettingsProblems } from './t3-settings.ts';
 
 // T3's settings.json with `settings`, among keys sapphire-agent does not read, as T3 writes it.
 const settingsFile = (settings: Record<string, unknown> | null) => {
@@ -72,6 +73,48 @@ describe('t3SettingsProblems', () => {
 			writeFileSync(path, '{"storageCleanup": ');
 
 			assert.strictEqual((yield* t3SettingsProblems(path, projects).pipe(Effect.flip))._tag, 'SchemaError');
+		}).pipe(Effect.provide(NodeServices.layer)),
+	);
+});
+
+describe('defaultModelSelection', () => {
+	it.effect("reads the environment's default model, as T3 writes it with or without provider options", () =>
+		Effect.gen(function* () {
+			assert.deepStrictEqual(yield* defaultModelSelection(join(import.meta.dirname, 'fixtures/t3/settings.json')), { instanceId: 'claudeAgent', model: 'claude-opus-5-5' });
+			assert.deepStrictEqual(
+				yield* defaultModelSelection(
+					settingsFile({
+						defaultModelSelection: {
+							instanceId: 'codex',
+							model: 'gpt-5.5-codex',
+							options: [
+								{ id: 'reasoningEffort', value: 'high' },
+								{ id: 'fastMode', value: false },
+							],
+						},
+					}),
+				),
+				{
+					instanceId: 'codex',
+					model: 'gpt-5.5-codex',
+					options: [
+						{ id: 'reasoningEffort', value: 'high' },
+						{ id: 'fastMode', value: false },
+					],
+				},
+			);
+		}).pipe(Effect.provide(NodeServices.layer)),
+	);
+
+	it.effect('fails Permanent, asking for a default model, when the settings have none or there is no settings file', () =>
+		Effect.gen(function* () {
+			const absent = settingsFile({ storageCleanup: { logsAfterDays: 8 } });
+			const cleared = settingsFile({ defaultModelSelection: null });
+			const missing = settingsFile(null);
+
+			assert.deepStrictEqual(yield* defaultModelSelection(absent).pipe(Effect.flip), new Permanent({ message: `T3's settings in ${absent} have no default model: set a default model in T3` }));
+			assert.deepStrictEqual(yield* defaultModelSelection(cleared).pipe(Effect.flip), new Permanent({ message: `T3's settings in ${cleared} have no default model: set a default model in T3` }));
+			assert.deepStrictEqual(yield* defaultModelSelection(missing).pipe(Effect.flip), new Permanent({ message: `T3's settings file ${missing} does not exist: set a default model in T3` }));
 		}).pipe(Effect.provide(NodeServices.layer)),
 	);
 });

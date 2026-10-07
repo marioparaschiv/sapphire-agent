@@ -83,7 +83,8 @@ const Settings = Schema.Struct({
 	t3: Schema.Struct({
 		url: Schema.NonEmptyString.pipe(withDefault('http://127.0.0.1:3773')),
 		tokenFile: Path.pipe(withDefault(join(defaultConfigDirectory, 't3-token'))),
-		// T3's own settings, read to check it leaves sapphire-agent's worktrees alone and settles merged threads.
+		// T3's own settings, read to check it leaves sapphire-agent's worktrees alone and settles merged threads, and for
+		// the default model every thread is launched with.
 		settingsFile: Path.pipe(withDefault('~/.t3/userdata/settings.json')),
 	}).pipe(withDefault({})),
 });
@@ -138,6 +139,8 @@ type T3ConfigShape = {
 	readonly token: Redacted.Redacted<string>;
 	// Epoch milliseconds, from the token's `exp` claim.
 	readonly expiresAt: number;
+	// T3's own settings.json, where its default model is.
+	readonly settingsFile: string;
 };
 
 export class StartupError extends Schema.TaggedError<StartupError>()('StartupError', { problems: Schema.Array(Schema.String) }) {
@@ -347,9 +350,11 @@ export class T3Config extends Context.Service<T3Config, T3ConfigShape>()('sapphi
 			const { t3 } = yield* AppConfig;
 			const { token, expiresAt } = yield* readT3Token(t3.tokenFile).pipe(Effect.mapError((problems) => new StartupError({ problems })));
 
-			return { url: t3.url, token, expiresAt };
+			return { url: t3.url, token, expiresAt, settingsFile: t3.settingsFile };
 		}),
 	);
 
-	static readonly layerTest = Layer.succeed(T3Config, { url: 'http://127.0.0.1:3773', token: Redacted.make('test-t3-token'), expiresAt: Date.UTC(2036, 9, 4, 12) });
+	// By default T3's settings as recorded from the live server, which have a default model.
+	static readonly layerTest = (settingsFile = join(import.meta.dirname, 'fixtures/t3/settings.json')) =>
+		Layer.succeed(T3Config, { url: 'http://127.0.0.1:3773', token: Redacted.make('test-t3-token'), expiresAt: Date.UTC(2036, 9, 4, 12), settingsFile });
 }

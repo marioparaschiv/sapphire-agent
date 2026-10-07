@@ -99,6 +99,7 @@ describe('handoffs', () => {
 				message: `Read ${path} and continue; run its suggested skills`,
 				workspaceStrategy: { type: 'existing_worktree', worktreePath: run.worktreePath, branch: run.branch },
 				runtimeMode: 'full-access',
+				modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' },
 			});
 			assert.lengthOf(yield* h.runs, 1);
 			assert.notStrictEqual(after.threadId, run.threadId);

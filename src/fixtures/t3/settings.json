@@ -1,0 +1,68 @@
+{
+	"storageCleanup": {
+		"worktreeAfterDays": 14,
+		"worktreeOnMerge": true,
+		"worktreeUnchanged": true,
+		"browserArtifactsAfterDays": 8,
+		"logsAfterDays": 8
+	},
+	"continueThreadsAfterServerUpdate": true,
+	"defaultAutoPull": true,
+	"defaultModelSelection": {
+		"instanceId": "claudeAgent",
+		"model": "claude-opus-5-5"
+	},
+	"projectSettingsFolded": true,
+	"deviceOnboardingCompleted": true,
+	"autoResumeLimitedThreads": true,
+	"branchNamingMode": "semantic",
+	"branchNamePrefix": "agent/",
+	"removeAgentCreditsOnMerge": true,
+	"pullRequestMergeMethod": "squash",
+	"providers": {
+		"cursor": {
+			"enabled": false
+		},
+		"grok": {
+			"enabled": false
+		},
+		"opencode": {
+			"enabled": false
+		}
+	},
+	"providerInstances": {
+		"codex": {
+			"driver": "codex",
+			"enabled": false,
+			"config": {
+				"binaryPath": "codex",
+				"homePath": "",
+				"shadowHomePath": "",
+				"launchArgs": "",
+				"customModels": []
+			}
+		}
+	},
+	"projectSettingsOverrides": {
+		"599d8e00-4dc0-4c36-aa38-4ebb6c02bad5": {
+			"worktreeCleanup": {
+				"mode": "off"
+			}
+		},
+		"8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd": {
+			"worktreeCleanup": {
+				"mode": "off"
+			}
+		},
+		"1975f15c-daea-4ef5-92e8-4854c122d672": {
+			"worktreeCleanup": {
+				"mode": "off"
+			}
+		},
+		"mcp:62f28e99-2299-4397-a5a1-ddf95b681ee0": {
+			"worktreeCleanup": {
+				"mode": "off"
+			}
+		}
+	}
+}

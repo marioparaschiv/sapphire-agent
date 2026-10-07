@@ -1,5 +1,5 @@
 import { Effect, FileSystem, Option, Schema } from 'effect';
-import { fileSystemFailure } from './call-policy.ts';
+import { fileSystemFailure, Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { Journal } from './journal.ts';
 import { Projects } from './projects.ts';
@@ -28,6 +28,24 @@ const T3SettingsFile = Schema.fromJsonString(
 );
 
 type T3Settings = typeof T3SettingsFile.Type;
+
+// The provider instance and model T3 starts a thread with, as `t3_thread_launch` takes it.
+export const ModelSelection = Schema.Struct({
+	instanceId: Schema.NonEmptyString,
+	model: Schema.NonEmptyString,
+	options: Schema.optionalKey(Schema.Array(Schema.Struct({ id: Schema.NonEmptyString, value: Schema.Union([Schema.NonEmptyString, Schema.Boolean]) }))),
+});
+
+export type ModelSelection = typeof ModelSelection.Type;
+
+const DefaultModelFile = Schema.fromJsonString(Schema.Struct({ defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)) }));
+
+// None for a missing file.
+const readSettingsText = (path: string) =>
+	FileSystem.FileSystem.use((fs) => fs.readFileString(path)).pipe(
+		Effect.map(Option.some),
+		Effect.catchTag('PlatformError', (error) => (error.reason._tag === 'NotFound' ? Effect.succeedNone : Effect.fail(fileSystemFailure(error)))),
+	);
 
 // A project's own value wins over the environment's, a null one included.
 const effective = (settings: T3Settings, projectId: string | null) => {
@@ -59,6 +77,28 @@ export const t3SettingsProblems = (path: string, projects: ReadonlyArray<{ reado
 				...(autoSettlesMerged ? [] : [`T3 does not settle the threads of ${repo} once their PR merged: turn on Auto-settle merged threads`]),
 			];
 		});
+	});
+
+// The environment's default model, the one T3's composer starts new threads with. T3 does not fall back to it for a
+// thread launched over MCP in a project without a default model of its own, so every launch passes it.
+export const defaultModelSelection = (path: string) =>
+	Effect.gen(function* () {
+		const missing = (why: string) => new Permanent({ message: `${why}: set a default model in T3` });
+		const text = yield* readSettingsText(path);
+
+		if (Option.isNone(text)) {
+			return yield* missing(`T3's settings file ${path} does not exist`);
+		}
+
+		const { defaultModelSelection } = yield* Schema.decodeEffect(DefaultModelFile)(text.value).pipe(
+			Effect.mapError((cause) => new Permanent({ message: `cannot read T3's default model from ${path}: ${cause.message}`, cause })),
+		);
+
+		if (defaultModelSelection === undefined || defaultModelSelection === null) {
+			return yield* missing(`T3's settings in ${path} have no default model`);
+		}
+
+		return defaultModelSelection;
 	});
 
 // At startup: Pushover hears once what is wrong with T3's settings for the projects' repos and the label repos T3 has
