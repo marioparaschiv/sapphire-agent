@@ -323,7 +323,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 			if (answerChat) {
 				yield* answerChatMessages.pipe(Effect.provide(claudeChat), Effect.provide(context), Effect.provide(fixtures), Effect.provide(NodeFileSystem.layer), Effect.forkIn(scope));
-				yield* runManager.pipe(Effect.provide(manager.layer), Effect.provide(context), Effect.provide(fixtures), Effect.forkIn(scope));
+				yield* runManager.pipe(Effect.provide(manager.layer), Effect.provide(context), Effect.provide(fixtures), Effect.provide(NodeFileSystem.layer), Effect.forkIn(scope));
 			}
 
 			return { scope, context };

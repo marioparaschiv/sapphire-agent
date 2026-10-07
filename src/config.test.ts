@@ -114,6 +114,7 @@ describe('loadAppConfig', () => {
 			assert.strictEqual(config.maxInFlight, 1);
 			assert.strictEqual(config.awaitingInputAfterSeconds, 240);
 			assert.strictEqual(config.flagTransientAfterSeconds, 600);
+			assert.strictEqual(config.managerRotateAtTokens, 50_000);
 			assert.strictEqual(config.states.ready, 'Ready For Agent');
 			assert.strictEqual(config.labels.stuck, 'agent-stuck');
 			assert.strictEqual(config.worktreesDirectory, join(homedir(), '.herdr/worktrees'));
@@ -147,6 +148,19 @@ describe('loadAppConfig', () => {
 			assert.match(error.message, /HERDR_BIN_PATH/);
 			assert.match(error.message, /config\.json pollSeconds: Expected a value greater than or equal to 5/);
 			assert.match(error.message, /config\.json maxInflight: Expected no excess property/);
+		}),
+	);
+
+	it.effect('reads managerRotateAtTokens and rejects one under 10000 or not an integer', () =>
+		Effect.gen(function* () {
+			const { app: config } = yield* load(fullEnv, { config: (directory) => ({ managerRotateAtTokens: 80_000, ...unbound(directory) }), key, appKey, webhookSecret, linearWebhookSecret });
+			const error = yield* load(fullEnv, { config: (directory) => ({ managerRotateAtTokens: 9_999, ...unbound(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+			const fractional = yield* load(fullEnv, { config: (directory) => ({ managerRotateAtTokens: 50_000.5, ...unbound(directory) }), key, appKey, webhookSecret, linearWebhookSecret }).pipe(Effect.flip);
+
+			assert.strictEqual(config.managerRotateAtTokens, 80_000);
+			assert.deepStrictEqual(error.problems.map((problem) => problem.replace(/^\S+config\.json /, '')), ['managerRotateAtTokens: Expected a value greater than or equal to 10000']);
+			assert.lengthOf(fractional.problems, 1);
+			assert.match(fractional.problems[0], /config\.json managerRotateAtTokens: /);
 		}),
 	);
 

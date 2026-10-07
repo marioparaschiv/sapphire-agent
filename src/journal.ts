@@ -214,6 +214,12 @@ export const SubagentHandoff = Schema.Struct({ agentId: Schema.String, identifie
 
 export type SubagentHandoff = typeof SubagentHandoff.Type;
 
+// The main chat's manager session: the one it runs, resumed after a restart, and the summary it started from, which a
+// new session starts from when that one cannot be resumed.
+export const ManagerSession = Schema.Struct({ sessionId: Schema.String, summary: Schema.NullOr(Schema.String) });
+
+export type ManagerSession = typeof ManagerSession.Type;
+
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
 const migrations = SqliteMigrator.layer({
@@ -423,6 +429,18 @@ const migrations = SqliteMigrator.layer({
 				)
 			`;
 		}),
+		'0013_create_manager_session': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			// At most one row.
+			yield* sql`
+				CREATE TABLE manager_session (
+					id INTEGER PRIMARY KEY CHECK (id = 1),
+					session_id TEXT NOT NULL,
+					summary TEXT
+				)
+			`;
+		}),
 	}),
 });
 
@@ -480,6 +498,9 @@ export class Journal extends Context.Service<
 		readonly markNoticeSent: (id: number) => Effect.Effect<void, JournalError>;
 		// Records that the run's subagent was told to hand off; false when it was already.
 		readonly addSubagentHandoff: (handoff: SubagentHandoff) => Effect.Effect<boolean, JournalError>;
+		// None before the manager first started.
+		readonly managerSession: Effect.Effect<Option.Option<ManagerSession>, JournalError>;
+		readonly setManagerSession: (session: ManagerSession) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -701,6 +722,17 @@ export class Journal extends Context.Service<
 						Effect.map(Option.isSome),
 					);
 
+				const managerSession = SqlSchema.findOneOption({
+					Request: Schema.Void,
+					Result: ManagerSession,
+					execute: () => sql`SELECT session_id, summary FROM manager_session`,
+				})(undefined);
+
+				const setManagerSession = SqlSchema.void({
+					Request: ManagerSession,
+					execute: ({ sessionId, summary }) => sql`INSERT OR REPLACE INTO manager_session (id, session_id, summary) VALUES (1, ${sessionId}, ${summary})`,
+				});
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -733,6 +765,8 @@ export class Journal extends Context.Service<
 					unsentNotices,
 					markNoticeSent,
 					addSubagentHandoff,
+					managerSession,
+					setManagerSession,
 				});
 			}),
 		).pipe(

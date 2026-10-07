@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit, Layer, Logger, Scope, Stream, SubscriptionRef } from 'effect';
+import { Duration, Effect, Exit, Layer, Logger, Option, Scope, Stream, SubscriptionRef } from 'effect';
 import { TestClock } from 'effect/testing';
 import { fakeClaudeAgent, type SendMessageArguments } from './claude-agent-fake.ts';
 import { ClaudeChat } from './claude-chat.ts';
@@ -13,7 +13,7 @@ import { AppConfig } from './config.ts';
 import { Chat } from './chat.ts';
 import { answerChatMessages, cacheReminder, checkChatSettings, unknownContext } from './conversations.ts';
 import { Journal } from './journal.ts';
-import { ManagerInbox, runManager } from './manager.ts';
+import { ManagerInbox, runManager, summaryTimeout } from './manager.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Projects } from './projects.ts';
@@ -237,6 +237,182 @@ describe('main chat', () => {
 			);
 			assert.deepStrictEqual(chat.claude.runs, []);
 			assert.isUndefined(chat.telegram.sent.find(({ topicId }) => topicId === 4242));
+		}).pipe(Effect.scoped),
+	);
+});
+
+// Where the manager's session is asked to write its summary.
+const summaryPath = (chat: Effect.Success<ReturnType<typeof makeChat>>, sessionId: string) => join(chat.dir, `manager-summary-${sessionId}.md`);
+
+const storedManagerSession = (chat: Effect.Success<ReturnType<typeof makeChat>>) => Journal.use((journal) => journal.managerSession).pipe(Effect.provide(Journal.layer(chat.journalFile)));
+
+const inputsOf = (chat: Effect.Success<ReturnType<typeof makeChat>>) => chat.agent.sessions.map(({ inputs }) => inputs.map(({ text }) => text));
+
+const summary = 'HL-12: tell the user when its PR opens (ref 7100200300:2)';
+
+const summaryInput = `Summary of the previous session:\n${summary}`;
+
+describe('manager rotation', () => {
+	it.effect('replaces the session once the main chat was idle for promptCacheTtl, starting the next one from the summary it wrote, and hands it the next message', () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat();
+			const prompts = yield* Prompts.pipe(Effect.provide(Prompts.layer));
+
+			yield* chat.start;
+
+			const hello = chat.telegram.write({ from: chat.user, text: 'hello' });
+
+			yield* chat.agent.awaitInputs(1);
+			yield* chat.agent.endTurn();
+			yield* TestClock.adjust('59 minutes');
+			assert.deepStrictEqual(inputsOf(chat), [[userInput(chat, hello, 'hello')]]);
+
+			yield* TestClock.adjust('1 minute');
+			yield* chat.agent.awaitInputs(2);
+
+			const [outgoing] = chat.agent.sessions;
+			const path = summaryPath(chat, outgoing.id);
+
+			writeFileSync(path, `${summary}\n`);
+			yield* chat.agent.endTurn();
+			yield* chat.agent.awaitInputs(3);
+			yield* TestClock.adjust('3 hours');
+
+			const later = chat.telegram.write({ from: chat.user, text: 'and now?' });
+
+			yield* chat.agent.awaitInputs(4);
+
+			const [, next] = chat.agent.sessions;
+
+			assert.deepStrictEqual(inputsOf(chat), [
+				[userInput(chat, hello, 'hello'), prompts.managerSummary(path)],
+				[summaryInput, userInput(chat, later, 'and now?')],
+			]);
+			assert.deepStrictEqual([outgoing.closed, next.options.sessionId, next.options.resume], [true, next.id, undefined]);
+			assert.notStrictEqual(next.id, outgoing.id);
+			assert.deepStrictEqual(yield* storedManagerSession(chat), Option.some({ sessionId: next.id, summary }));
+			assert.isFalse(existsSync(path));
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect("replaces the session once after a turn whose context reached managerRotateAtTokens, not one just under it, and keeps what came meanwhile for the next one", () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat();
+			const prompts = yield* Prompts.pipe(Effect.provide(Prompts.layer));
+
+			yield* chat.start;
+
+			const first = chat.telegram.write({ from: chat.user, text: 'how is HL-12 doing?' });
+
+			yield* chat.agent.awaitInputs(1);
+			yield* chat.agent.endTurn({ input: 2, cacheRead: 40_000, cacheCreation: 9_997 });
+
+			const second = chat.telegram.write({ from: chat.user, text: 'and HL-9?' });
+
+			yield* chat.agent.awaitInputs(2);
+			yield* chat.agent.endTurn({ input: 3, cacheRead: 40_000, cacheCreation: 9_997 });
+			yield* chat.agent.awaitInputs(3);
+
+			const meanwhile = chat.telegram.write({ from: chat.user, text: 'stop HL-9' });
+			const [outgoing] = chat.agent.sessions;
+			const path = summaryPath(chat, outgoing.id);
+
+			writeFileSync(path, summary);
+			yield* chat.agent.endTurn({ input: 3, cacheRead: 50_000, cacheCreation: 200 });
+			yield* chat.agent.awaitInputs(5);
+
+			assert.deepStrictEqual(inputsOf(chat), [
+				[userInput(chat, first, 'how is HL-12 doing?'), userInput(chat, second, 'and HL-9?'), prompts.managerSummary(path)],
+				[summaryInput, userInput(chat, meanwhile, 'stop HL-9')],
+			]);
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect('logs a session that wrote no summary and replaces it anyway once summaryTimeout passed', () =>
+		Effect.gen(function* () {
+			const { logs, layer } = collectLogs();
+			const chat = yield* makeChat();
+
+			yield* Effect.gen(function* () {
+				yield* chat.start;
+
+				const first = chat.telegram.write({ from: chat.user, text: 'one' });
+
+				yield* chat.agent.awaitInputs(1);
+				yield* chat.agent.endTurn({ input: 1, cacheRead: 60_000, cacheCreation: 0 });
+				yield* chat.agent.awaitInputs(2);
+				yield* chat.agent.endTurn({ input: 1, cacheRead: 61_000, cacheCreation: 0 });
+				yield* TestClock.adjust(Duration.subtract(summaryTimeout, Duration.seconds(1)));
+				assert.lengthOf(chat.agent.sessions, 1);
+
+				yield* TestClock.adjust('1 second');
+				yield* chat.agent.awaitSessions(2);
+
+				const second = chat.telegram.write({ from: chat.user, text: 'two' });
+
+				yield* chat.agent.awaitInputs(3);
+
+				const [outgoing, next] = chat.agent.sessions;
+
+				assert.deepStrictEqual(inputsOf(chat)[1], [userInput(chat, second, 'two')]);
+				assert.deepStrictEqual(inputsOf(chat)[0][0], userInput(chat, first, 'one'));
+				assert.isTrue(outgoing.closed);
+				assert.deepStrictEqual(yield* storedManagerSession(chat), Option.some({ sessionId: next.id, summary: null }));
+				assert.isTrue(logs.some(({ level, message }) => level === 'WARN' && JSON.stringify(message).includes(`the manager session ${outgoing.id} wrote no summary`)));
+			}).pipe(Effect.provide(layer));
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect('resumes the stored session after a restart, and starts from the stored summary once Claude no longer has it, without replacing it again', () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat();
+			const prompts = yield* Prompts.pipe(Effect.provide(Prompts.layer));
+			const first = yield* chat.start;
+			const before = chat.telegram.write({ from: chat.user, text: 'one' });
+
+			yield* chat.agent.awaitInputs(1);
+			yield* Scope.close(first, Exit.void);
+
+			const second = yield* chat.start;
+
+			yield* chat.agent.awaitSessions(2);
+
+			const [original, resumed] = chat.agent.sessions;
+
+			assert.deepStrictEqual([resumed.options.resume, resumed.options.sessionId], [original.id, undefined]);
+
+			yield* chat.agent.endTurn({ input: 1, cacheRead: 50_000, cacheCreation: 0 });
+			yield* chat.agent.awaitInputs(2);
+			writeFileSync(summaryPath(chat, original.id), summary);
+			yield* chat.agent.endTurn();
+			yield* chat.agent.awaitInputs(3);
+			yield* Scope.close(second, Exit.void);
+
+			const [, , rotated] = chat.agent.sessions;
+			const third = yield* chat.start;
+
+			yield* chat.agent.awaitSessions(4);
+			yield* Scope.close(third, Exit.void);
+			yield* chat.agent.forget(rotated.id);
+			yield* chat.start;
+			yield* chat.agent.awaitInputs(4);
+
+			const after = chat.telegram.write({ from: chat.user, text: 'two' });
+
+			yield* chat.agent.awaitInputs(5);
+
+			const [, , , resumedRotated, restarted] = chat.agent.sessions;
+
+			assert.deepStrictEqual(inputsOf(chat), [
+				[userInput(chat, before, 'one')],
+				[prompts.managerSummary(summaryPath(chat, original.id))],
+				[summaryInput],
+				[],
+				[summaryInput, userInput(chat, after, 'two')],
+			]);
+			assert.deepStrictEqual(resumedRotated.options.resume, rotated.id);
+			assert.deepStrictEqual([restarted.options.sessionId, restarted.options.resume], [rotated.id, undefined]);
+			assert.deepStrictEqual(yield* storedManagerSession(chat), Option.some({ sessionId: rotated.id, summary }));
 		}).pipe(Effect.scoped),
 	);
 });

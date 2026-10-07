@@ -280,6 +280,18 @@ describe('Journal', () => {
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),
 	);
 
+	it.effect("keeps one manager session, replaced by the next with the summary it starts from", () =>
+		Effect.gen(function* () {
+			const journal = yield* Journal;
+			const before = yield* journal.managerSession;
+
+			yield* journal.setManagerSession({ sessionId: 'session-a', summary: null });
+			yield* journal.setManagerSession({ sessionId: 'session-b', summary: 'HL-12: tell the user when its PR opens (ref 7100200300:41)' });
+
+			assert.deepStrictEqual([before, yield* journal.managerSession], [Option.none(), Option.some({ sessionId: 'session-b', summary: 'HL-12: tell the user when its PR opens (ref 7100200300:41)' })]);
+		}).pipe(Effect.provide(Journal.layer(':memory:'))),
+	);
+
 	it.effect('migrates an empty database file and reopens an already migrated one', () =>
 		Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem;
@@ -294,7 +306,7 @@ describe('Journal', () => {
 			assert.deepStrictEqual(reopened, [followUp]);
 			assert.deepStrictEqual(
 				tables.map(({ name }) => name),
-				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'notices', 'projects', 'requests', 'runs', 'subagent_handoffs', 'topics', 'transient_failures'],
+				['archive_thread', 'chat_sessions', 'commands', 'delivery_mark', 'effect_sql_migrations', 'manager_session', 'notices', 'projects', 'requests', 'runs', 'subagent_handoffs', 'topics', 'transient_failures'],
 			);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);

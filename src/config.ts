@@ -42,6 +42,8 @@ const Settings = Schema.Struct({
 	maxRunSeconds: IntAtLeast(600, 5400),
 	// How much context a run's agent or one of its subagents may use before it hands its work to a fresh session.
 	handoffAtTokens: IntAtLeast(10_000, 250_000),
+	// How much context the main chat's manager may use before it is replaced by a fresh session that starts from its summary.
+	managerRotateAtTokens: IntAtLeast(10_000, 50_000),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
 	// How often the App's failed webhook deliveries are looked for and redelivered.

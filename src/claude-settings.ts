@@ -107,11 +107,12 @@ export const readClaudeSettings = Effect.gen(function* () {
 	return { settings, mcpServers: Object.keys(mcpServers) };
 });
 
-// How long after a session's last turn its prompt cache is about to expire, from settings.json's promptCacheTtl. None
-// when the cache lives no longer than the notice, or its lifetime is not set.
-export const readCacheRefreshDelay = readSettingsFile.pipe(
+// How long a session's prompt cache lives after its last use, from settings.json's promptCacheTtl; none when it is not set.
+export const readPromptCacheTtl = readSettingsFile.pipe(
 	Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(PromptCacheSettings))),
-	Effect.map(({ promptCacheTtl }) =>
-		Option.filter(Option.map(Option.fromUndefinedOr(promptCacheTtl), (ttl) => Duration.subtract(cacheLifetimes[ttl], cacheExpiryNotice)), Duration.isPositive),
-	),
+	Effect.map(({ promptCacheTtl }) => Option.map(Option.fromUndefinedOr(promptCacheTtl), (ttl) => cacheLifetimes[ttl])),
 );
+
+// How long after a session's last turn its prompt cache is about to expire. None when the cache lives no longer than
+// the notice, or its lifetime is not set.
+export const readCacheRefreshDelay = readPromptCacheTtl.pipe(Effect.map((ttl) => Option.filter(Option.map(ttl, (lifetime) => Duration.subtract(lifetime, cacheExpiryNotice)), Duration.isPositive)));

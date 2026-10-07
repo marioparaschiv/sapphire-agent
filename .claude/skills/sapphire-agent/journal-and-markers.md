@@ -84,9 +84,13 @@ The outbox of messages for the chat (`id` AUTOINCREMENT, `identifier`, `purpose`
 
 `agent_id` (primary key), `identifier`, `requested_at`: the subagents told to hand off, so each is told once (`rules.md`, Handoff).
 
+### `manager_session`
+
+At most one row (`id` 1): the main chat manager's `session_id`, which a start resumes, and the `summary` it started from (null for none), which a start uses when the session cannot be resumed. A rotation replaces the row with the next session and the outgoing one's summary before that session starts (`architecture.md`, the manager).
+
 ### Migrations
 
-`0001_create_journal` (runs, transient failures, commands, mention tables since dropped, requests), `0002_drop_mention_threads`, `0003_create_delivery_mark`, `0004_add_sessions`, `0005_add_reply_to`, `0006_add_command_acknowledged_at`, `0007_create_chat_sessions`, `0008_create_topics` (and `archive_thread`), `0009_create_projects`, `0010_add_chat_session_cwd_and_thread` (rebuilds `chat_sessions`; earlier rows get the home directory, no thread and kind `turn`), `0011_create_notices` (and drops `runs.question_comment_id` and `runs.delivered_reply_ids`), `0012_add_handoffs` (`runs.handoff`, `subagent_handoffs`). They run at startup, in the service and the CLI alike.
+`0001_create_journal` (runs, transient failures, commands, mention tables since dropped, requests), `0002_drop_mention_threads`, `0003_create_delivery_mark`, `0004_add_sessions`, `0005_add_reply_to`, `0006_add_command_acknowledged_at`, `0007_create_chat_sessions`, `0008_create_topics` (and `archive_thread`), `0009_create_projects`, `0010_add_chat_session_cwd_and_thread` (rebuilds `chat_sessions`; earlier rows get the home directory, no thread and kind `turn`), `0011_create_notices` (and drops `runs.question_comment_id` and `runs.delivered_reply_ids`), `0012_add_handoffs` (`runs.handoff`, `subagent_handoffs`), `0013_create_manager_session`. They run at startup, in the service and the CLI alike.
 
 ### Journal service
 

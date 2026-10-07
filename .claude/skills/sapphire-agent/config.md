@@ -37,6 +37,7 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `nudgeGraceSeconds` | `600` | int, min 60. Output still unchanged this long after the nudge: run `stale`, epic flagged. |
 | `maxRunSeconds` | `5400` | int, min 600. Wall-clock cap from the claim; the epic is flagged once, in any in-flight state. The run keeps going. |
 | `handoffAtTokens` | `250000` | int, min 10000. Context (input, cache read and cache creation tokens of the latest assistant entry) at which a run's agent, or one of its subagents, hands its work to a fresh session (`rules.md`, Handoff). |
+| `managerRotateAtTokens` | `50000` | int, min 10000. Context (input, cache read and cache creation tokens of the latest main-thread assistant message, checked when a turn ends) at which the main chat's manager is replaced by a fresh session that starts from its summary (`architecture.md`, the manager). |
 | `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` notice is sent once (see `failure-policy.md`). |
 | `deliveryScanSeconds` | `300` | int, min 60. How often the App's failed webhook deliveries are looked for and redelivered, besides once at startup (`rules.md`, Missed deliveries). |
 | `worktreesDirectory` | `~/.herdr/worktrees` | `~` expanded. |

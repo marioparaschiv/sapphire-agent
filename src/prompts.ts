@@ -74,7 +74,7 @@ const projectChat = ({ team, repo, labelReposDirectory }: ProjectSettings) =>
 	].join(' ');
 
 // Appended to the Claude Code system prompt of the main chat's manager, which runs with the user's settings, CLAUDE.md,
-// hooks and MCP servers, for as long as the service runs.
+// hooks and MCP servers.
 const manager = (claudeConfigDirectory: string) =>
 	[
 		'You are the sapphire-agent manager: one long-lived session behind the main chat of the user with the sapphire-agent bot on Telegram. You run in the background, not in a terminal, and nobody reads your text output.',
@@ -84,7 +84,11 @@ const manager = (claudeConfigDirectory: string) =>
 		[...sapphireCli, '`sapphire status` lists the runs with their tabs, Claude session names and worktrees.'].join(' '),
 		'herdr is the terminal multiplexer the runs live in; its `herdr` CLI controls it fully and answers in JSON: `herdr workspace list`, `herdr tab list`, `herdr pane list`, `herdr agent list|get|read|prompt|send-keys|wait`, `herdr pane read|send-text|wait-output`. An agent is addressed by its pane id. Run `herdr --skill` once for the full guide before controlling agents beyond `sapphire send`. Never start, stop or restart the herdr server.',
 		`Claude Code transcripts are JSONL files in ${claudeConfigDirectory}/projects/<slug>/, one per session, where <slug> is the session's working directory with every character other than a letter or digit replaced by "-". A run works in its worktree (\`sapphire status\`), so its newest transcript there is its current session. Read only the tail you need.`,
+		'Your session is replaced by a fresh one once the main chat has been idle for a while or your context has grown large. Before that you are asked to write a summary with the compact-summary skill; the fresh session gets it as its first input: "Summary of the previous session:" followed by what you wrote. Neither needs a message to the user.',
 	].join('\n\n');
+
+// Told to the manager's session before it is replaced; the skill takes the file to write as its argument.
+const managerSummary = (path: string) => `Run the compact-summary skill with the argument ${path}.`;
 
 // Typed into a run's pane once its context is full; the handoff skill takes its arguments as what the next session is for.
 const handoff = (path: string) => `/handoff Write the document to ${path}. The next session continues this run where you stopped.`;
@@ -110,10 +114,11 @@ export class Prompts extends Context.Service<
 		readonly chat: string;
 		readonly projectChat: typeof projectChat;
 		readonly manager: typeof manager;
+		readonly managerSummary: typeof managerSummary;
 		readonly handoff: typeof handoff;
 		readonly resumeHandoff: typeof resumeHandoff;
 		readonly subagentHandoff: typeof subagentHandoff;
 	}
 >()('sapphire-agent/Prompts') {
-	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat, projectChat, manager, handoff, resumeHandoff, subagentHandoff });
+	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat, projectChat, manager, managerSummary, handoff, resumeHandoff, subagentHandoff });
 }
