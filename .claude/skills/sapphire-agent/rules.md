@@ -73,7 +73,7 @@ Each Linear and PR write checks its marker first, and each notice is put in the 
 
 For each started run that is `running` or `stale`, the tick reads its thread (the observation): its last progress is the newest `updatedAt` of the thread, its newest 5 timeline items and its subagent threads (descendants among the project's unsettled threads), or the newest hook event of its agent or its subagents matched to it by `cwd` (`AgentActivity`, in memory; until the first since a restart, the restart), recorded as `agentStatusSince`. Nothing is judged while T3 cannot be asked. A run with a stored result, or whose epic moved on, is left to the results rule.
 
-- `pendingRequestCount` above 0: waiting for the user, not stalled. One Pushover notice per wait (`agentStatus` `blocked`), no nudge.
+- `pendingRequestCount` above 0: waiting for the user, not stalled (`agentStatus` `blocked`): no nudge and no notice, since T3's device notifications already say so.
 - `running` with no progress for `staleAfterSeconds`: record `nudgedAt`, then send `continue` with mode `restart` (keyed `nudge-<claimedAt>-<nudgedAt>`, and sent again under that key on every tick of the grace period, so a send lost to a crash or a failure still lands while T3 drops the repeats). Nothing the agent did itself since (its timeline items other than messages to it, its subagents, or its hook events) after `nudgeGraceSeconds` (counted from a restart if later): `stale` flag on the epic, `stale`, and one Pushover notice. Activity of the agent after that ends the episode (back to `running`).
 - Wall-clock cap: `maxRunSeconds` after the claim, an `overCap` flag once. The run keeps going and keeps its slot.
 
@@ -144,7 +144,7 @@ A refused tool call gets Claude's PreToolUse answer, `{"hookSpecificOutput":{"ho
   - `git add` / `git commit` that would take a secret file (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`): named as a pathspec; covered by `-A`/`.`/a directory/a glob while untracked or modified and not ignored, ignored ones included with `-f` (`-u` only tracked ones); for a commit, already staged, or tracked and modified with `-a` or a covering pathspec.
 - `Write`, `Edit`, `MultiEdit`, `NotebookEdit`: a path outside the run's worktree (handoff docs in the temp dir aside), or a secret file anywhere. `Read` and other tools are never refused.
 
-The run's agent's `Stop` (finished its turn) or `Notification` (needs input, with Claude's message) sends one normal-priority Pushover notice, titled with the epic identifier read from the worktree's branch (`mario/hl-60-...` is `HL-60`, the branch itself when it names none) and linked to the issue's Linear URL. A subagent's events (`agent_id` set) send nothing. A failed Linear lookup sends the notice without the link and logs why; a failed Pushover send fails the hook with the error. The hook reads the same config and secrets as the service (`loadServiceConfig`).
+A run finishing its turn, failing or waiting for input is not sent to Pushover: T3's own device notifications cover it (`operations.md`).
 
 ## 9. Commands
 

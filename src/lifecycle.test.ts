@@ -274,7 +274,7 @@ describe('lifecycle', () => {
 						thread: [true, ['Rename this to syncSettings. @orchestratorbot', `reply:PRRT_1.${followUpAt}`]],
 					},
 					t3: { launches: ['TEST-10 Plugin settings sync', 'CMD-1', 'TEST-10 Plugin settings sync'], sends: [], settled: [Option.some(true), Option.some(true)] },
-					pushover: ['TEST-10 needs input'],
+					pushover: [],
 					commands: ['ended marioparaschiv'],
 					git: { worktree: false, branch: false },
 					runs: 0,

@@ -119,7 +119,7 @@ describe('monitoring', () => {
 		}),
 	);
 
-	it.effect('tells Pushover once that a run waits on a question, and does not nudge it', () =>
+	it.effect('does not nudge or flag a run that waits on a question', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { run } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
@@ -132,9 +132,7 @@ describe('monitoring', () => {
 			assert.deepStrictEqual(yield* nudges(h), []);
 			assert.deepStrictEqual(yield* statuses(h), ['running']);
 			assert.deepStrictEqual(markers(h, 'TEST-10'), []);
-			assert.deepStrictEqual(h.pushover.sent(), [
-				{ title: 'TEST-10 needs input', message: 'A question or approval waits in T3 thread "TEST-10 Plugin settings sync".', url: 'https://linear.app/marioparaschiv/issue/TEST-10/plugin-settings-sync', priority: 'normal' },
-			]);
+			assert.deepStrictEqual(h.pushover.sent(), []);
 		}),
 	);
 

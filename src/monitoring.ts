@@ -92,12 +92,6 @@ export const monitoringRule = Effect.gen(function* () {
 			if (status === 'blocked') {
 				if (watched.agentStatus !== 'blocked') {
 					yield* Effect.log(`T3 thread ${run.threadId} waits for the user`);
-					yield* sendOrLog(pushover, {
-						title: `${run.identifier} needs input`,
-						message: `${thread.pendingRequests === 1 ? 'A question or approval waits' : `${thread.pendingRequests} questions or approvals wait`} in T3 thread "${title}".`,
-						url: epic.url,
-						priority: 'normal',
-					});
 				}
 
 				return;

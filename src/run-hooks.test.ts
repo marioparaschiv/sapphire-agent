@@ -4,15 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
-import { ConfigProvider, Effect, Layer, Option, Schema } from 'effect';
+import { ConfigProvider, Effect, Layer, Option } from 'effect';
 import { onTestFinished } from 'vitest';
-import { ClaudeRunHook } from './claude-hooks.ts';
-import { AppConfig, testSettings } from './config.ts';
+import { testSettings } from './config.ts';
 import { handoffPath } from './directories.ts';
 import { Journal, journalPath } from './journal.ts';
-import { LinearFixture } from './linear-fixture.ts';
-import { FakePushover } from './pushover-fake.ts';
-import { runHookAnswer, sendRunNotice } from './run-hooks.ts';
+import { runHookAnswer } from './run-hooks.ts';
 import { git, makeHarness } from './test-harness.ts';
 
 const sessionId = '9b2f4c1e-3a7d-4e8b-b6c5-0d1e2f3a4b5c';
@@ -201,35 +198,7 @@ describe('run hooks', () => {
 			assert.strictEqual(yield* answer(dir, bash(otherWorktree, 'git push --force origin main')), undefined);
 			assert.strictEqual(yield* answer(dir, bash(repo, 'git push --force origin main')), undefined);
 			assert.strictEqual(yield* answer(dir, toolUse(repo, 'Write', { file_path: '/tmp/notes.md', content: 'x' })), undefined);
-			assert.strictEqual(yield* answer(dir, claudeHook(repo, 'Stop', { stop_hook_active: false })), undefined);
 		}),
-	);
-
-	it.effect("send one notice when the run's agent ends its turn or waits for input, and none for a subagent", () =>
-		Effect.gen(function* () {
-			const { worktree } = yield* setup;
-			const linear = yield* LinearFixture;
-			const pushover = yield* FakePushover;
-			const decode = Schema.decodeUnknownSync(Schema.fromJsonString(ClaudeRunHook));
-			const notify = (payload: string) => {
-				const hook = decode(payload);
-
-				return hook.hookEventName === 'PreToolUse' ? Effect.die(new Error('not a run end')) : sendRunNotice({ worktree, repoName: 'repo' }, hook);
-			};
-
-			linear.addEpic({ identifier: 'TEST-12', title: 'Plugin settings sync' });
-
-			yield* notify(claudeHook(worktree, 'Stop', { stop_hook_active: false }));
-			yield* notify(claudeHook(worktree, 'Notification', { message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' }));
-			yield* notify(claudeHook(worktree, 'Stop', { stop_hook_active: false, agent_id: 'a1b2c3d4e5f6', agent_type: 'general-purpose' }));
-
-			const url = 'https://linear.app/marioparaschiv/issue/TEST-12/plugin-settings-sync';
-
-			assert.deepStrictEqual(pushover.sent(), [
-				{ title: 'TEST-12 finished its turn', message: `repo on ${branch}`, priority: 'normal', url },
-				{ title: 'TEST-12 needs input', message: `Claude needs your permission to use Bash\nrepo on ${branch}`, priority: 'normal', url },
-			]);
-		}).pipe(Effect.provide(Layer.mergeAll(LinearFixture.layer, FakePushover.layer).pipe(Layer.provide(AppConfig.layerTest(tmpdir()))))),
 	);
 
 	it.effect('guard through `sapphire hook claude` without the service', () =>

@@ -25,15 +25,12 @@ const FilePathInput = Schema.Struct({ filePath: Schema.String }).pipe(Schema.enc
 
 const NotebookPathInput = Schema.Struct({ notebookPath: Schema.String }).pipe(Schema.encodeKeys({ notebookPath: 'notebook_path' }));
 
-// The hooks the hook process answers itself for a dispatched run (`run-hooks.ts`): tool calls it guards and the turn
-// ends and notifications it sends a notice for.
+// The tool calls the hook process guards itself (`run-hooks.ts`).
 export const ClaudeRunHook = Schema.Union([
 	hook('PreToolUse', { toolName: Schema.Literal('Bash'), toolInput: Schema.Struct({ command: Schema.String }) }),
 	hook('PreToolUse', { toolName: Schema.Literals(['Write', 'Edit', 'MultiEdit']), toolInput: FilePathInput }),
 	hook('PreToolUse', { toolName: Schema.Literal('NotebookEdit'), toolInput: NotebookPathInput }),
 	hook('PreToolUse', { toolName: Schema.String }),
-	hook('Stop', {}),
-	hook('Notification', { message: Schema.String }),
 ]);
 
 export type ClaudeRunHook = typeof ClaudeRunHook.Type;

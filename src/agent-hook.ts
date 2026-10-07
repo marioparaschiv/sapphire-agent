@@ -62,8 +62,6 @@ const forward = async (stateDirectory: string, envelope: EventEnvelope, failOnRe
 
 // The Claude events the hook answers itself for a dispatched run (`run-hooks.ts`), so its guards hold while the
 // service is down. A PreToolUse goes to the service too, as a sign the agent works, but only the guard answers it.
-const runHookEvents = new Set(['PreToolUse', 'Stop', 'Notification']);
-
 const eventName = (payload: string) => {
 	const parsed: unknown = JSON.parse(payload);
 
@@ -84,7 +82,7 @@ const main = async (agent: string | undefined) => {
 
 	const payload = await text(process.stdin);
 	const event = eventName(payload);
-	const runHook = agent === 'claude' && event !== undefined && runHookEvents.has(event) ? import('./run-hooks.ts').then(({ answerRunHook }) => answerRunHook(payload)) : undefined;
+	const runHook = agent === 'claude' && event === 'PreToolUse' ? import('./run-hooks.ts').then(({ answerRunHook }) => answerRunHook(payload)) : undefined;
 
 	const forwarded = forward(stateDirectory, { agent, payload }, event !== 'PreToolUse');
 	// A PreToolUse goes to the service only as a sign of activity, so failing to send it never costs the guard's answer.

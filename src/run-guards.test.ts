@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
 import { onTestFinished } from 'vitest';
 import { ctlPath } from './directories.ts';
-import { commandToolDecision, epicIdentifier, isCommandCwd, isProjectRepo, worktreeOf } from './run-guards.ts';
+import { commandToolDecision, isCommandCwd, isProjectRepo, worktreeOf } from './run-guards.ts';
 
 const directory = () => {
 	const dir = mkdtempSync(join(tmpdir(), 'sapphire-agent-guards-'));
@@ -45,14 +45,6 @@ describe('isProjectRepo', () => {
 			['unbound', 'loader', 'telecord'].map((name) => isProjectRepo(projects, name)),
 			[true, true, false],
 		);
-	});
-});
-
-describe('epicIdentifier', () => {
-	it('reads the epic from a branch named after it, with or without a user prefix', () => {
-		assert.strictEqual(epicIdentifier('mario/hl-60-sapphire-agent-dispatches-linear-epics'), 'HL-60');
-		assert.strictEqual(epicIdentifier('test-12'), 'TEST-12');
-		assert.strictEqual(epicIdentifier('feature/faster-hooks'), undefined);
 	});
 });
 

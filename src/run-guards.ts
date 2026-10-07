@@ -46,9 +46,6 @@ const gitOutput = (dir: string, args: ReadonlyArray<string>) => {
 
 export const currentBranch = (dir: string) => gitOutput(dir, ['symbolic-ref', '--short', 'HEAD']);
 
-// The epic a run works on, from its branch, which dispatch names after the epic (`mario/hl-60-some-title`).
-export const epicIdentifier = (branch: string) => /^([A-Za-z][A-Za-z0-9]*-\d+)(?:-|$)/.exec(branch.slice(branch.lastIndexOf('/') + 1))?.[1]?.toUpperCase();
-
 type ChangedFile = { readonly path: string; readonly staged: boolean; readonly tracked: boolean };
 
 // Every changed or untracked file git does not ignore, and with `ignored` the ignored ones too, by absolute path.
