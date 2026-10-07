@@ -271,10 +271,11 @@ describe('Journal', () => {
 
 			yield* journal.addChatSession(['1:4:3', '1:5:3'], { sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' });
 			yield* TestClock.setTime(5_000);
+			yield* journal.addChatSession(['1:8:3'], { sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'reminder' });
 			yield* journal.addChatSession(['1:7:6'], { sessionId: 'other', cwd: '/home/dev/other', thread: '1:6', kind: 'reminder' });
 			assert.deepStrictEqual(
 				yield* journal.lastChatMessage('1:3'),
-				Option.some({ messageRef: '1:5:3', sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'turn' as const, createdAt: 0 }),
+				Option.some({ messageRef: '1:8:3', sessionId: 'project', cwd: '/home/dev/hivemind', thread: '1:3', kind: 'reminder' as const, createdAt: 5_000 }),
 			);
 			assert.deepStrictEqual(yield* journal.lastChatMessage('1:9'), Option.none());
 		}).pipe(Effect.provide(Journal.layer(':memory:'))),

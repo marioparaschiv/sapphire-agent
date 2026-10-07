@@ -171,7 +171,7 @@ describe('main chat', () => {
 
 			const result = yield* chat.agent.callTool('send_message', { text: 'Hello.', reply_to: 'not a message' });
 
-			assert.isTrue(result.isError);
+			assert.deepStrictEqual(result, { content: [{ type: 'text', text: 'Not sent: not a message is not a Telegram message' }], isError: true });
 			assert.deepStrictEqual(chat.telegram.sent, []);
 		}).pipe(Effect.scoped, Effect.provide(Logger.layer([]))),
 	);
@@ -253,29 +253,35 @@ describe('manager rotation', () => {
 			const hello = chat.telegram.write({ from: chat.user, text: 'hello' });
 
 			yield* chat.agent.awaitInputs(1);
+			yield* TestClock.adjust('30 minutes');
 			yield* chat.agent.endTurn();
 			yield* TestClock.adjust('59 minutes');
-			assert.deepStrictEqual(inputsOf(chat), [[userInput(chat, hello, 'hello')]]);
 
-			yield* TestClock.adjust('1 minute');
+			const probe = chat.telegram.write({ from: chat.user, text: 'still there?' });
+
 			yield* chat.agent.awaitInputs(2);
+			yield* TestClock.adjust('60 minutes');
+			yield* chat.agent.awaitInputs(3);
 
 			const [outgoing] = chat.agent.sessions;
 			const path = summaryPath(chat, outgoing.id);
 
 			writeFileSync(path, `${summary}\n`);
 			yield* chat.agent.endTurn();
-			yield* chat.agent.awaitInputs(3);
-			yield* TestClock.adjust('3 hours');
+			yield* chat.agent.awaitInputs(4);
+
+			for (let tick = 0; tick < 18; tick++) {
+				yield* TestClock.adjust('10 minutes');
+			}
 
 			const later = chat.telegram.write({ from: chat.user, text: 'and now?' });
 
-			yield* chat.agent.awaitInputs(4);
+			yield* chat.agent.awaitInputs(5);
 
 			const [, next] = chat.agent.sessions;
 
 			assert.deepStrictEqual(inputsOf(chat), [
-				[userInput(chat, hello, 'hello'), prompts.managerSummary(path)],
+				[userInput(chat, hello, 'hello'), userInput(chat, probe, 'still there?'), prompts.managerSummary(path)],
 				[summaryInput, userInput(chat, later, 'and now?')],
 			]);
 			assert.deepStrictEqual([outgoing.closed, next.options.sessionId, next.options.resume], [true, next.id, undefined]);
@@ -333,8 +339,6 @@ describe('manager rotation', () => {
 				yield* chat.agent.awaitInputs(2);
 				yield* chat.agent.endTurn({ input: 1, cacheRead: 61_000, cacheCreation: 0 });
 				yield* TestClock.adjust(Duration.subtract(summaryTimeout, Duration.seconds(1)));
-				assert.lengthOf(chat.agent.sessions, 1);
-
 				yield* TestClock.adjust('1 second');
 				yield* chat.agent.awaitSessions(2);
 
@@ -350,6 +354,47 @@ describe('manager rotation', () => {
 				assert.deepStrictEqual(yield* storedManagerSession(chat), Option.some({ sessionId: next.id, summary: null }));
 				assert.isTrue(logs.some(({ level, message }) => level === 'WARN' && JSON.stringify(message).includes(`the manager session ${outgoing.id} wrote no summary`)));
 			}).pipe(Effect.provide(layer));
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect('waits until summaryTimeout for the summary', () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat();
+
+			yield* chat.start;
+			chat.telegram.write({ from: chat.user, text: 'one' });
+			yield* chat.agent.awaitInputs(1);
+			yield* chat.agent.endTurn({ input: 1, cacheRead: 60_000, cacheCreation: 0 });
+			yield* chat.agent.awaitInputs(2);
+			yield* chat.agent.endTurn({ input: 1, cacheRead: 61_000, cacheCreation: 0 });
+			yield* TestClock.adjust(Duration.subtract(summaryTimeout, Duration.seconds(1)));
+
+			const [outgoing] = chat.agent.sessions;
+
+			writeFileSync(summaryPath(chat, outgoing.id), summary);
+			yield* chat.agent.endTurn();
+			yield* chat.agent.awaitSessions(2);
+
+			const [, next] = chat.agent.sessions;
+
+			assert.deepStrictEqual(yield* storedManagerSession(chat), Option.some({ sessionId: next.id, summary }));
+		}).pipe(Effect.scoped),
+	);
+
+	it.effect('drops a request for the summary of an older session', () =>
+		Effect.gen(function* () {
+			const chat = yield* makeChat();
+
+			yield* Effect.gen(function* () {
+				yield* ManagerInbox.use((inbox) => inbox.rotate('an-older-session'));
+				yield* Effect.all([answerChatMessages, runManager], { concurrency: 'unbounded' }).pipe(Effect.forkChild);
+
+				const hello = chat.telegram.write({ from: chat.user, text: 'hello' });
+
+				yield* chat.agent.awaitInputs(1);
+
+				assert.deepStrictEqual(inputsOf(chat), [[userInput(chat, hello, 'hello')]]);
+			}).pipe(Effect.provide(chat.services));
 		}).pipe(Effect.scoped),
 	);
 
