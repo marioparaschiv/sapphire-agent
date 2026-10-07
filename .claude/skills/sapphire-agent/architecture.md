@@ -121,7 +121,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/t3-fake.ts` | `FakeT3`, and `t3TokenExpiring` for tests. |
 | `src/t3-projects.ts` | `T3Projects` service. |
 | `src/thread-waits.ts` | `watchThreads`: a `t3_thread_wait` per T3 run in flight and per command thread, waking the reconciler when it returns. |
-| `src/t3-settings.ts` | `t3SettingsProblems`, `checkT3Settings`: T3's worktree cleanup and auto-settle settings for the projects, checked at startup. |
+| `src/t3-settings.ts` | `t3SettingsProblems`, `checkT3Settings`: T3's worktree cleanup and auto-settle settings for the projects, checked at startup. `defaultModelSelection`: T3's default model, which `T3.launchThread` passes to every launch. |
 | `src/reconciler.ts` | Tick loop, poll interval, wakes, pause logging, the pause file outage, the T3 token check and its outage. |
 | `src/planner.ts` | `Rule`, `EpicWork`, the planner, the failure policy at the epic level, the observing outage. |
 | `src/observation.ts` | `Observer` and helpers shared by rules (roles, in-flight statuses, whether a run's agent works). |

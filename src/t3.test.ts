@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { NodeFileSystem } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Exit, Layer, Redacted, Schema } from 'effect';
 import { FetchHttpClient } from 'effect/http';
@@ -17,7 +18,12 @@ const token = 'eyJ2IjoxLCJraW5kIjoic2Vzc2lvbiJ9.c2lnbmF0dXJl';
 const RpcRequest = Schema.Struct({
 	id: Schema.optionalKey(Schema.Number),
 	method: Schema.String,
-	params: Schema.optionalKey(Schema.Struct({ name: Schema.optionalKey(Schema.String), arguments: Schema.optionalKey(Schema.Struct({ cursor: Schema.optionalKey(Schema.Int) })) })),
+	params: Schema.optionalKey(
+		Schema.Struct({
+			name: Schema.optionalKey(Schema.String),
+			arguments: Schema.optionalKey(Schema.Struct({ cursor: Schema.optionalKey(Schema.Int), modelSelection: Schema.optionalKey(Schema.Unknown) })),
+		}),
+	),
 });
 
 // A tool result as T3 shapes them, the value both as text and as structured content.
@@ -29,9 +35,11 @@ type Seen = { readonly method: string; readonly tool?: string; readonly sessionI
 // server-sent events, or a JSON-RPC error.
 type ToolAnswer = { readonly result: unknown; readonly asEvents?: boolean } | { readonly error: { readonly code: number; readonly message: string } };
 
+type ToolArguments = { readonly cursor?: number; readonly modelSelection?: unknown };
+
 // A stand-in for T3's /mcp endpoint, which checks the bearer token and the MCP session as T3 does: 401 for another
 // token, 404 for a session it does not know, 400 for a request without one.
-const serveMcp = (tools: Record<string, ToolAnswer | ((cursor: number) => ToolAnswer)>) =>
+const serveMcp = (tools: Record<string, ToolAnswer | ((args: ToolArguments) => ToolAnswer)>) =>
 	Effect.gen(function* () {
 		const seen: Array<Seen> = [];
 		const sessions = new Set<string>();
@@ -87,7 +95,7 @@ const serveMcp = (tools: Record<string, ToolAnswer | ((cursor: number) => ToolAn
 			}
 
 			const named = tools[params?.name ?? ''];
-			const tool = typeof named === 'function' ? named(params?.arguments?.cursor ?? 0) : named;
+			const tool = typeof named === 'function' ? named(params?.arguments ?? {}) : named;
 
 			if (tool === undefined) {
 				return reply(response, 200, JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32602, message: `Tool '${params?.name}' not found` } }));
@@ -118,8 +126,50 @@ const serveMcp = (tools: Record<string, ToolAnswer | ((cursor: number) => ToolAn
 		return { url, seen: () => [...seen], forgetSessions: () => sessions.clear() };
 	});
 
-const t3With = (url: string, presented = token) =>
-	T3.layer.pipe(Layer.provide(Layer.succeed(T3Config, { url, token: Redacted.make(presented), expiresAt: Date.UTC(2036, 9, 4) })), Layer.provide(FetchHttpClient.layer));
+const recordedSettings = join(import.meta.dirname, 'fixtures/t3/settings.json');
+
+const t3With = (url: string, presented = token, settingsFile = recordedSettings) =>
+	T3.layer.pipe(
+		Layer.provide(Layer.succeed(T3Config, { url, token: Redacted.make(presented), expiresAt: Date.UTC(2036, 9, 4), settingsFile })),
+		Layer.provide(FetchHttpClient.layer),
+		Layer.provide(NodeFileSystem.layer),
+	);
+
+// t3_thread_launch as T3 answers it in a project without a default model.
+const launchTool = ({ modelSelection }: ToolArguments): ToolAnswer =>
+	modelSelection === undefined
+		? {
+				result: {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify({
+								_tag: 'OrchestratorMcpFailure',
+								code: 'invalid_request',
+								message: 'Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.',
+							}),
+						},
+					],
+					isError: true,
+				},
+			}
+		: {
+				result: toolResult({
+					threadId: '7c0e1f52-9a3b-4d8e-b6f1-2a4c5d6e7f80',
+					projectId: '8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd',
+					modelSelection,
+					runId: 'run:thread:7c0e1f52-9a3b-4d8e-b6f1-2a4c5d6e7f80:ordinal:1',
+					status: 'preparing',
+				}),
+			};
+
+const launchInput = {
+	projectId: '8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd',
+	title: 'HL-74 Launch with the default model',
+	message: 'Implement HL-74 and open a PR.',
+	workspaceStrategy: { type: 'worktree', baseRef: 'main', branch: 'agent/hl-74-default-model', startFromOrigin: true },
+	runtimeMode: 'full-access',
+} as const;
 
 describe('T3', () => {
 	it.effect('opens an MCP session once, then calls tools in it, reading their structured content', () =>
@@ -127,7 +177,7 @@ describe('T3', () => {
 			const server = yield* serveMcp({
 				t3_project_list: { result: recorded('project-list') },
 				// The recorded first page says the next starts at 3.
-				t3_thread_list: (cursor) =>
+				t3_thread_list: ({ cursor = 0 }) =>
 					cursor === 0
 						? { result: recorded('thread-list') }
 						: { result: toolResult({ projectId: '8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd', currentThreadId: null, threads: [], nextCursor: null, total: 3 }) },
@@ -236,6 +286,31 @@ describe('T3', () => {
 				Exit.fail(new T3Unauthorized({ message: 'T3 answered HTTP 401: {"error":"invalid_mcp_credential","message":"A valid T3 Code MCP credential is required."}' })),
 			);
 			assert.deepStrictEqual(server.seen(), [{ method: 'initialize' }]);
+		}),
+	);
+
+	it.effect("launches a thread with T3's default model from its settings", () =>
+		Effect.gen(function* () {
+			const server = yield* serveMcp({ t3_thread_launch: launchTool });
+			const launched = yield* T3.use((t3) => t3.launchThread(launchInput)).pipe(Effect.provide(t3With(server.url)));
+
+			assert.deepStrictEqual(launched, {
+				threadId: '7c0e1f52-9a3b-4d8e-b6f1-2a4c5d6e7f80',
+				projectId: '8eb2d7d4-2f61-4230-bbcd-38f64a67f7bd',
+				runId: 'run:thread:7c0e1f52-9a3b-4d8e-b6f1-2a4c5d6e7f80:ordinal:1',
+				status: 'preparing',
+			});
+		}),
+	);
+
+	it.effect('fails Permanent without calling T3 when its settings have no default model', () =>
+		Effect.gen(function* () {
+			const server = yield* serveMcp({ t3_thread_launch: launchTool });
+			const missing = join(import.meta.dirname, 'fixtures/t3/no-such-settings.json');
+			const failed = yield* T3.use((t3) => t3.launchThread(launchInput)).pipe(Effect.provide(t3With(server.url, token, missing)), Effect.flip);
+
+			assert.deepStrictEqual(failed, new Permanent({ message: `T3's settings file ${missing} does not exist: set a default model in T3` }));
+			assert.deepStrictEqual(server.seen(), []);
 		}),
 	);
 });

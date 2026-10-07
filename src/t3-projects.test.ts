@@ -5,7 +5,7 @@ import { T3Unauthorized } from './t3.ts';
 import { FakeT3 } from './t3-fake.ts';
 import { T3Projects } from './t3-projects.ts';
 
-const layer = T3Projects.layer.pipe(Layer.provideMerge(Layer.mergeAll(FakeT3.layer, Journal.layer(':memory:'))));
+const layer = T3Projects.layer.pipe(Layer.provideMerge(Layer.mergeAll(FakeT3.layer(), Journal.layer(':memory:'))));
 
 describe('T3Projects', () => {
 	it.effect("finds a repo's T3 project by its workspace root and remembers it, so later lookups ask T3 nothing", () =>

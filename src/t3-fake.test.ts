@@ -19,7 +19,7 @@ const setup = Effect.gen(function* () {
 	});
 
 	return { t3, fake, project, launched };
-}).pipe(Effect.provide(FakeT3.layer));
+}).pipe(Effect.provide(FakeT3.layer()));
 
 describe('FakeT3', () => {
 	it.effect('launches a thread whose run a wait follows until it is terminal, and lists it with its subagents unless asked not to', () =>

@@ -1,5 +1,7 @@
 import { basename } from 'node:path';
-import { Clock, Context, Effect, Layer, Option, Ref, Stream, SubscriptionRef } from 'effect';
+import { NodeFileSystem } from '@effect/platform-node';
+import { Clock, Context, Effect, FileSystem, Layer, Option, Ref, Stream, SubscriptionRef } from 'effect';
+import { T3Config } from './config.ts';
 import {
 	type Interrupted,
 	type LaunchInput,
@@ -18,6 +20,7 @@ import {
 	type ThreadStatus,
 	type ThreadSummary,
 } from './t3.ts';
+import { defaultModelSelection, type ModelSelection } from './t3-settings.ts';
 
 type FakeRun = { readonly runId: string; readonly status: RunStatus; readonly message: string; readonly requestedAt: string };
 
@@ -44,6 +47,9 @@ export type FakeThread = {
 
 type LaunchOutcome = { readonly code: T3ToolFailure['code']; readonly message: string } | { readonly status: RunStatus };
 
+// What a t3_thread_launch carried: the caller's input and the default model the port added.
+type FakeLaunch = LaunchInput & { readonly modelSelection: ModelSelection };
+
 type State = { readonly projects: ReadonlyArray<T3Project>; readonly threads: ReadonlyArray<FakeThread> };
 
 export type FakeT3Controls = {
@@ -68,7 +74,7 @@ export type FakeT3Controls = {
 	// From now on, launches are refused this way, or their first run starts in this status; null as T3 does.
 	readonly setLaunchOutcome: (outcome: LaunchOutcome | null) => Effect.Effect<void>;
 	// What each t3_thread_launch asked for, oldest first.
-	readonly launches: Effect.Effect<ReadonlyArray<LaunchInput>>;
+	readonly launches: Effect.Effect<ReadonlyArray<FakeLaunch>>;
 	// What each t3_thread_send T3 acted on asked for, oldest first; a repeated clientRequestId is left out.
 	readonly sends: Effect.Effect<ReadonlyArray<SendInput>>;
 	// While set, every call fails as T3 answers a revoked or re-minted token: HTTP 401.
@@ -109,15 +115,18 @@ const unauthorized = new T3Unauthorized({ message: 'T3 answered HTTP 401: {"erro
 
 // Behaves like T3 Code's MCP tools for a caller outside any T3 thread: projects with unique workspace roots, threads
 // whose runs move on through `setRunStatus`, subagent children, settling, and waits that return once the run is
-// terminal or time out on the clock. Every call goes through the live layer's call policy.
+// terminal or time out on the clock. Every call goes through the live layer's call policy, and a launch reads the
+// default model from T3Config's settings file as the live layer does.
 export class FakeT3 extends Context.Service<FakeT3, FakeT3Controls>()('sapphire-agent/FakeT3') {
-	static readonly layer = Layer.effectContext(
+	private static readonly needingSettings = Layer.effectContext(
 		Effect.gen(function* () {
 			const state = yield* SubscriptionRef.make<State>({ projects: [], threads: [] });
 			const rejected = yield* Ref.make(false);
 			const hanging = yield* Ref.make(false);
 			const calls = yield* Ref.make<ReadonlyArray<string>>([]);
-			const launches = yield* Ref.make<ReadonlyArray<LaunchInput>>([]);
+			const { settingsFile } = yield* T3Config;
+			const fs = yield* FileSystem.FileSystem;
+			const launches = yield* Ref.make<ReadonlyArray<FakeLaunch>>([]);
 			const launchOutcome = yield* Ref.make<LaunchOutcome | null>(null);
 			const ids = yield* Ref.make(0);
 			const nextId = (prefix: string) => Ref.updateAndGet(ids, (n) => n + 1).pipe(Effect.map((n) => `${prefix}-${n}`));
@@ -239,37 +248,42 @@ export class FakeT3 extends Context.Service<FakeT3, FakeT3Controls>()('sapphire-
 					).pipe(t3Policy.once),
 
 				launchThread: (input) =>
-					answer(
-						't3_thread_launch',
-						Effect.gen(function* () {
-							const { projectId, title, message, workspaceStrategy } = input;
+					defaultModelSelection(settingsFile).pipe(
+						Effect.provideService(FileSystem.FileSystem, fs),
+						Effect.flatMap((modelSelection) =>
+							answer(
+								't3_thread_launch',
+								Effect.gen(function* () {
+									const { projectId, title, message, workspaceStrategy } = input;
 
-							yield* Ref.update(launches, (all) => [...all, input]);
+									yield* Ref.update(launches, (all) => [...all, { ...input, modelSelection }]);
 
-							if (!(yield* SubscriptionRef.get(state)).projects.some((project) => project.id === projectId)) {
-								return yield* new T3ToolFailure({ tool: 't3_thread_launch', code: 'invalid_request', message: `Project ${projectId} was not found.` });
-							}
+									if (!(yield* SubscriptionRef.get(state)).projects.some((project) => project.id === projectId)) {
+										return yield* new T3ToolFailure({ tool: 't3_thread_launch', code: 'invalid_request', message: `Project ${projectId} was not found.` });
+									}
 
-							const outcome = yield* Ref.get(launchOutcome);
+									const outcome = yield* Ref.get(launchOutcome);
 
-							if (outcome !== null && 'code' in outcome) {
-								return yield* new T3ToolFailure({ tool: 't3_thread_launch', ...outcome });
-							}
+									if (outcome !== null && 'code' in outcome) {
+										return yield* new T3ToolFailure({ tool: 't3_thread_launch', ...outcome });
+									}
 
-							const created = yield* newThread(projectId, title, Option.none());
-							const bound: FakeThread =
-								workspaceStrategy?.type === 'existing_worktree'
-									? { ...created, worktreePath: workspaceStrategy.worktreePath, branch: workspaceStrategy.branch ?? null }
-									: { ...created, branch: workspaceStrategy?.branch ?? null };
-							const thread = message === undefined ? bound : withRun(bound, outcome?.status ?? 'preparing', message, created.createdAt);
+									const created = yield* newThread(projectId, title, Option.none());
+									const bound: FakeThread =
+										workspaceStrategy?.type === 'existing_worktree'
+											? { ...created, worktreePath: workspaceStrategy.worktreePath, branch: workspaceStrategy.branch ?? null }
+											: { ...created, branch: workspaceStrategy?.branch ?? null };
+									const thread = message === undefined ? bound : withRun(bound, outcome?.status ?? 'preparing', message, created.createdAt);
 
-							yield* putThread(thread);
+									yield* putThread(thread);
 
-							const run = latestRun(thread);
+									const run = latestRun(thread);
 
-							return { threadId: thread.threadId, projectId, runId: Option.getOrNull(Option.map(run, ({ runId }) => runId)), status: Option.getOrNull(Option.map(run, ({ status }) => status)) };
-						}),
-					).pipe(t3Policy.once),
+									return { threadId: thread.threadId, projectId, runId: Option.getOrNull(Option.map(run, ({ runId }) => runId)), status: Option.getOrNull(Option.map(run, ({ status }) => status)) };
+								}),
+							).pipe(t3Policy.once),
+						),
+					),
 
 				listThreads: (filter) =>
 					answer('t3_thread_list', SubscriptionRef.get(state).pipe(Effect.map(({ threads }) => threads.filter(matches(filter)).reverse().map(summaryOf)))).pipe(t3Policy.call),
@@ -434,4 +448,7 @@ export class FakeT3 extends Context.Service<FakeT3, FakeT3Controls>()('sapphire-
 			return Context.make(T3, t3).pipe(Context.add(FakeT3, controls));
 		}),
 	);
+
+	// Launches read the settings file given, by default T3's settings as recorded from the live server.
+	static readonly layer = (settingsFile?: string) => FakeT3.needingSettings.pipe(Layer.provide(Layer.mergeAll(T3Config.layerTest(settingsFile), NodeFileSystem.layer)));
 }

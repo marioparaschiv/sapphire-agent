@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -211,12 +211,14 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			(created) => Effect.sync(() => rmSync(created, { recursive: true, force: true })),
 		);
 		const { origin, repo } = makeRepos(dir);
+		const t3SettingsFile = join(dir, 't3-settings.json');
 
 		writeFileSync(join(dir, 'config.json'), JSON.stringify(testSettings(dir, settings)));
+		copyFileSync(join(import.meta.dirname, 'fixtures/t3/settings.json'), t3SettingsFile);
 
 		const config = AppConfig.layerTest(dir, settings);
 		const fixtures = yield* Layer.build(
-			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakePushover.layer, FakeT3.layer).pipe(Layer.provideMerge(config)),
+			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakePushover.layer, FakeT3.layer(t3SettingsFile)).pipe(Layer.provideMerge(config)),
 		);
 		let journalWrites = 0;
 		let crashAt = Option.none<number>();
@@ -386,7 +388,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					yield* runCtl(args).pipe(
 						Effect.provideService(Console.Console, output),
 						Effect.provide(
-								Layer.mergeAll(T3Projects.layer.pipe(Layer.provideMerge(Journal.layer(join(dir, 'journal.db')))), Git.layer, Pause.layer, T3Config.layerTest).pipe(
+								Layer.mergeAll(T3Projects.layer.pipe(Layer.provideMerge(Journal.layer(join(dir, 'journal.db')))), Git.layer, Pause.layer, T3Config.layerTest(t3SettingsFile)).pipe(
 									Layer.provideMerge(NodeServices.layer),
 									Layer.provideMerge(Layer.succeedContext(fixtures)),
 								),
@@ -404,6 +406,6 @@ export const emptyObservation: Observation = { teams: new Map(), epics: new Map(
 
 // What Planner.layer needs besides its rules, with an observer that sees nothing and an in-memory journal.
 export const plannerDependencies = (dir: string, settings: Parameters<typeof AppConfig.layerTest>[1] = {}) =>
-	Layer.mergeAll(Layer.succeed(Observer, { observe: Effect.succeed(emptyObservation) }), Journal.layer(':memory:'), Comments.layer, LinearFixture.layer, FakePushover.layer, FakeT3.layer).pipe(
+	Layer.mergeAll(Layer.succeed(Observer, { observe: Effect.succeed(emptyObservation) }), Journal.layer(':memory:'), Comments.layer, LinearFixture.layer, FakePushover.layer, FakeT3.layer()).pipe(
 		Layer.provideMerge(AppConfig.layerTest(dir, settings)),
 	);

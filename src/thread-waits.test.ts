@@ -33,7 +33,7 @@ const runOf = (identifier: string, threadId: string, runId: string | null, statu
 describe('watchThreads', () => {
 	it.effect("wakes the reconciler once a run's thread finished or was interrupted, not when a wait only timed out, and waits again after a restart", () =>
 		Effect.gen(function* () {
-			const services = yield* Layer.build(Layer.mergeAll(FakeT3.layer, Journal.layer(':memory:')));
+			const services = yield* Layer.build(Layer.mergeAll(FakeT3.layer(), Journal.layer(':memory:')));
 			const t3 = Context.get(services, T3);
 			const fake = Context.get(services, FakeT3);
 			const journal = Context.get(services, Journal);
