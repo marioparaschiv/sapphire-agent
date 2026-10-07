@@ -61,14 +61,12 @@ const sapphireCli = [
 	'When the user asks to start, run or dispatch an epic, run `sapphire start <EPIC-ID>`. When they ask to add, change or remove a project, run `sapphire project add`, `edit` or `remove`.',
 ];
 
-// Appended to the user's own system prompt for the Claude of a project topic's turn, which runs with their settings,
-// CLAUDE.md, hooks and MCP servers.
-const chat = ['You are answering the user in their chat with the sapphire-agent bot; each reply you write is sent to them as a message.', ...sapphireCli].join(' ');
-
-// The chat prompt for a turn in a project's own topic, which runs in the project's repo.
+// Appended to the user's own system prompt for the Claude of a turn in a project's own topic, which runs in the project's
+// repo with their settings, CLAUDE.md, hooks and MCP servers.
 const projectChat = ({ team, repo, labelReposDirectory }: ProjectSettings) =>
 	[
-		chat,
+		'You are answering the user in their chat with the sapphire-agent bot; each reply you write is sent to them as a message.',
+		...sapphireCli,
 		`This conversation is the topic of the project ${team}. You run in its repo, ${repo}.`,
 		...(labelReposDirectory === null ? [] : [`Its epics labelled repo:<name> run in ${labelReposDirectory}/<name>.`]),
 	].join(' ');
@@ -111,7 +109,6 @@ export class Prompts extends Context.Service<
 		readonly followUp: typeof followUp;
 		readonly commandTabLabel: typeof commandTabLabel;
 		readonly command: typeof command;
-		readonly chat: string;
 		readonly projectChat: typeof projectChat;
 		readonly manager: typeof manager;
 		readonly managerSummary: typeof managerSummary;
@@ -120,5 +117,5 @@ export class Prompts extends Context.Service<
 		readonly subagentHandoff: typeof subagentHandoff;
 	}
 >()('sapphire-agent/Prompts') {
-	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, chat, projectChat, manager, managerSummary, handoff, resumeHandoff, subagentHandoff });
+	static readonly layer = Layer.succeed(Prompts, { tabLabel, orchestrate, inline, followUp, commandTabLabel, command, projectChat, manager, managerSummary, handoff, resumeHandoff, subagentHandoff });
 }

@@ -77,10 +77,12 @@ describe('Prompts', () => {
 		}),
 	);
 
-	it.effect("tells the main chat's Claude to manage projects with the project subcommands", () =>
+	it.effect("tells a project topic's Claude to manage projects with the project subcommands", () =>
 		withPrompts((prompts) => {
+			const prompt = prompts.projectChat({ team: 'Hivemind', repo: '/home/dev/hivemind', labelReposDirectory: null });
+
 			for (const subcommand of ['project list', 'project add <team> <repo> [--label-repos <dir>]', 'project edit <team> [--repo <path>] [--label-repos <dir>]', 'project remove <team>']) {
-				assert.include(prompts.chat, subcommand);
+				assert.include(prompt, subcommand);
 			}
 		}),
 	);

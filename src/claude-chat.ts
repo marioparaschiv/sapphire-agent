@@ -82,7 +82,7 @@ export class ClaudeChat extends Context.Service<
 			const prompts = yield* Prompts;
 			const encoder = new TextEncoder();
 
-			const command = ({ sessionId, parent, prompt, cwd }: Omit<ChatTurn, 'project'>, systemPrompt: string, outputArgs: ReadonlyArray<string>) =>
+			const command = ({ sessionId, parent, prompt, cwd }: Omit<ChatTurn, 'project'>, systemPrompt: Option.Option<string>, outputArgs: ReadonlyArray<string>) =>
 				ChildProcess.make(
 					'claude',
 					[
@@ -90,8 +90,7 @@ export class ClaudeChat extends Context.Service<
 						...outputArgs,
 						'--setting-sources',
 						settingSources,
-						'--append-system-prompt',
-						systemPrompt,
+						...Option.match(systemPrompt, { onNone: () => [], onSome: (text) => ['--append-system-prompt', text] }),
 						'--session-id',
 						sessionId,
 						...Option.match(parent, { onNone: () => [], onSome: (id) => ['--resume', id, '--fork-session'] }),
@@ -114,7 +113,7 @@ export class ClaudeChat extends Context.Service<
 			// The scope closing kills Claude once the event is read. Nothing is kept of the session.
 			const init = Effect.scoped(
 				Effect.gen(function* () {
-					const handle = yield* spawner.spawn(command({ sessionId: randomUUID(), parent: Option.none(), prompt: pingPrompt, cwd: homedir() }, prompts.chat, ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
+					const handle = yield* spawner.spawn(command({ sessionId: randomUUID(), parent: Option.none(), prompt: pingPrompt, cwd: homedir() }, Option.none(), ['--output-format', 'stream-json', '--verbose', '--no-session-persistence'])).pipe(Effect.mapError(failure('start claude')));
 
 					return yield* handle.stdout.pipe(
 						Stream.decodeText(),
@@ -131,7 +130,7 @@ export class ClaudeChat extends Context.Service<
 			const turn = (chatTurn: ChatTurn) =>
 				Stream.unwrap(
 					Effect.gen(function* () {
-						const handle = yield* spawner.spawn(command(chatTurn, prompts.projectChat(chatTurn.project), ['--output-format', 'stream-json', '--include-partial-messages', '--verbose'])).pipe(Effect.mapError(failure('start claude')));
+						const handle = yield* spawner.spawn(command(chatTurn, Option.some(prompts.projectChat(chatTurn.project)), ['--output-format', 'stream-json', '--include-partial-messages', '--verbose'])).pipe(Effect.mapError(failure('start claude')));
 						const stderr = yield* handle.stderr.pipe(Stream.decodeText(), Stream.mkString, Effect.forkScoped);
 
 						return handle.stdout.pipe(

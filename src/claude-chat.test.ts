@@ -57,7 +57,7 @@ describe('ClaudeChat', () => {
 			const prompt = flagValue(run.args, '--append-system-prompt') ?? '';
 
 			assert.strictEqual(run.cwd, project.repo);
-			assert.isTrue(prompt.startsWith(prompts.chat));
+			assert.strictEqual(prompt, prompts.projectChat(project));
 			assert.include(prompt, 'project Hivemind. You run in its repo, /home/dev/hivemind.');
 			assert.include(prompt, '/home/dev/hivemind-repos/<name>');
 		}).pipe(Effect.scoped),
@@ -76,6 +76,7 @@ describe('ClaudeChat', () => {
 			assert.isTrue(run.killed);
 			assert.strictEqual(flagValue(run.args, '--setting-sources'), 'user,project,local');
 			assert.notInclude(run.args, '--bare');
+			assert.notInclude(run.args, '--append-system-prompt');
 		}).pipe(Effect.scoped),
 	);
 });
