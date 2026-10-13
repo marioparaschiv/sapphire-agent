@@ -56,6 +56,7 @@ const Settings = Schema.Struct({
 		inReview: Name('In Review'),
 		toReview: Name('To Review'),
 		shipped: Name('Shipped'),
+		done: Name('Done'),
 	}).pipe(withDefault({})),
 	labels: Schema.Struct({
 		stuck: Name('agent-stuck'),

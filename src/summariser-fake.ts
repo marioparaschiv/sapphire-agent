@@ -1,5 +1,6 @@
 import { Context, Effect, Layer } from 'effect';
 import { Permanent } from './call-policy.ts';
+import { AppConfig } from './config.ts';
 import { Summariser } from './summariser.ts';
 
 export type FakeSummariserControls = {
@@ -11,7 +12,8 @@ export type FakeSummariserControls = {
 
 export class FakeSummariser extends Context.Service<FakeSummariser, FakeSummariserControls>()('sapphire-agent/FakeSummariser') {
 	static readonly layer = Layer.effectContext(
-		Effect.sync(() => {
+		Effect.gen(function* () {
+			const { summaryModel } = yield* AppConfig;
 			const prompts: Array<string> = [];
 			let answer: string | null = 'The owner edited the epic.';
 
@@ -19,7 +21,7 @@ export class FakeSummariser extends Context.Service<FakeSummariser, FakeSummaris
 				Effect.suspend(() => {
 					prompts.push(prompt);
 
-					return answer === null ? Effect.fail(new Permanent({ message: 'claude -p --model claude-haiku-5-5 failed with exit code 1: API Error: 529 Overloaded' })) : Effect.succeed(answer);
+					return answer === null ? Effect.fail(new Permanent({ message: `claude -p --model ${summaryModel} failed with exit code 1: API Error: 529 Overloaded` })) : Effect.succeed(answer);
 				});
 
 			const controls: FakeSummariserControls = {

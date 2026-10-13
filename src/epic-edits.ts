@@ -9,9 +9,6 @@ import { Reconciler } from './reconciler.ts';
 import { makeSend } from './run-actions.ts';
 import { Summariser } from './summariser.ts';
 
-// The state the orchestrator moves a finished sub-issue to; its team's other states are not in the config.
-const subIssueDoneState = 'Done';
-
 // `ignoredLabels` are left out, so they never differ.
 const snapshotOf = (issue: TrackedIssue, ignoredLabels: ReadonlyArray<string> = []): IssueSnapshot => ({
 	id: issue.id,
@@ -107,7 +104,7 @@ export const epicEditsRule = Effect.gen(function* () {
 	const sendToThread = yield* makeSend;
 
 	const isByDesign = (edit: EpicEdit, epicId: string) =>
-		edit.field === 'state' && (edit.issueId === epicId || edit.after === states.implementing || edit.after === subIssueDoneState);
+		edit.field === 'state' && (edit.issueId === epicId || edit.after === states.implementing || edit.after === states.done);
 
 	const message = (edits: ReadonlyArray<EpicEdit>) => {
 		const listing = edits.map(describeEdit).join('\n');
