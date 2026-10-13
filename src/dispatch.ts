@@ -118,15 +118,15 @@ export const dispatchRule = Effect.gen(function* () {
 					return observation.teams.has(epic.team.id) && Option.isNone(stuckLabelOf(config, epic)) && settled && (!run || isOver(run));
 				})
 				.toSorted((a, b) => a.sortOrder - b.sortOrder);
-			let inFlight = runs.filter(holdsSlot).length;
+			let held = runs.filter(holdsSlot).length;
 			const work: Array<EpicWork> = [];
 
 			for (const epic of candidates) {
-				if (inFlight >= config.maxInFlight) {
+				if (held >= config.maxInFlight) {
 					break;
 				}
 
-				inFlight += 1;
+				held += 1;
 
 				const starts = requests.flatMap(({ id, request }) => (request._tag === 'start' && request.identifier === epic.identifier ? [{ id, replyTo: request.replyTo }] : []));
 
