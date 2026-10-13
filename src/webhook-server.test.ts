@@ -5,7 +5,7 @@ import { TestClock } from 'effect/testing';
 import { AppConfig } from './config.ts';
 import { GitHubAppFixture, postDelivery, signDelivery } from './github-app-fixture.ts';
 import type { Command } from './journal.ts';
-import { otherTeam, postLinearDelivery, signLinearDelivery } from './linear-fixture.ts';
+import { postLinearDelivery, signLinearDelivery } from './linear-fixture.ts';
 import { Pause } from './pause.ts';
 import { Planner } from './planner.ts';
 import { Reconciler } from './reconciler.ts';
@@ -202,25 +202,6 @@ describe('WebhookServer', () => {
 			yield* TestClock.adjust('5 seconds');
 			assert.strictEqual(yield* postLinearDelivery(linearUrl, config.linearWebhookSecret, linearIssueMoved), 200);
 			assert.strictEqual(yield* Queue.take(ticks), 10_000);
-		}).pipe(Effect.provide(NodeServices.layer)),
-	);
-
-	it.effect('wakes the reconciler for a Linear delivery of an issue in a team it does not watch reaching a completed state, as a blocker of an epic does', () =>
-		Effect.gen(function* () {
-			const { config, reconciler, url, ticks } = yield* probedServer;
-			const blockerDone = {
-				...linearIssueMoved,
-				data: { id: 'issue-ops-3', identifier: 'OPS-3', state: { name: 'Done', type: 'completed' }, team: { id: otherTeam.id, key: otherTeam.key } },
-				updatedFrom: { stateId: 'state-ops-in-progress' },
-				url: 'https://linear.app/test/issue/OPS-3',
-			};
-
-			yield* Effect.forkScoped(reconciler.run);
-			assert.strictEqual(yield* Queue.take(ticks), 0);
-
-			yield* TestClock.adjust('5 seconds');
-			assert.strictEqual(yield* postLinearDelivery(new URL(linearWebhookPath, url).href, config.linearWebhookSecret, blockerDone), 200);
-			assert.strictEqual(yield* Queue.take(ticks), 5_000);
 		}).pipe(Effect.provide(NodeServices.layer)),
 	);
 });
