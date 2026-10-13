@@ -67,6 +67,21 @@ const resumeHandoff = (path: string) => `Read ${path} and continue; run its sugg
 const subagentHandoff = ({ path, skill }: { readonly path: string; readonly skill: string }) =>
 	`Your context is full. Stop your current work now. Write a handoff document to ${path} by following ${skill}, then end your turn with exactly this line: HANDOFF ${path}`;
 
+// What the summary model is asked to write about the listed edits to a run's epic.
+const summariseEdits = (listing: string) =>
+	[
+		'The owner edited a Linear epic or its sub-issues while a coding agent works on the epic. These are the edits, each with the identifier of the issue and the text before and after:',
+		listing,
+		'Write the agent a short message of at most four lines: what changed and what it means for its work. Name each issue by its identifier and quote short new text exactly. Answer with the message only.',
+	].join('\n\n');
+
+// The edits as listed, when the summary model could not be asked.
+const listedEdits = (listing: string) => `Your epic or its sub-issues were edited in Linear:\n${listing}`;
+
+// Sent to the run's thread with the summary or the listed edits.
+const epicEdited = (summary: string, identifiers: ReadonlyArray<string>) =>
+	`${summary}\n\nRe-read ${identifiers.join(', ')} in Linear and adjust your work to these edits before you continue.`;
+
 export class Prompts extends Context.Service<
 	Prompts,
 	{
@@ -79,7 +94,10 @@ export class Prompts extends Context.Service<
 		readonly handoff: typeof handoff;
 		readonly resumeHandoff: typeof resumeHandoff;
 		readonly subagentHandoff: typeof subagentHandoff;
+		readonly summariseEdits: typeof summariseEdits;
+		readonly listedEdits: typeof listedEdits;
+		readonly epicEdited: typeof epicEdited;
 	}
 >()('sapphire-agent/Prompts') {
-	static readonly layer = Layer.succeed(Prompts, { threadTitle, orchestrate, inline, followUp, command, handoff, resumeHandoff, subagentHandoff });
+	static readonly layer = Layer.succeed(Prompts, { threadTitle, orchestrate, inline, followUp, command, handoff, resumeHandoff, subagentHandoff, summariseEdits, listedEdits, epicEdited });
 }

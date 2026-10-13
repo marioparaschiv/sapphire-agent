@@ -2,9 +2,9 @@
 
 ## Order
 
-`rules.ts`, every tick, one rule after another (epics within a rule in parallel), so each sees what earlier rules wrote and two never act on one epic at once: requests, cleanup, results, monitoring, handoff, follow-up, dispatch, start, commands, notices. Only follow-up and dispatch are pausable.
+`rules.ts`, every tick, one rule after another (epics within a rule in parallel), so each sees what earlier rules wrote and two never act on one epic at once: requests, cleanup, results, monitoring, handoff, follow-up, dispatch, start, epic-edits, commands, notices. Only follow-up and dispatch are pausable.
 
-Why: a stop ends a run before others see it; cleanup and results end runs before monitoring could flag them; handoff needs monitoring's last progress; follow-ups claim before ready epics (both use `maxInFlight`) and before start, which starts them the same tick; notices post what this tick wrote. Commands are not pausable since `resume` arrives as one.
+Why: a stop ends a run before others see it; cleanup and results end runs before monitoring could flag them; handoff needs monitoring's last progress; follow-ups claim before ready epics (both use `maxInFlight`) and before start, which starts them the same tick; epic edits follow start, so a run claimed this tick has its epic snapshotted after the move; notices post what this tick wrote. Commands are not pausable since `resume` arrives as one.
 
 **Pause** (`sapphire pause`, the `paused` file): nothing new is claimed; claims still start, runs are still watched, posted and cleaned up, mentions still run commands. An unreadable pause file runs the tick as paused (`failure-policy.md`, Outages).
 
@@ -115,7 +115,20 @@ For a new worktree, start records the path once T3 reports it (results reads it 
 
 A Permanent step failure, or no start within `startTimeoutSeconds` of the claim (or process start, if later), fails the start: thread interrupted, `startFailed` flag. Initial run: `error`, stays in Ready. Follow-up: back to `ended` in To Review (moved back if needed), worktree kept; its request is gone, so it needs a new one once the label is removed.
 
-## 9. Commands
+## 9. Epic edits
+
+Not paused. Tells a run's agent when its epic or sub-issues are edited while the run is in flight (`claimed`, `running`, `stale`): a title, description, state, label set or blockers (`blocks` relations onto the issue), or a sub-issue added or removed. Comments are not compared, so they never count.
+
+- The epic and its sub-issues are snapshotted (`epic_snapshots`) on the tick of the claim, after start moved the epic, and again whenever the run's claim is newer than the snapshot. A snapshot whose run is no longer in flight is deleted.
+- Each tick reads the tree again (`epicTree`) and compares. Who made an edit cannot tell the bot from the owner: sapphire-agent's API key is the owner's, and the run's agent edits through the Linear MCP server as the owner too. So the edits the bot makes by design are left out by what they are: any state change of the epic (sapphire-agent and the orchestrator own it), a sub-issue moving to Implementing (`states.implementing`) or Done (`states.done`), and the stuck label on the epic. Every other sub-issue move (to Canceled, back to To Do, ...) counts.
+- Linear's automations are left out too: for each remaining difference, the issue's history since the snapshot is read (`issueHistories`), and a difference whose every entry touching that field has a `botActor` is an automation's. One with no such entry counts.
+- Differences left out are taken into the snapshot without a message.
+- The edits that count are recorded with when they last changed. Once `editDebounceSeconds` passed since then, `claude -p --model <summaryModel>` condenses them into a few lines (`Summariser`); if that fails, the edits go as listed (each issue, field, and the text before and after). The message ends by asking the agent to re-read the named issues and adjust before it continues, and goes to the run's thread with mode `auto` (it steers a working agent, or starts a turn in an idle thread), keyed `edits-<claimedAt>-<editedAt>` so a resend after a crash is dropped by T3. Then the snapshot is taken again. A run whose thread has not started yet keeps its edits until it has.
+- `wakeForEpicEdits` (started by `main.ts`) reads the journal every 5 s and wakes the reconciler when a run's edits have waited their window, so they go out then rather than at the next poll.
+
+It only sends: no plan is rewritten and no run restarted.
+
+## 10. Commands
 
 One command agent at a time, oldest first. Statuses: `ignored`, `queued`, `claimed`, `running`, `ended`, `error`. No `maxInFlight` slot, so a stop or pause works while all are taken: at most `maxInFlight` runs plus one command agent.
 
@@ -135,7 +148,7 @@ Ends once `done` was asked and its thread stopped: settle, `ended`. Fails on a P
 
 **Read-only guard**: T3 cannot pass Claude `--restricted` or `--tools`, so the `PreToolUse` hook keeps a thread with `cwd` under `$STATE/commands` read-only. `Bash` runs without asking only when every simple command is `sh <ctl.sh> ...` or `gh pr view|diff|checks`, `gh issue view`, `git log|show|diff|status`, and none has `git ... --output`, a redirection to a file, or command substitution (`$(...)` or backticks, even in double quotes); else refused. `Write`, `Edit`, `MultiEdit`, `NotebookEdit` refused; `Read`, `Grep`, `Glob`, `SendMessage` allowed; tools outside the hook's matcher are left to T3's approvals. It can still do what `ctl.sh` does (`project` too, though unprompted), and what a run it messages or a follow-up it asks for does. Only allowed users reach it.
 
-## 10. Notices
+## 11. Notices
 
 A notice is short markdown keyed by a marker, put in the outbox (`notices`) once per marker. This rule posts each unsent one, oldest first, as a comment on its epic ending with its marker (`Linear.comment` skips it if the epic has it), then marks it sent. The epic comes from the observation, else is read by identifier; one Linear does not have is logged and dropped. A crash between post and mark only marks it next tick. Transient: the rest waits for next tick; Permanent: logged, retried next tick.
 

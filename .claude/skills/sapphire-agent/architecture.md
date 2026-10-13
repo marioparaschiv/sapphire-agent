@@ -18,6 +18,7 @@ Decisions come only from what is observed now plus the journal, and every extern
 - the webhook server, after queuing a command and on every signed Linear delivery (a Linear delivery missed while down is covered by the startup tick and the poll);
 - the agent event server (`rules.md`, Agent events);
 - `watchThreads` (`thread-waits.ts`): one `t3_thread_wait` (4 min, reopened when it only timed out) per T3 run in flight and per command claimed or running, read from the journal every 5 s; it wakes once a wait returns, so a finished, failed or interrupted run is acted on within seconds. Reopened after a restart;
+- `wakeForEpicEdits` (`epic-edits.ts`), when a run's epic edits have waited their debounce window (`rules.md`, Epic edits);
 - `Projects.changes`, so a project added or removed is observed next tick.
 
 ## The observation
@@ -44,8 +45,9 @@ Services are Effect `Context.Service`s with a live layer (test layers: `developm
 - `prompts.ts` `Prompts`: thread titles; orchestrate, follow-up, command, handoff prompts. `comments.ts` `Comments`: every notice and comment body with its marker. Both pure.
 - `observation.ts` `Observer`, plus helpers shared by rules (roles, in-flight statuses, whether a run's agent works). `planner.ts` `Planner`: `Rule`, `EpicWork`, epic-level failure policy, observing outage. `reconciler.ts` `Reconciler`: tick loop, `wake`, pause logging, pause-file outage, T3 token check.
 - `webhook-server.ts` `WebhookServer`: Effect-managed `node:http` (`NodeHttpServer`) on `127.0.0.1:<bot.app.webhookPort>`, a layer beside the reconciler (closes on shutdown), exposing its `url`; `mentions.ts` `makeRecordMention`, the mention and allowed-user decisions (`rules.md`, Webhook deliveries). `agent-event-server.ts` `AgentEventServer` and its `adapters`: `$STATE/events.sock`, exposing its `path` (`rules.md`, Agent events).
+- `summariser.ts` `Summariser.summarise(prompt)`: `claude -p --model <summaryModel>` with the prompt on stdin, no tools, no saved session and no user settings or MCP servers (so the run hooks never see it); one attempt with a 60 s timeout; Permanent on a non-zero exit.
 - `pushover.ts` `Pushover.send`; `outages.ts` `makeOutage` (`failure-policy.md`, Outages).
-- `rules.ts`: every rule in order, each in its own module: `requests.ts`, `cleanup.ts` (and orphans), `results.ts` (and posting), `monitoring.ts`, `handoffs.ts` (and `makeContextCheck`, doc paths), `follow-up.ts`, `dispatch.ts` (dispatch and start, repo resolution, claims), `commands.ts`, `notices.ts`. `run-actions.ts`: flag, end a run, interrupt/settle/send to a run's or command's thread.
+- `rules.ts`: every rule in order, each in its own module: `requests.ts`, `cleanup.ts` (and orphans), `results.ts` (and posting), `monitoring.ts`, `handoffs.ts` (and `makeContextCheck`, doc paths), `follow-up.ts`, `dispatch.ts` (dispatch and start, repo resolution, claims), `epic-edits.ts` (and `wakeForEpicEdits`), `commands.ts`, `notices.ts`. `run-actions.ts`: flag, end a run, interrupt/settle/send to a run's or command's thread.
 - `agent-hook.ts`: `sapphire hook <agent>`; Claude's `PreToolUse` also runs `run-hooks.ts` (guards in `run-guards.ts`, with `commandToolDecision` and `isCommandCwd` for command threads). `agent-event.ts` `AgentEvent` and adapter type; `claude-hooks.ts` Claude's adapter; `agent-activity.ts` `AgentActivity` (last hook event per run's agent and subagents, in memory).
 - `t3-settings.ts`: `t3SettingsProblems`, `checkT3Settings`, `defaultModelSelection` (passed to every launch).
 - `main.ts` entry point; `ctl.ts` CLI (Effect `cli`, `operations.md`); `directories.ts` default dirs, commands dir, `ctl.sh` path, handoff doc path (node built-ins only, for the hook); `result-file.ts` `ResultFile`; `call-policy.ts`; `legacy-claims.ts` the `claims.json` guard.
@@ -57,6 +59,6 @@ Services are Effect `Context.Service`s with a live layer (test layers: `developm
 2. `refuseUndrainedClaims` stops while `$STATE/claims.json` still holds claims (`operations.md`, Cutover from the old dispatcher).
 3. Services are built: journal opens `$STATE/journal.db` and migrates; `Projects` loads (importing config `teams` into an empty table, warning while `teams` remains); `GitHubApp` reads its slug (`GET /app`); `T3Config` reads the token (its own `StartupError`); servers log `listening for GitHub webhook deliveries on <url> and Linear ones on <url>/linear` and `listening for agent events on <path>`. A failure (e.g. port taken) stops startup.
 4. `checkT3Settings` reads `t3.settingsFile` and tells Pushover once if T3 would remove the projects' worktrees or not settle merged threads (`operations.md`, T3 settings).
-5. Logs `watching <projects> every <n>s, at most <n> in flight` (`no projects`), forks fibers running `watchThreads`, calling it again on every project change, and calling `wake` when the `wake` file is written, runs the reconciler.
+5. Logs `watching <projects> every <n>s, at most <n> in flight` (`no projects`), forks fibers running `watchThreads`, running `wakeForEpicEdits`, calling it again on every project change, and calling `wake` when the `wake` file is written, runs the reconciler.
 
 `NodeRuntime.runMain` runs it; SIGTERM interrupts the tick cleanly. Logs go to stdout with `epic` and `rule` annotations.

@@ -12,6 +12,8 @@ GraphQL over `HttpClient` at `https://api.linear.app/graphql`, header `authoriza
 | `readyEpics(stateIds)` | Top-level issues (`parent: null`) in the ready states, first 50 (more are cut off), with inverse relations (type, related issue's identifier and state type) for holds. Every tick. |
 | `epics(ids)` | The journal's epics wherever they are. Every tick. Over 250 fails Permanently (a truncated page would make live epics look gone). |
 | `epicsByIdentifier(identifiers)` | Epics named by worktree branches (by team key and number), by `sapphire dispatch`, and of notices the tick did not observe. |
+| `epicTree(epicId)` | The epic and its sub-issues (first 50) with title, description, state, labels and inverse relations, for the epic-edits rule (`rules.md`, Epic edits). Every tick, per run in flight. |
+| `issueHistories(ids)` | Newest 50 history entries per issue (`botActor`; title, description, state, label, relation and parent changes), to tell an edit by one of Linear's automations (`botActor` set) from the others; the bot's own edits by design are left out by target state instead, since its API key and the run's agent both act as the owner. Only for issues with a difference not already left out. |
 | `moveIssue(issueId, stateId)` | To Implementing or To Review (or Ready, by `sapphire dispatch`). |
 | `comment(issueId, comment)` | `PR opened` and every notice, unless a comment on the epic (all, paged) has its marker. |
 | `addLabel(issueId, teamId, name)`, `removeLabel(issueId, labelId)` | `agent-stuck`. |

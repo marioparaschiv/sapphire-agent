@@ -37,13 +37,51 @@ export const Epic = Schema.Struct({
 
 export type Epic = typeof Epic.Type;
 
-// A ready epic with the issues related to it: a `blocks` relation's issue blocks the epic.
-export const ReadyEpic = Schema.Struct({
-	...Epic.fields,
-	inverseRelations: nodes(Schema.Struct({ type: Schema.String, issue: Schema.Struct({ identifier: Schema.String, state: Schema.Struct({ type: Schema.String }) }) })),
-});
+// An issue related to another, as that one lists it: a `blocks` relation's issue blocks it.
+export const InverseRelation = Schema.Struct({ type: Schema.String, issue: Schema.Struct({ identifier: Schema.String, state: Schema.Struct({ type: Schema.String }) }) });
+
+export type InverseRelation = typeof InverseRelation.Type;
+
+// A ready epic with the issues related to it.
+export const ReadyEpic = Schema.Struct({ ...Epic.fields, inverseRelations: nodes(InverseRelation) });
 
 export type ReadyEpic = typeof ReadyEpic.Type;
+
+// An issue of an epic's tree with what the epic-edits rule compares. `inverseRelations` of type `blocks` are its
+// blockers.
+export const TrackedIssue = Schema.Struct({
+	id: Schema.String,
+	identifier: Schema.String,
+	title: Schema.String,
+	description: Schema.NullOr(Schema.String),
+	state: Schema.Struct({ name: Schema.String }),
+	labels: nodes(Schema.Struct({ name: Schema.String })),
+	inverseRelations: nodes(InverseRelation),
+});
+
+export type TrackedIssue = typeof TrackedIssue.Type;
+
+export const EpicTree = Schema.Struct({ ...TrackedIssue.fields, children: nodes(TrackedIssue) });
+
+export type EpicTree = typeof EpicTree.Type;
+
+// One change to an issue as its history records it; the fields a change did not touch are null. `botActor` is set for
+// a change one of Linear's automations made.
+export const HistoryEntry = Schema.Struct({
+	createdAt: Schema.String,
+	botActor: Schema.NullOr(Schema.Struct({ type: Schema.String })),
+	fromTitle: Schema.NullOr(Schema.String),
+	toTitle: Schema.NullOr(Schema.String),
+	updatedDescription: Schema.NullOr(Schema.Boolean),
+	toStateId: Schema.NullOr(Schema.String),
+	addedLabelIds: Schema.NullOr(Schema.Array(Schema.String)),
+	removedLabelIds: Schema.NullOr(Schema.Array(Schema.String)),
+	relationChanges: Schema.NullOr(Schema.Array(Schema.Struct({ identifier: Schema.String, type: Schema.String }))),
+	fromParentId: Schema.NullOr(Schema.String),
+	toParentId: Schema.NullOr(Schema.String),
+});
+
+export type HistoryEntry = typeof HistoryEntry.Type;
 
 export const Comment = Schema.Struct({ body: Schema.String });
 
@@ -57,6 +95,20 @@ const EPIC_FIELDS = `
 	parent { identifier }
 	children(first: 1) { nodes { id } }
 `;
+
+const INVERSE_RELATION_FIELDS = 'type issue { identifier state { type } }';
+
+// Linear caps a query's complexity, which grows with each page size; an epic has far fewer sub-issues, labels and
+// blockers.
+const TRACKED_FIELDS = `
+	id identifier title description
+	state { name }
+	labels(first: 20) { nodes { name } }
+	inverseRelations(first: 20) { nodes { ${INVERSE_RELATION_FIELDS} } }
+`;
+
+// Enough to reach back to the snapshot an edit is compared against.
+const HISTORY_PAGE_SIZE = 50;
 
 // Linear rejects larger pages.
 export const MAX_PAGE_SIZE = 250;
@@ -105,6 +157,10 @@ export type LinearShape = {
 	readonly epics: (ids: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
 	// The issues with the given identifiers (e.g. HL-8) wherever they are now; fails Permanent for more than 250.
 	readonly epicsByIdentifier: (identifiers: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
+	// The epic and its sub-issues, with what the epic-edits rule compares.
+	readonly epicTree: (epicId: string) => Effect.Effect<EpicTree, CallError>;
+	// The newest history entries of each issue found, by issue id.
+	readonly issueHistories: (ids: ReadonlyArray<string>) => Effect.Effect<ReadonlyMap<string, ReadonlyArray<HistoryEntry>>, CallError>;
 	readonly moveIssue: (issueId: string, stateId: string) => Effect.Effect<void, CallError>;
 	// Posts the comment unless one on the issue carries its marker already.
 	readonly comment: (issueId: string, comment: MarkedComment) => Effect.Effect<void, CallError>;
@@ -235,7 +291,7 @@ const make = (endpoint: string) =>
 							Schema.Struct({ issues: nodes(ReadyEpic) }),
 							`query ReadyEpics($stateIds: [ID!]) {
 								issues(first: 50, filter: { state: { id: { in: $stateIds } }, parent: { null: true } }) {
-									nodes { ${EPIC_FIELDS} inverseRelations { nodes { type issue { identifier state { type } } } } }
+									nodes { ${EPIC_FIELDS} inverseRelations { nodes { ${INVERSE_RELATION_FIELDS} } } }
 								}
 							}`,
 							{ stateIds },
@@ -296,6 +352,43 @@ const make = (endpoint: string) =>
 					withPolicy,
 				);
 			},
+
+			epicTree: (epicId) =>
+				request(
+					Schema.Struct({ issue: EpicTree }),
+					`query EpicTree($id: String!) {
+						issue(id: $id) { ${TRACKED_FIELDS} children(first: 50) { nodes { ${TRACKED_FIELDS} } } }
+					}`,
+					{ id: epicId },
+				).pipe(
+					Effect.map((result) => result.issue),
+					withPolicy,
+				),
+
+			issueHistories: (ids) =>
+				ids.length === 0
+					? Effect.succeed(new Map())
+					: request(
+							Schema.Struct({ issues: nodes(Schema.Struct({ id: Schema.String, history: nodes(HistoryEntry) })) }),
+							`query IssueHistories($ids: [ID!]) {
+								issues(first: ${ids.length}, filter: { id: { in: $ids } }) {
+									nodes {
+										id
+										history(first: ${HISTORY_PAGE_SIZE}) {
+											nodes {
+												createdAt botActor { type }
+												fromTitle toTitle updatedDescription toStateId addedLabelIds removedLabelIds
+												relationChanges { identifier type } fromParentId toParentId
+											}
+										}
+									}
+								}
+							}`,
+							{ ids },
+						).pipe(
+							Effect.map((result) => new Map(result.issues.nodes.map((issue) => [issue.id, issue.history.nodes]))),
+							withPolicy,
+						),
 
 			moveIssue: (issueId, stateId) =>
 				request(

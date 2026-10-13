@@ -44,6 +44,10 @@ const Settings = Schema.Struct({
 	handoffAtTokens: IntAtLeast(10_000, 250_000),
 	// How long an epic may keep failing with transient errors before it is flagged once.
 	flagTransientAfterSeconds: IntAtLeast(60, 600),
+	// Edits to a run's epic or sub-issues are told to its agent in one message once none came for this long.
+	editDebounceSeconds: IntAtLeast(0, 60),
+	// The model that condenses those edits into the message, run with `claude -p`.
+	summaryModel: Name('claude-haiku-5-5'),
 	// Where T3 creates its worktrees (its own setting), as `<worktreesDirectory>/<repo>/<branch slug>`.
 	worktreesDirectory: Path.pipe(withDefault('~/.t3/worktrees')),
 	states: Schema.Struct({
@@ -52,6 +56,7 @@ const Settings = Schema.Struct({
 		inReview: Name('In Review'),
 		toReview: Name('To Review'),
 		shipped: Name('Shipped'),
+		done: Name('Done'),
 	}).pipe(withDefault({})),
 	labels: Schema.Struct({
 		stuck: Name('agent-stuck'),

@@ -27,8 +27,10 @@ Read with Effect `Config`; none required, each defaulted in code (`config.ts`, `
 | `maxRunSeconds` | `5400` | int ≥ 600. Wall-clock cap from claim: flag once, run continues. Also the command cap. |
 | `handoffAtTokens` | `250000` | int ≥ 10000. Context at which a run's agent or subagent hands off (`rules.md`, Handoff). |
 | `flagTransientAfterSeconds` | `600` | int ≥ 60. Transient streak length before a `transientFailure` notice; also before the observing outage. |
+| `editDebounceSeconds` | `60` | int ≥ 0. Edits to a run's epic or sub-issues go to its agent in one message once none came for this long (`rules.md`, Epic edits). |
+| `summaryModel` | `claude-haiku-5-5` | The model `claude -p` condenses those edits with; if the call fails, the edits go as listed. |
 | `worktreesDirectory` | `~/.t3/worktrees` | Must equal T3's own setting; run guards use it (`integrations.md`, Git). |
-| `states.ready` / `implementing` / `inReview` / `toReview` / `shipped` | `Ready For Agent` / `Implementing` / `In Review` / `To Review` / `Shipped` | Exact state names; all five must exist in a team or it is skipped. |
+| `states.ready` / `implementing` / `inReview` / `toReview` / `shipped` / `done` | `Ready For Agent` / `Implementing` / `In Review` / `To Review` / `Shipped` / `Done` | Exact state names; all six must exist in a team or it is skipped. `done` is where the orchestrator moves a finished sub-issue. |
 | `labels.stuck` | `agent-stuck` | Added with every flag. |
 | `labels.repoPrefix` | `repo:` | Repo label prefix; group name is it minus `:`. |
 | `linearWebhookSecretFile` | required | Linear webhook signing secret. |
