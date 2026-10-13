@@ -56,10 +56,14 @@ type ThreadReading =
 	| { readonly _tag: 'Gone'; readonly threadId: string }
 	| { readonly _tag: 'Unknown'; readonly threadId: string };
 
-// Runs whose agent may still be alive. They hold a maxInFlight slot, so live agents never exceed it.
+// Runs whose agent may still be alive.
 const inFlightStatuses: ReadonlyArray<RunStatus> = ['claimed', 'running', 'stale'];
 
 export const isInFlight = (run: Run) => inFlightStatuses.includes(run.status);
+
+// Runs that can still make progress hold a maxInFlight slot. A stale run holds none until it moves again, so a dead
+// thread does not block dispatching.
+export const holdsSlot = (run: Run) => run.status === 'claimed' || run.status === 'running';
 
 // A project is not removed while a run of its team is in flight.
 export const hasRunInFlight = (runs: ReadonlyArray<Run>, teamId: string) => runs.some((run) => run.teamId === teamId && isInFlight(run));

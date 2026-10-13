@@ -7,7 +7,7 @@ import { AppConfig, T3Config, toPath } from './config.ts';
 import { Git } from './git.ts';
 import { type Command as CommandRow, commandIdentifier, Journal, journalPath, type Project, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { acceptsMessages, hasRunInFlight, heldBy, isInFlight, isOver, resolveTeams } from './observation.ts';
+import { acceptsMessages, hasRunInFlight, heldBy, holdsSlot, isInFlight, isOver, resolveTeams } from './observation.ts';
 import { Pause } from './pause.ts';
 import { wakeFileName } from './reconciler.ts';
 import { T3 } from './t3.ts';
@@ -19,6 +19,7 @@ export class Refused extends Schema.TaggedError<Refused>()('Refused', { message:
 const describeRun = (run: Run, epicState: string) =>
 	[
 		`${run.identifier} ${run.status} (${run.job._tag})`,
+		...(isInFlight(run) && !holdsSlot(run) ? ['holds no slot'] : []),
 		epicState,
 		`claimed ${new Date(run.claimedAt).toISOString()}`,
 		run.threadId === null ? 'no T3 thread' : `T3 thread ${run.threadId}`,
