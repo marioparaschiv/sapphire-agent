@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
-import { TestConsole } from 'effect/testing';
+import { TestClock, TestConsole } from 'effect/testing';
 import { AgentActivity } from './agent-activity.ts';
 import { AgentEventServer } from './agent-event-server.ts';
 import { writeTranscript } from './claude-transcript-fixture.ts';
@@ -102,6 +102,14 @@ export const linearIssueMoved = {
 	webhookTimestamp: 1_791_270_000_000,
 	webhookId: 'webhook-1',
 };
+
+// Ticks once a minute for `minutes`, calling `each` before every tick, as the poll and T3's wakes do.
+export const minuteTicks = (h: Harness, minutes: number, each: Effect.Effect<void> = Effect.void) =>
+	Effect.forEach(
+		Array.from({ length: minutes }),
+		() => TestClock.adjust('1 minute').pipe(Effect.andThen(each), Effect.andThen(h.tick)),
+		{ discard: true },
+	);
 
 export type Harness = {
 	// Holds the config's paths: repo, worktrees, journal.db.

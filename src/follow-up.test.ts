@@ -5,7 +5,7 @@ import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import { Refused } from './ctl.ts';
 import type { FixtureIssue } from './linear-fixture.ts';
-import { git, type Harness, makeHarness, markerKeys } from './test-harness.ts';
+import { git, type Harness, makeHarness, markerKeys, minuteTicks } from './test-harness.ts';
 
 // An epic whose first run posted its result and went to To Review, with the branch on origin. A minute passes, so the
 // follow-up's claim (at `followUpAt`) has markers of its own. `push: false` leaves the branch local only, so pulling it fails.
@@ -339,7 +339,7 @@ describe('follow-ups', () => {
 
 			yield* h.t3.setRunStatus(stale.run.threadId, 'running');
 			yield* h.t3.addActivity(stale.run.threadId);
-			yield* Effect.forEach(Array.from({ length: 25 }), () => TestClock.adjust('1 minute').pipe(Effect.andThen(h.tick)), { discard: true });
+			yield* minuteTicks(h, 25);
 
 			yield* requestFollowUp(h, addThreads(h, pullRequest.number));
 			yield* h.tick;

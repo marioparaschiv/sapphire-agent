@@ -1,21 +1,13 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Clock, Effect } from 'effect';
 import { TestClock } from 'effect/testing';
-import { type Harness, makeHarness } from './test-harness.ts';
+import { type Harness, makeHarness, minuteTicks } from './test-harness.ts';
 
 const statuses = (h: Harness) => h.runs.pipe(Effect.map((runs) => runs.map((run) => run.status)));
 
 const markers = (h: Harness, identifier: string) => h.notices(identifier).map(({ marker }) => marker);
 
 const nudges = (h: Harness) => h.t3.sends.pipe(Effect.map((sends) => sends.map(({ message, mode }) => [message, mode])));
-
-// Ticks once a minute for `minutes`, calling `each` before every tick, as the poll and T3's wakes do.
-const minuteTicks = (h: Harness, minutes: number, each: Effect.Effect<void> = Effect.void) =>
-	Effect.forEach(
-		Array.from({ length: minutes }),
-		() => TestClock.adjust('1 minute').pipe(Effect.andThen(each), Effect.andThen(h.tick)),
-		{ discard: true },
-	);
 
 describe('monitoring', () => {
 	it.effect('flags a run over the wall-clock cap once and lets it keep running', () =>

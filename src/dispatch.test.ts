@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { TestClock } from 'effect/testing';
-import { git, makeHarness } from './test-harness.ts';
+import { git, makeHarness, minuteTicks } from './test-harness.ts';
 
 describe('dispatch', () => {
 	it.effect('claims an epic dispatched with --reply-to replying to that session, as the newest dispatch asked, and drops its start requests', () =>
@@ -94,11 +94,7 @@ describe('dispatch', () => {
 			yield* h.t3.setRunStatus(stale.run.threadId, 'running');
 			yield* h.t3.setRunStatus(live.run.threadId, 'running');
 			yield* h.t3.addActivity(stale.run.threadId);
-			yield* Effect.forEach(
-				Array.from({ length: 25 }),
-				() => TestClock.adjust('1 minute').pipe(Effect.andThen(h.t3.addActivity(live.run.threadId)), Effect.andThen(h.tick)),
-				{ discard: true },
-			);
+			yield* minuteTicks(h, 25, h.t3.addActivity(live.run.threadId));
 
 			assert.deepStrictEqual(yield* statuses, [
 				['TEST-10', 'stale'],
