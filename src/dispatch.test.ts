@@ -84,6 +84,58 @@ describe('dispatch', () => {
 		}),
 	);
 
+	it.effect('frees the slot of a stale run without re-claiming its epic, and counts it again once it moves', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 2 });
+			const stale = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const live = yield* h.threadRun({ identifier: 'TEST-11', title: 'Fix the file leak' });
+			const statuses = h.runs.pipe(Effect.map((runs) => runs.map((run) => [run.identifier, run.status]).toSorted(([a], [b]) => a.localeCompare(b))));
+
+			yield* h.t3.setRunStatus(stale.run.threadId, 'running');
+			yield* h.t3.setRunStatus(live.run.threadId, 'running');
+			yield* h.t3.addActivity(stale.run.threadId);
+			yield* Effect.forEach(
+				Array.from({ length: 25 }),
+				() => TestClock.adjust('1 minute').pipe(Effect.andThen(h.t3.addActivity(live.run.threadId)), Effect.andThen(h.tick)),
+				{ discard: true },
+			);
+
+			assert.deepStrictEqual(yield* statuses, [
+				['TEST-10', 'stale'],
+				['TEST-11', 'running'],
+			]);
+
+			h.linear.issue(stale.epic.id).labelIds = [];
+			h.moveEpic(stale.epic.id, 'Ready For Agent');
+			h.linear.addEpic({ identifier: 'TEST-12', title: 'Rename the config' });
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* statuses, [
+				['TEST-10', 'stale'],
+				['TEST-11', 'running'],
+				['TEST-12', 'running'],
+			]);
+			assert.deepStrictEqual(
+				(yield* h.t3.launches).map(({ title }) => title),
+				['TEST-10 Plugin settings sync', 'TEST-11 Fix the file leak', 'TEST-12 Rename the config'],
+			);
+			assert.isTrue((yield* h.ctl('status')).some((line) => line.startsWith('TEST-10 stale (orchestrate), holds no slot, ')));
+
+			const waiting = h.linear.addEpic({ identifier: 'TEST-13', title: 'Drop the old cache' });
+
+			yield* h.t3.addActivity(stale.run.threadId);
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* statuses, [
+				['TEST-10', 'running'],
+				['TEST-11', 'running'],
+				['TEST-12', 'running'],
+			]);
+			assert.strictEqual(h.linear.stateName(waiting.id), 'Ready For Agent');
+		}),
+	);
+
 	it.effect('waits dispatchSettleSeconds after an epic is created before claiming it, so its sub-issues are attached first', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness({ dispatchSettleSeconds: 60 });
