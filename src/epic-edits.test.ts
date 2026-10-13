@@ -140,6 +140,122 @@ describe('epic edits', () => {
 		}),
 	);
 
+	it.effect('sends nothing when the owner reverts an edit within the debounce window', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic } = yield* workingRun(h);
+
+			h.linear.updateIssue(epic.id, { title: 'Plugin settings sync v2' });
+			yield* h.tick;
+			yield* TestClock.adjust('30 seconds');
+			h.linear.updateIssue(epic.id, { title: 'Plugin settings sync' });
+			yield* h.tick;
+
+			assert.deepStrictEqual((yield* h.epicSnapshots).map(({ edits }) => edits), [null]);
+
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* sent(h), []);
+			assert.deepStrictEqual(h.summariser.prompts(), []);
+		}),
+	);
+
+	it.effect('holds the edits until the run has a thread, then sends them', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+
+			yield* h.t3.rejectToken(true);
+
+			const epic = h.linear.addEpic({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+
+			yield* h.tick;
+			h.linear.updateIssue(epic.id, { description: 'Only sync themes.' });
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			assert.deepStrictEqual((yield* h.runs).map(({ status, threadId }) => [status, threadId]), [['claimed', null]]);
+			assert.notInclude(yield* h.t3.calls, 't3_thread_send');
+			assert.deepStrictEqual(h.summariser.prompts(), []);
+
+			yield* h.t3.rejectToken(false);
+			yield* h.tick;
+
+			const [run] = yield* h.runs;
+
+			assert.isNotNull(run.threadId);
+			assert.deepStrictEqual((yield* sent(h)).map(([threadId]) => threadId), [run.threadId]);
+			assert.strictEqual(listing(h.summariser.prompts()[0]), '- TEST-10 description\n  before: none\n  after: Only sync themes.');
+		}),
+	);
+
+	it.effect("reports the owner's edit to a field an automation edited before the snapshot", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic } = yield* workingRun(h);
+			const [first] = h.linear.subIssues(epic.id);
+
+			h.linear.updateIssue(first.id, { state: 'Canceled' }, 'automation');
+			yield* TestClock.adjust('10 seconds');
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			h.linear.updateIssue(first.id, { state: 'Ready For Agent' });
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			assert.lengthOf(yield* sent(h), 1);
+			assert.strictEqual(listing(h.summariser.prompts()[0]), '- TEST-101 state\n  before: Canceled\n  after: Ready For Agent');
+		}),
+	);
+
+	it.effect("leaves out an automation's edit to a field the owner edited before the snapshot", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic } = yield* workingRun(h);
+			const [first] = h.linear.subIssues(epic.id);
+
+			h.linear.updateIssue(first.id, { state: 'Ready For Agent' });
+			yield* TestClock.adjust('10 seconds');
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			h.linear.updateIssue(first.id, { state: 'Canceled' }, 'automation');
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			assert.lengthOf(yield* sent(h), 1);
+			assert.lengthOf(h.summariser.prompts(), 1);
+			assert.strictEqual(listing(h.summariser.prompts()[0]), '- TEST-101 state\n  before: To Do\n  after: Ready For Agent');
+		}),
+	);
+
+	it.effect('reports a sub-issue the owner took out of the epic, but not one an automation did', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness();
+			const { epic } = yield* workingRun(h);
+			const [first, second] = h.linear.subIssues(epic.id);
+
+			h.linear.updateIssue(second.id, { parentId: null }, 'automation');
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* sent(h), []);
+
+			h.linear.updateIssue(first.id, { parentId: null });
+			yield* h.tick;
+			yield* TestClock.adjust('1 minute');
+			yield* h.tick;
+
+			assert.lengthOf(yield* sent(h), 1);
+			assert.strictEqual(listing(h.summariser.prompts()[0]), '- TEST-101 "Slice 1" is no longer a sub-issue');
+		}),
+	);
+
 	it.effect('leaves a run that is no longer in flight alone', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
