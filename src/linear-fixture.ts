@@ -67,6 +67,7 @@ export type LinearFixtureShape = {
 	// A comment as a user would post it in Linear.
 	readonly addComment: (issueId: string, body: string) => FixtureComment;
 	readonly issue: (issueId: string) => FixtureIssue;
+	readonly moveIssue: (issueId: string, state: string) => void;
 	// Sub-issues of the epic, in creation order.
 	readonly subIssues: (epicId: string) => ReadonlyArray<FixtureIssue>;
 	readonly stateName: (issueId: string) => string;
@@ -466,6 +467,11 @@ const make = Effect.gen(function* () {
 		},
 		addComment,
 		issue,
+		moveIssue: (issueId, state) => {
+			const found = issue(issueId);
+
+			found.stateId = find(team(found.teamId).states.nodes, (candidate) => candidate.name === state, `WorkflowState ${state}`).id;
+		},
 		subIssues: (epicId) => [...issues.values()].filter((candidate) => candidate.parentId === epicId),
 		stateName: (issueId) => stateOf(issue(issueId)).name,
 		labelNames: (issueId) => issue(issueId).labelIds.map((id) => label(id).name),
