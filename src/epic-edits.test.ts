@@ -1,5 +1,3 @@
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Layer, Ref } from 'effect';
 import { TestClock } from 'effect/testing';
@@ -17,14 +15,7 @@ const reRead = (identifiers: string) => `\n\nRe-read ${identifiers} in Linear an
 const listing = (prompt: string) => prompt.split('\n\n')[1];
 
 // The epics the journal holds a snapshot of.
-const snapshotted = (h: Harness) => {
-	const database = new DatabaseSync(join(h.dir, 'journal.db'), { readOnly: true });
-	const rows = database.prepare('SELECT epic_id FROM epic_snapshots ORDER BY epic_id').all();
-
-	database.close();
-
-	return rows.map(({ epic_id }) => String(epic_id));
-};
+const snapshotted = (h: Harness) => h.epicSnapshots.pipe(Effect.map((snapshots) => snapshots.map(({ epicId }) => epicId)));
 
 // A run whose agent works in its thread, as dispatched.
 const workingRun = (h: Harness, subIssues = 2) =>
@@ -154,7 +145,7 @@ describe('epic edits', () => {
 			const h = yield* makeHarness();
 			const { epic } = yield* workingRun(h);
 
-			assert.deepStrictEqual(snapshotted(h), [epic.id]);
+			assert.deepStrictEqual(yield* snapshotted(h), [epic.id]);
 
 			yield* h.ctl('stop', 'TEST-10');
 			yield* h.tick;
@@ -164,7 +155,7 @@ describe('epic edits', () => {
 			yield* h.tick;
 
 			assert.deepStrictEqual((yield* h.runs).map(({ status }) => status), ['ended']);
-			assert.deepStrictEqual(snapshotted(h), []);
+			assert.deepStrictEqual(yield* snapshotted(h), []);
 			assert.deepStrictEqual(yield* sent(h), []);
 			assert.deepStrictEqual(h.summariser.prompts(), []);
 		}),

@@ -16,7 +16,7 @@ import { runCtl } from './ctl.ts';
 import { GitHubAppFixture, postDelivery, type WebhookDelivery } from './github-app-fixture.ts';
 import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
 import { Git } from './git.ts';
-import { type Command, Journal, type Run } from './journal.ts';
+import { type Command, type EpicSnapshot, Journal, type Run } from './journal.ts';
 import { type EpicSeed, type FixtureIssue, LinearFixture, type LinearFixtureShape } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
 import { isThreaded, type Observation, Observer, type ThreadedRun } from './observation.ts';
@@ -141,6 +141,7 @@ export type Harness = {
 	readonly journalWrites: () => number;
 	readonly runs: Effect.Effect<ReadonlyArray<Run>>;
 	readonly commands: Effect.Effect<ReadonlyArray<Command>>;
+	readonly epicSnapshots: Effect.Effect<ReadonlyArray<EpicSnapshot>>;
 	// markerKeys of the issue's comments.
 	readonly epicMarkers: (issueId: string) => ReadonlyArray<string>;
 	// The notices written for the epic, oldest first, with `<purpose>:<key>` and whether they were posted.
@@ -350,6 +351,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			moveEpic: (epicId, state) => linear.updateIssue(epicId, { state }),
 			runs: journal.pipe(Effect.flatMap((found) => found.listRuns), Effect.orDie),
 			commands: journal.pipe(Effect.flatMap((found) => found.listCommands), Effect.orDie),
+			epicSnapshots: journal.pipe(Effect.flatMap((found) => found.listEpicSnapshots), Effect.orDie),
 			epicMarkers: (issueId) => markerKeys(linear.comments(issueId).map((comment) => comment.body)),
 			notices: (identifier) => {
 				const database = new DatabaseSync(join(dir, 'journal.db'), { readOnly: true });
