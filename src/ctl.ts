@@ -7,7 +7,7 @@ import { AppConfig, T3Config, toPath } from './config.ts';
 import { Git } from './git.ts';
 import { type Command as CommandRow, commandIdentifier, Journal, journalPath, type Project, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { acceptsMessages, hasRunInFlight, heldBy, isInFlight, isOver } from './observation.ts';
+import { acceptsMessages, hasRunInFlight, heldBy, isInFlight, isOver, resolveTeams } from './observation.ts';
 import { Pause } from './pause.ts';
 import { wakeFileName } from './reconciler.ts';
 import { T3 } from './t3.ts';
@@ -91,10 +91,10 @@ const words = (name: string, description: string) =>
 // The projects' ready epics that issues blocking them hold back, with those issues.
 const heldEpics = (projects: ReadonlyArray<Project>) =>
 	Effect.gen(function* () {
-		const { states } = yield* AppConfig;
+		const config = yield* AppConfig;
 		const linear = yield* Linear;
-		const teams = yield* linear.teams(projects.map(({ team }) => team));
-		const ready = yield* linear.readyEpics(teams.flatMap((team) => team.states.nodes.filter((state) => state.name === states.ready).map(({ id }) => id)));
+		const teams = yield* resolveTeams(config, projects, yield* linear.teams(projects.map(({ team }) => team)), () => Effect.void);
+		const ready = yield* linear.readyEpics([...teams.values()].map(({ stateIds }) => stateIds.ready));
 
 		return ready.flatMap((epic) => {
 			const blockers = heldBy(epic);

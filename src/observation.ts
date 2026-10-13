@@ -149,7 +149,7 @@ export const makeWarnOnce = () => {
 		});
 };
 
-const resolveTeams = (config: AppConfigShape, projects: ReadonlyArray<Project>, teams: ReadonlyArray<Team>, warn: (message: string) => Effect.Effect<void>) =>
+export const resolveTeams = (config: AppConfigShape, projects: ReadonlyArray<Project>, teams: ReadonlyArray<Team>, warn: (message: string) => Effect.Effect<void>) =>
 	Effect.gen(function* () {
 		const resolved = new Map<string, ResolvedTeam>();
 
