@@ -7,7 +7,7 @@ import { AppConfig, T3Config, toPath } from './config.ts';
 import { Git } from './git.ts';
 import { type Command as CommandRow, commandIdentifier, Journal, journalPath, type Project, type Request, type Run } from './journal.ts';
 import { Linear } from './linear.ts';
-import { acceptsMessages, hasRunInFlight, isInFlight, isOver } from './observation.ts';
+import { acceptsMessages, hasRunInFlight, heldBy, isInFlight, isOver } from './observation.ts';
 import { Pause } from './pause.ts';
 import { wakeFileName } from './reconciler.ts';
 import { T3 } from './t3.ts';
@@ -88,13 +88,29 @@ const epicArgument = Argument.String('epic').pipe(
 const words = (name: string, description: string) =>
 	Argument.String(name).pipe(Argument.withDescription(description), Argument.variadic({ min: 1 }), Argument.map((parts) => parts.join(' ')));
 
+// The projects' ready epics that issues blocking them hold back, with those issues.
+const heldEpics = (projects: ReadonlyArray<Project>) =>
+	Effect.gen(function* () {
+		const { states } = yield* AppConfig;
+		const linear = yield* Linear;
+		const teams = yield* linear.teams(projects.map(({ team }) => team));
+		const ready = yield* linear.readyEpics(teams.flatMap((team) => team.states.nodes.filter((state) => state.name === states.ready).map(({ id }) => id)));
+
+		return ready.flatMap((epic) => {
+			const blockers = heldBy(epic);
+
+			return blockers.length === 0 ? [] : [`${epic.identifier} held by ${blockers.join(', ')}`];
+		});
+	});
+
 const status = Command.make('status', {}, () =>
 	Effect.gen(function* () {
 		const journal = yield* Journal;
 		const linear = yield* Linear;
 		const paused = yield* Pause.use((pause) => pause.isPaused);
 		const runs = yield* journal.listRuns;
-		const epics = yield* linear.epics(runs.map((run) => run.epicId)).pipe(Effect.result);
+		const projects = yield* journal.listProjects;
+		const [epics, held] = yield* Effect.all([linear.epics(runs.map((run) => run.epicId)).pipe(Effect.result), heldEpics(projects).pipe(Effect.result)], { concurrency: 'unbounded' });
 		const stateOf = (run: Run) =>
 			epics._tag === 'Failure'
 				? 'epic state unknown'
@@ -103,11 +119,17 @@ const status = Command.make('status', {}, () =>
 		const requests = yield* journal.listRequests;
 
 		yield* Console.log(`dispatching: ${paused ? 'paused' : 'active'}`);
-		yield* Console.log(describeProjects(yield* journal.listProjects));
+		yield* Console.log(describeProjects(projects));
 		yield* Console.log(runs.length === 0 ? 'no runs' : runs.map((run) => describeRun(run, stateOf(run))).join('\n'));
 
 		if (epics._tag === 'Failure') {
 			yield* Console.log(`cannot read the epics from Linear: ${epics.failure.message}`);
+		}
+
+		if (held._tag === 'Failure') {
+			yield* Console.log(`cannot read the held epics from Linear: ${held.failure.message}`);
+		} else if (held.success.length > 0) {
+			yield* Console.log(held.success.join('\n'));
 		}
 
 		yield* Console.log(commands.length === 0 ? 'no commands' : commands.map(describeCommand).join('\n'));
@@ -116,7 +138,7 @@ const status = Command.make('status', {}, () =>
 			yield* Console.log(requests.map(({ id, request }) => `request ${id}: ${describeRequest(request)}`).join('\n'));
 		}
 	}),
-).pipe(Command.withDescription('Whether dispatching is paused, the projects, the runs with their epics, the commands in flight and the requests not acted on yet'));
+).pipe(Command.withDescription('Whether dispatching is paused, the projects, the runs with their epics, the ready epics held by issues blocking them, the commands in flight and the requests not acted on yet'));
 
 const pause = Command.make('pause', {}, () =>
 	Effect.gen(function* () {

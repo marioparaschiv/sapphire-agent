@@ -13,7 +13,7 @@ The `Linear` service (`src/linear.ts`), how team states and labels are resolved,
 | Method | Used for |
 | --- | --- |
 | `teams(names)` | Teams by exact name with all workflow states. Every tick. |
-| `readyEpics(stateIds)` | Top-level issues (`parent: null`) in the ready states, first 50. Every tick. More than 50 are cut off. |
+| `readyEpics(stateIds)` | Top-level issues (`parent: null`) in the ready states, first 50, with their inverse relations (type, and the related issue's identifier and state type), so dispatch sees what blocks them. Every tick. More than 50 are cut off. |
 | `epics(ids)` | The journal's epics wherever they are now. Every tick. More than 250 fails Permanently, because a truncated page would make epics that still exist look gone. |
 | `epicsByIdentifier(identifiers)` | Epics named by worktree branches that are not known otherwise (matched by team key and number), by `sapphire dispatch`, and the epics of notices the tick did not observe. |
 | `moveIssue(issueId, stateId)` | Move the epic to Implementing or To Review (or to Ready, by `sapphire dispatch`). |

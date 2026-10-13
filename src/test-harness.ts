@@ -17,7 +17,7 @@ import { GitHubAppFixture, postDelivery, type WebhookDelivery } from './github-a
 import { type FakeComment, FakeGitHub, type FakeGitHubControls } from './github-fake.ts';
 import { Git } from './git.ts';
 import { type Command, Journal, type Run } from './journal.ts';
-import { type EpicSeed, type FixtureIssue, LinearFixture, type LinearFixtureShape, testTeam } from './linear-fixture.ts';
+import { type EpicSeed, type FixtureIssue, LinearFixture, type LinearFixtureShape, otherTeam, testTeam } from './linear-fixture.ts';
 import { parseMarker } from './markers.ts';
 import { isThreaded, type Observation, Observer, type ThreadedRun } from './observation.ts';
 import { Pause } from './pause.ts';
@@ -130,7 +130,7 @@ export type Harness = {
 	// Counted from this call: the nth journal write the reconciler or the webhook server makes dies
 	// without being applied, as if the process crashed right before recording what it had just done.
 	readonly crashAtJournalWrite: (nth: number) => void;
-	// Moves the epic in Linear as the user does.
+	// Moves the epic, or an issue of another team, in Linear as the user does.
 	readonly moveEpic: (epicId: string, state: string) => void;
 	// Whether the injected journal crash happened.
 	readonly crashed: () => boolean;
@@ -343,7 +343,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			journalWrites: () => journalWrites,
 			moveEpic: (epicId, state) => {
 				const issue = linear.issue(epicId);
-				const found = testTeam.states.nodes.find((candidate) => candidate.name === state);
+				const found = [testTeam, otherTeam].find(({ id }) => id === issue.teamId)?.states.nodes.find((candidate) => candidate.name === state);
 
 				if (!found) {
 					throw new Error(`no state ${state}`);

@@ -7,7 +7,7 @@ import { Git } from './git.ts';
 import { GitHub, type PullRequest } from './github.ts';
 import { Journal, type Job, newSession, type Project, type Run, type Session } from './journal.ts';
 import { type Epic, Linear } from './linear.ts';
-import { activeRoles, hasRole, isInFlight, isOver, type Observation, observedWorktreePath, roleOf, stuckLabelOf } from './observation.ts';
+import { activeRoles, hasRole, heldBy, isInFlight, isOver, type Observation, observedWorktreePath, roleOf, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { Projects } from './projects.ts';
 import { Prompts } from './prompts.ts';
@@ -86,7 +86,8 @@ export const claimedRun = (epic: Epic, repo: string, claimedAt: number, session:
 });
 
 // Claims ready epics up to maxInFlight, in Linear's order: a top-level epic in the ready state of a resolved team,
-// without the stuck label, created at least dispatchSettleSeconds ago, and with no run or only one that is over.
+// without the stuck label, created at least dispatchSettleSeconds ago, not held by an issue blocking it, and with no run
+// or only one that is over.
 export const dispatchRule = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
@@ -115,7 +116,7 @@ export const dispatchRule = Effect.gen(function* () {
 					const run = runs.find((candidate) => candidate.epicId === epic.id);
 					const settled = now - Date.parse(epic.createdAt) >= config.dispatchSettleSeconds * 1000;
 
-					return observation.teams.has(epic.team.id) && Option.isNone(stuckLabelOf(config, epic)) && settled && (!run || isOver(run));
+					return observation.teams.has(epic.team.id) && Option.isNone(stuckLabelOf(config, epic)) && settled && heldBy(epic).length === 0 && (!run || isOver(run));
 				})
 				.toSorted((a, b) => a.sortOrder - b.sortOrder);
 			let inFlight = runs.filter(isInFlight).length;
