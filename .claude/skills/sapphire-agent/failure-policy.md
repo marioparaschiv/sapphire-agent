@@ -1,52 +1,56 @@
 # Failure policy
 
-How every external call is bounded and classified, how a failure is retried, and when a failing epic is flagged.
-
 ## Two kinds of failure
 
 Every call to T3, git, gh, Linear, the GitHub App API and Pushover fails with one of two tagged errors (`call-policy.ts`):
 
 | Error | Means | Examples |
 | --- | --- | --- |
-| `Transient` | Worth retrying. May carry `retryAfter`, the server's Retry-After. | A timeout, HTTP 5xx, a network error, a rate limit, a git lock file held by another process. |
-| `Permanent` | Retrying cannot help. | HTTP 4xx, a GraphQL error, a response that fails its schema, a missing repo, an unresolvable repo label. |
+| `Transient` | Worth retrying; may carry `retryAfter` (Retry-After). | Timeout, HTTP 5xx, network error, rate limit, git lock file held. |
+| `Permanent` | Retrying cannot help. | HTTP 4xx, GraphQL error, schema decode failure, missing repo, unresolvable repo label. |
 
-Per service:
-
-- Linear: HTTP 429, or HTTP 400 with the GraphQL code `RATELIMITED` (how Linear reports most rate limits), is Transient with `retryAfter`. 5xx and transport errors are Transient. Other 4xx, GraphQL errors and decode failures are Permanent.
-- gh: Transient when stderr shows a connection error, a timeout, HTTP 5xx, HTTP 429 or a rate limit; otherwise Permanent. gh exits non-zero on GraphQL errors.
-- git: Transient for a held lock file, and for a network error during `fetch` or `pull`; otherwise Permanent.
-- T3 (`t3.ts`): 5xx and transport errors are Transient, other 4xx and JSON-RPC errors Permanent. Two errors of its own besides: `T3Unauthorized` (HTTP 401, the token is rejected) and `T3ToolFailure` (a tool answered `isError`, carrying T3's `code`, e.g. `thread_not_found`, and message). Neither is retried. A 404 for the MCP session (T3 restarted) opens a new session and repeats the request once.
+- Linear: 429, or 400 with GraphQL code `RATELIMITED` (most of its rate limits), is Transient with `retryAfter`; 5xx and transport errors Transient; other 4xx, GraphQL errors, decode failures Permanent.
+- gh: Transient when stderr shows a connection error, timeout, 5xx, 429 or rate limit; else Permanent (gh exits non-zero on GraphQL errors).
+- GitHub App API: 429 and 5xx Transient; other non-2xx Permanent with GitHub's `message`. Pushover: Outages.
+- git: Transient for a held lock file, and a network error during `fetch`/`pull`; else Permanent.
+- T3: 5xx and transport Transient; other 4xx and JSON-RPC errors Permanent. Plus `T3Unauthorized` (401) and `T3ToolFailure` (tool answered `isError`, with T3's `code`, e.g. `thread_not_found`, and message), never retried. A 404 for the MCP session (T3 restarted) opens a new session and repeats once.
 
 ## The call policy
 
-`withCallPolicy(timeout)` wraps every external call:
+`withCallPolicy(timeout)` wraps every external call; each method is one unit, so a retry repeats its marker or state check:
 
-- A timeout per attempt: git and T3 30 s, gh, the GitHub App API, Linear and Pushover 20 s; a `t3_thread_wait` gets its `timeoutMs` plus 30 s. A timeout is a Transient.
-- Up to 3 retries of a Transient, after 1 s, 2 s and 4 s, each jittered, or after exactly `retryAfter` when the error has one.
-- A Permanent is not retried. Once the retries are used up, the Transient fails the call and the epic's work for this tick; the next tick tries again.
+- Timeout per attempt: git and T3 30 s; gh, GitHub App API, Linear, Pushover 20 s; `t3_thread_wait` its `timeoutMs` + 30 s. A timeout is Transient.
+- Up to 3 retries of a Transient, after 1, 2, 4 s jittered, or exactly `retryAfter`. Then the call and the epic's work fail for this tick.
+- Permanent is not retried.
 
-Each method is one unit under the policy, so a retried write repeats its marker or state check before writing again.
-
-Writes that have nothing to check first use the write policy instead: the timeout covers all attempts together and a timeout is never retried, because the timed-out attempt may still have landed. Transient failures before the timeout are still retried. The next tick observes what actually happened. Pushover sends use it. T3's `t3_thread_launch` and `t3_project_create`, which have no retry key, are one attempt under the timeout, since even a failed attempt may have created the thread or project; the start rule finds such a thread by its title on the next tick, and `T3Projects` such a project by its workspace root. So is T3's `ping`, which every tick waits on to check the token, so a T3 that is down does not hold the tick up with retries. Sends and interrupts carry a `clientRequestId` T3 dedupes, so they take the call policy.
+The **write policy** is for writes with nothing to check first: one timeout over all attempts, a timeout never retried (it may have landed), Transients before it still retried; the next tick observes what happened. Used by Pushover sends, T3 `ping` (so a down T3 does not hold up the tick), and `t3_thread_launch`/`t3_project_create`, which have no retry key and are one attempt (a lost thread is found by title next tick, a lost project by workspace root). Sends and interrupts carry a `clientRequestId` and take the call policy.
 
 ## At the epic level
 
-The planner runs every rule's work per epic in its own fiber, so one bad epic never blocks the others, and handles what the work fails with:
+The planner runs each epic's work in its own fiber, so one bad epic never blocks others:
 
 - Success clears the epic's transient streak.
-- Transient: logged as `failed; retrying next tick`. The journal records when the epic's streak started. Once the streak is older than `flagTransientAfterSeconds` (default 600), a `transientFailure` notice is sent once per streak (no label: it keeps retrying by itself). No notice before that.
-- Transient with `retryAfter` (a rate limit): the rest of the tick is skipped (`rate limited; skipping <rule> and the rules after it until the next tick`). The call policy already waited Retry-After between its attempts.
-- Permanent: logged as `failed`, and the epic is flagged once with `agent-stuck` and a `permanentFailure` notice, keyed by the run's claim time (or, without a run, by the streak start).
-- Anything else (a defect, a journal error) is logged with the rule and epic and dropped; the next tick tries again. Interruption (shutdown) still stops the tick.
+- Transient: logged `failed; retrying next tick`; the journal keeps the streak start. Once older than `flagTransientAfterSeconds`, a `transientFailure` notice once per streak (no label; it keeps retrying).
+- Transient with `retryAfter` (the call policy already waited it between attempts): the rest of the tick is skipped (`rate limited; skipping <rule> and the rules after it until the next tick`).
+- Permanent: logged `failed`; `agent-stuck` and a `permanentFailure` notice once, keyed by the run's claim time (no run: the streak start).
+- Anything else (defect, journal error): logged with rule and epic, dropped; next tick retries. Interruption (shutdown) still stops the tick.
 
-Work that is not about an epic (`TaskWork`: a command, a request whose epic has no run, the project requests, the notices) has nothing to flag, so the planner only logs its failures with its `task`, and the next tick tries again. A command handles its own: a Transient failure is logged and tried again next tick, a Permanent one while starting fails the command with a `commandFailed` reply on its issue or PR (`rules.md`). The notices rule tries a notice Linear refuses again next tick (`rules.md`, Notices). A webhook delivery whose command cannot be recorded is answered 500 and logged, so it stays failed in the App's delivery log, where it can be redelivered by hand.
+`TaskWork` (a command, a request without a run, project requests, notices) has nothing to flag: failures are logged with its `task` and retried next tick. Commands, notices and webhook deliveries handle their own (`rules.md`).
 
-A failure while observing or planning skips that tick or that rule and is logged; nothing is written. Observing that keeps failing for `flagTransientAfterSeconds` is sent to Pushover once per streak, at high priority (`sapphire-agent cannot observe`); so is a pause file the reconciler cannot read, at once (`sapphire-agent cannot read its pause file`). Both live in memory, so a restart during a streak sends it again (`outages.ts`). Each tick the reconciler also pings T3; while T3 answers HTTP 401 no new run starts (as if paused) and Pushover is told at high priority to run `scripts/mint-t3-token.sh` again (`T3 rejects the sapphire-agent token`), at most once a day across streaks. T3 being unreachable does not stop dispatch; the calls that need it fail.
+A failure while observing or planning skips that tick or rule, is logged, and writes nothing.
 
-Rule code may handle a failure itself where that is the behaviour: a Permanent while starting becomes `startFailed`, a `send` or handoff message T3 refuses is only logged, a failed nudge is only logged (the stale flag follows anyway), and a repo whose worktrees cannot be listed only skips its orphan worktrees.
+Rules handle some failures themselves: Permanent while starting becomes `startFailed`; a refused `send` or handoff message, and a failed nudge, are only logged (the stale flag follows anyway); a repo whose worktrees cannot be listed only skips its orphans.
 
-## Concurrency
+Concurrency: rules run in sequence, epics within a rule in parallel; git calls share one semaphore per repo, since git takes lock files in the main repo for any of its worktrees.
 
-- Rules run one after another; within a rule, epics run in parallel.
-- git calls share one semaphore per repo: git takes lock files in the main repo for operations in any of its worktrees.
+## Outages
+
+A failure of the whole service goes to the phone via `Pushover` (`pushover.ts`: `POST https://api.pushover.net/1/messages.json`, form `token`, `user`, `title`, `message`, optional `url`, `priority`, under the write policy; 5xx Transient, other non-2xx Permanent with Pushover's `errors`, a 429 being the monthly limit). `makeOutage` (`outages.ts`) tracks a failure streak in memory, ended by the first success; Pushover hears once when it has lasted the given time. A failed send is logged (`cannot send the notice to Pushover; trying again at the next failure`). A restart starts a new streak. With `renoticeAfterSeconds`, it re-notifies only that long after its last notice, across streaks.
+
+| Title | By | When | Priority |
+| --- | --- | --- | --- |
+| `sapphire-agent cannot observe` | `Planner` | Observing (Linear or journal) failed for `flagTransientAfterSeconds`; nothing dispatched or watched. Log: `observing failed`. | high |
+| `sapphire-agent cannot read its pause file` | `Reconciler` | First failure; the tick runs as paused. | high |
+| `T3 rejects the sapphire-agent token` | `Reconciler` | Each tick pings T3; on 401 no new run starts (as if paused). Says to rerun `scripts/mint-t3-token.sh`. At most once a day. | high |
+
+T3 being unreachable does not stop dispatch; the calls needing it fail. High (Pushover 1) is for what stops dispatch, normal (0) for the rest. Normal-priority notices besides an epic's comment: a run flagged `stale` (monitoring), a `keptWorktree` (cleanup), and `T3's settings need a change for sapphire-agent` (startup).

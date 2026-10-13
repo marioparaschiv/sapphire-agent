@@ -9,6 +9,7 @@ import { CliError } from 'effect/cli';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { Refused } from './ctl.ts';
 import { Journal, type Run } from './journal.ts';
+import { otherTeam } from './linear-fixture.ts';
 import { t3TokenExpiring } from './t3-fake.ts';
 import { deliveries, makeHarness } from './test-harness.ts';
 
@@ -91,10 +92,24 @@ describe('ctl', () => {
 		}),
 	);
 
-	it.effect('status prints whether dispatching is paused, the projects, each run with its epic state, the commands in flight and the requests waiting', () =>
+	it.effect('status prints whether dispatching is paused, the projects, each run with its epic state, the ready epics held with what blocks them, the commands in flight and the requests waiting', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
 			const { run: started } = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const otherTeamBlocker = h.linear.addEpic({ identifier: 'OPS-3', title: 'Rotate the API keys', teamId: otherTeam.id, state: 'In Progress', subIssues: 0 });
+			const blocker = h.linear.addEpic({ identifier: 'TEST-9', title: 'Retry policy', state: 'To Do', subIssues: 0 });
+			const finished = h.linear.addEpic({ identifier: 'TEST-8', title: 'Old HTTP client', state: 'Done', subIssues: 0 });
+
+			h.linear.addEpic({
+				identifier: 'TEST-11',
+				title: 'Linear service on HttpClient',
+				inverseRelations: [
+					{ type: 'blocks', issueId: otherTeamBlocker.id },
+					{ type: 'blocks', issueId: blocker.id },
+					{ type: 'blocks', issueId: finished.id },
+				],
+			});
+			h.linear.addEpic({ identifier: 'TEST-12', title: 'Unblocked', inverseRelations: [{ type: 'blocks', issueId: finished.id }] });
 			const { number } = h.github.addPullRequest({ repo: h.githubRepo, branch: started.branch, author: 'marioparaschiv' });
 			const mention = h.github.addComment(h.githubRepo, number, '@orchestratorbot stop TEST-10');
 
@@ -107,6 +122,7 @@ describe('ctl', () => {
 				'dispatching: active',
 				`project Test: ${h.repo}`,
 				`TEST-10 running (orchestrate), epic in Implementing, claimed 1970-01-01T00:00:00.000Z, T3 thread ${started.threadId}, session test-10, ${started.worktreePath}`,
+				'TEST-11 held by OPS-3, TEST-9',
 				`CMD-1 running, @marioparaschiv in ${mention.url}`,
 				'request 1: send TEST-10: Wrap up.',
 				'request 2: follow-up TEST-10 threads PRRT_1: Rename it.',

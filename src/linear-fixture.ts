@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Context, Effect, Layer, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
 import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
-import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
+import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type ReadyEpic, type Team } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
 // Linear-shaped payloads and applies mutations, so later reads see them.
@@ -20,6 +20,9 @@ export const postLinearDelivery = (url: string, secret: Redacted.Redacted<string
 		return postJson(url, body, { 'linear-event': 'Issue', 'linear-delivery': randomUUID(), ...(header === null ? {} : { 'linear-signature': header }) });
 	});
 
+// An issue related to another, as Linear lists it among that one's inverse relations: `blocks` for an issue blocking it.
+export type FixtureRelation = { readonly type: string; readonly issueId: string };
+
 export type FixtureIssue = {
 	readonly id: string;
 	readonly identifier: string;
@@ -30,6 +33,7 @@ export type FixtureIssue = {
 	labelIds: ReadonlyArray<string>;
 	readonly sortOrder: number;
 	readonly createdAt: string;
+	readonly inverseRelations: ReadonlyArray<FixtureRelation>;
 };
 
 // A label without teamId is a workspace label; parentName is its label group.
@@ -50,6 +54,7 @@ export type EpicSeed = {
 	readonly createdAt?: string;
 	// Sub-issues to create in the team's first state; defaults to 2.
 	readonly subIssues?: number;
+	readonly inverseRelations?: ReadonlyArray<FixtureRelation>;
 };
 
 export type LabelSeed = { readonly name: string; readonly teamId?: string; readonly parentName?: string };
@@ -62,6 +67,7 @@ export type LinearFixtureShape = {
 	// A comment as a user would post it in Linear.
 	readonly addComment: (issueId: string, body: string) => FixtureComment;
 	readonly issue: (issueId: string) => FixtureIssue;
+	readonly moveIssue: (issueId: string, state: string) => void;
 	// Sub-issues of the epic, in creation order.
 	readonly subIssues: (epicId: string) => ReadonlyArray<FixtureIssue>;
 	readonly stateName: (issueId: string) => string;
@@ -101,6 +107,21 @@ export const testTeam: Team = {
 			{ id: 'state-to-review', name: 'To Review', type: 'started' },
 			{ id: 'state-shipped', name: 'Shipped', type: 'completed' },
 			{ id: 'state-done', name: 'Done', type: 'completed' },
+		],
+	},
+};
+
+// A team sapphire-agent does not watch, whose issues can still block a watched team's epics.
+export const otherTeam: Team = {
+	id: 'team-ops',
+	key: 'OPS',
+	name: 'Ops',
+	states: {
+		nodes: [
+			{ id: 'state-ops-todo', name: 'Todo', type: 'unstarted' },
+			{ id: 'state-ops-in-progress', name: 'In Progress', type: 'started' },
+			{ id: 'state-ops-done', name: 'Done', type: 'completed' },
+			{ id: 'state-ops-canceled', name: 'Canceled', type: 'canceled' },
 		],
 	},
 };
@@ -168,7 +189,7 @@ const readBody = async (request: IncomingMessage) => {
 
 const make = Effect.gen(function* () {
 	const answers = yield* SubscriptionRef.make(0);
-	const teams: Array<Team> = [testTeam];
+	const teams: Array<Team> = [testTeam, otherTeam];
 	const issues = new Map<string, FixtureIssue>();
 	const labels: Array<FixtureLabel> = [];
 	const comments: Array<FixtureComment> = [];
@@ -226,6 +247,17 @@ const make = Effect.gen(function* () {
 		};
 	};
 
+	const toReadyEpic = (found: FixtureIssue): ReadyEpic => ({
+		...toEpic(found),
+		inverseRelations: {
+			nodes: found.inverseRelations.map(({ type, issueId }) => {
+				const related = issue(issueId);
+
+				return { type, issue: { identifier: related.identifier, state: { type: stateOf(related).type } } };
+			}),
+		},
+	});
+
 	const toComment = (found: FixtureComment): Comment => ({ body: found.body });
 
 	const resolve = (operation: Operation, variables: unknown): unknown => {
@@ -242,7 +274,7 @@ const make = Effect.gen(function* () {
 				const { stateIds } = Schema.decodeUnknownSync(variableSchemas.ReadyEpics)(variables);
 				const ready = issueList.filter((candidate) => candidate.parentId === null && stateIds.includes(candidate.stateId));
 
-				return { issues: { nodes: ready.slice(0, 50).map(toEpic) } };
+				return { issues: { nodes: ready.slice(0, 50).map(toReadyEpic) } };
 			}
 
 			case 'Epics': {
@@ -390,7 +422,7 @@ const make = Effect.gen(function* () {
 
 	const fixture: LinearFixtureShape = {
 		url: `${url}/graphql`,
-		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, createdAt = new Date(-86_400_000).toISOString(), subIssues = 2 }) => {
+		addEpic: ({ identifier, title, teamId = testTeamId, state = 'Ready For Agent', labelIds = [], sortOrder = issues.size, createdAt = new Date(-86_400_000).toISOString(), subIssues = 2, inverseRelations = [] }) => {
 			const owner = team(teamId);
 			const epic: FixtureIssue = {
 				id: `issue-${identifier.toLowerCase()}`,
@@ -402,6 +434,7 @@ const make = Effect.gen(function* () {
 				labelIds,
 				sortOrder,
 				createdAt,
+				inverseRelations,
 			};
 
 			issues.set(epic.id, epic);
@@ -417,6 +450,7 @@ const make = Effect.gen(function* () {
 					labelIds: [],
 					sortOrder: index,
 					createdAt,
+					inverseRelations: [],
 				};
 
 				issues.set(child.id, child);
@@ -433,6 +467,11 @@ const make = Effect.gen(function* () {
 		},
 		addComment,
 		issue,
+		moveIssue: (issueId, state) => {
+			const found = issue(issueId);
+
+			found.stateId = find(team(found.teamId).states.nodes, (candidate) => candidate.name === state, `WorkflowState ${state}`).id;
+		},
 		subIssues: (epicId) => [...issues.values()].filter((candidate) => candidate.parentId === epicId),
 		stateName: (issueId) => stateOf(issue(issueId)).name,
 		labelNames: (issueId) => issue(issueId).labelIds.map((id) => label(id).name),
