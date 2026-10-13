@@ -290,6 +290,15 @@ const make = Effect.gen(function* () {
 		children: { nodes: [...issues.values()].filter((candidate) => candidate.parentId === found.id).map(toTracked) },
 	});
 
+	// A sub-issue of the epic in its team's first state.
+	const addChild = (epic: FixtureIssue, child: Pick<FixtureIssue, 'id' | 'identifier' | 'title' | 'sortOrder' | 'createdAt'>) => {
+		const added: FixtureIssue = { ...child, description: null, teamId: epic.teamId, stateId: team(epic.teamId).states.nodes[0].id, parentId: epic.id, labelIds: [], blockedBy: [] };
+
+		issues.set(added.id, added);
+
+		return added;
+	};
+
 	const updateIssue = (issueId: string, update: IssueUpdate, by: FixtureActor = 'owner') => {
 		const found = issue(issueId);
 
@@ -528,21 +537,7 @@ const make = Effect.gen(function* () {
 			issues.set(epic.id, epic);
 
 			for (let index = 1; index <= subIssues; index += 1) {
-				const child: FixtureIssue = {
-					id: `${epic.id}-sub-${index}`,
-					identifier: `${owner.key}-${Number(identifier.split('-')[1]) * 10 + index}`,
-					title: `Slice ${index}`,
-					description: null,
-					teamId,
-					stateId: owner.states.nodes[0].id,
-					parentId: epic.id,
-					labelIds: [],
-					blockedBy: [],
-					sortOrder: index,
-					createdAt,
-				};
-
-				issues.set(child.id, child);
+				addChild(epic, { id: `${epic.id}-sub-${index}`, identifier: `${owner.key}-${Number(identifier.split('-')[1]) * 10 + index}`, title: `Slice ${index}`, sortOrder: index, createdAt });
 			}
 
 			return epic;
@@ -556,26 +551,7 @@ const make = Effect.gen(function* () {
 		},
 		addComment,
 		updateIssue,
-		addSubIssue: (epicId, identifier, title) => {
-			const epic = issue(epicId);
-			const child: FixtureIssue = {
-				id: `issue-${identifier.toLowerCase()}`,
-				identifier,
-				title,
-				description: null,
-				teamId: epic.teamId,
-				stateId: team(epic.teamId).states.nodes[0].id,
-				parentId: epic.id,
-				labelIds: [],
-				blockedBy: [],
-				sortOrder: issues.size,
-				createdAt: now(),
-			};
-
-			issues.set(child.id, child);
-
-			return child;
-		},
+		addSubIssue: (epicId, identifier, title) => addChild(issue(epicId), { id: `issue-${identifier.toLowerCase()}`, identifier, title, sortOrder: issues.size, createdAt: now() }),
 		issue,
 		subIssues: (epicId) => [...issues.values()].filter((candidate) => candidate.parentId === epicId),
 		stateName: (issueId) => stateOf(issue(issueId)).name,
