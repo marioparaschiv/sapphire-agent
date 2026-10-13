@@ -29,7 +29,7 @@ describe('Linear reads', () => {
 					[
 						'Test',
 						'TEST',
-						['To Do:unstarted', 'Ready For Agent:unstarted', 'Implementing:started', 'In Review:started', 'To Review:started', 'Shipped:completed', 'Done:completed'],
+						['To Do:unstarted', 'Ready For Agent:unstarted', 'Implementing:started', 'In Review:started', 'To Review:started', 'Shipped:completed', 'Done:completed', 'Canceled:canceled'],
 					],
 				],
 			);

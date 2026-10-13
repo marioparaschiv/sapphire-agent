@@ -111,6 +111,19 @@ T3 makes a new worktree after the launch answered; the start rule records its pa
 
 A step that fails Permanently, or a claim not started within `startTimeoutSeconds` (counted from the claim, or from the process start if later, so a restart gets a full window), fails the start: a `startFailed` flag. An initial run becomes `error` and stays in Ready. A follow-up goes back to `ended` in To Review (moving the epic back if needed), keeping its worktree; its request is gone, so once the label is removed it takes a new one.
 
+## 9. Epic edits
+
+Not paused. Tells a run's agent when its epic or sub-issues are edited while the run is in flight (`claimed`, `running`, `stale`): a title, description, state, label set or blockers (`blocks` relations onto the issue), or a sub-issue added or removed. Comments are not compared, so they never count.
+
+- The epic and its sub-issues are snapshotted (`epic_snapshots`) on the tick of the claim, after the start moved the epic, and again whenever the run's claim is newer than the snapshot. A snapshot whose run is no longer in flight is deleted.
+- Each tick reads the tree again (`epicTree`) and compares. Who made an edit cannot tell the bot from the owner: sapphire-agent's API key is the owner's, and the run's agent edits through the Linear MCP server as the owner too. So the edits the bot makes by design are left out by what they are: any state change of the epic (sapphire-agent and the orchestrator own it), a sub-issue moving to Implementing (`states.implementing`) or Done, and the stuck label on the epic. Every other sub-issue move (to Canceled, back to To Do, ...) counts.
+- Linear's automations are left out too: for each remaining difference, the issue's history since the snapshot is read (`issueHistories`), and a difference whose every entry touching that field has a `botActor` is an automation's. One with no such entry counts.
+- Differences left out are taken into the snapshot without a message.
+- The edits that count are recorded with when they last changed. Once `editDebounceSeconds` passed since then, `claude -p --model <summaryModel>` condenses them into a few lines (`Summariser`); if that fails, the edits go as listed (each issue, field, and the text before and after). The message ends by asking the agent to re-read the named issues and adjust before it continues, and goes to the run's thread with mode `auto` (it steers a working agent, or starts a turn in an idle thread), keyed `edits-<claimedAt>-<editedAt>` so a resend after a crash is dropped by T3. Then the snapshot is taken again. A run whose thread has not started yet keeps its edits until it has.
+- `wakeForEpicEdits` (started by `main.ts`) reads the journal every 5 s and wakes the reconciler when a run's edits have waited their window, so they go out then rather than at the next poll.
+
+It only sends: no plan is rewritten and no run restarted.
+
 ## Mentions
 
 Not a rule: mentions come in as GitHub App webhook deliveries, which the webhook server (`webhook-server.ts`, on `127.0.0.1:<bot.app.webhookPort>`) turns into commands as they arrive, at most once per comment:
@@ -146,7 +159,7 @@ A refused tool call gets Claude's PreToolUse answer, `{"hookSpecificOutput":{"ho
 
 A run finishing its turn, failing or waiting for input is not sent to Pushover: T3's own device notifications cover it (`operations.md`).
 
-## 9. Commands
+## 10. Commands
 
 Not paused. Runs the command agents, one at a time, oldest first. Command statuses: `ignored`, `queued` (waiting for its turn), `claimed` (its turn came; being started), `running`, `ended` (the agent said it was done; its thread settled), `error` (failed; a reply on its comment said so; its thread interrupted and settled). Commands hold no `maxInFlight` slot: a stop or a pause must work while every slot is taken, so at most `maxInFlight` runs plus one command agent are alive.
 
@@ -172,7 +185,7 @@ Its prompt names it (`CMD-<n>`), the author, the comment's URL and repo, and quo
 
 T3 cannot pass Claude `--restricted` or `--tools`, so the `PreToolUse` guard keeps a command thread read-only, by its `cwd` under `$STATE/commands`: `Bash` runs without asking when every simple command is `sh <ctl.sh> ...` or one of the read-only `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `git log`, `git show`, `git diff`, `git status` (`git ... --output`, any redirection to a file, and a command substitution, `$(...)` or backticks, even inside double quotes, excepted), otherwise it is refused; `Write`, `Edit`, `MultiEdit` and `NotebookEdit` are refused; `Read`, `Grep`, `Glob` and `SendMessage` are allowed. Tools the hook's matcher does not send are left to T3's approvals. Only allowed users' comments reach an agent at all. What it can still do is what `ctl.sh` does (`reply` only answers a command's comment; `project` is allowed too, though its prompt does not name it), and what a run it messages or a follow-up it asks for then does.
 
-## 10. Notices
+## 11. Notices
 
 Not pausable. Every status message for the user is a notice: a short markdown text keyed by a marker (`journal-and-markers.md`), put in the journal's outbox (`notices`) by the rule that has something to say, at most once per marker. This rule runs last and posts each unsent notice, oldest first, as a comment on its epic ending with its marker (`Linear.comment`, which skips it when the epic has the marker already), then marks it sent. The epic is found in the tick's observation, else read by identifier; a notice whose epic Linear does not have is logged and dropped.
 

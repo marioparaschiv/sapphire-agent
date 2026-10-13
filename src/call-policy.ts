@@ -29,6 +29,7 @@ export const callTimeouts = {
 	gh: Duration.seconds(20),
 	linear: Duration.seconds(20),
 	pushover: Duration.seconds(20),
+	claude: Duration.seconds(60),
 } as const;
 
 const maxRetries = 3;

@@ -174,6 +174,53 @@ const T3ProjectRow = Schema.Struct({ repo: Schema.String, projectId: Schema.Stri
 
 type T3ProjectRow = typeof T3ProjectRow.Type;
 
+// An issue of a run's epic, the epic itself or a sub-issue, as the epic-edits rule last compared it. Labels and blockers
+// are sorted names and identifiers.
+export const IssueSnapshot = Schema.Struct({
+	id: Schema.String,
+	identifier: Schema.String,
+	title: Schema.String,
+	description: Schema.String,
+	state: Schema.String,
+	labels: Schema.Array(Schema.String),
+	blockedBy: Schema.Array(Schema.String),
+});
+
+export type IssueSnapshot = typeof IssueSnapshot.Type;
+
+export const EditedField = Schema.Literals(['title', 'description', 'state', 'labels', 'blockedBy', 'subIssue']);
+
+export type EditedField = typeof EditedField.Type;
+
+// One field of one issue that changed since the snapshot. A sub-issue that was added has `before` null, one that was
+// removed `after` null, each with its title. Labels and blockers are comma-separated; none is null.
+export const EpicEdit = Schema.Struct({
+	issueId: Schema.String,
+	identifier: Schema.String,
+	field: EditedField,
+	before: Schema.NullOr(Schema.String),
+	after: Schema.NullOr(Schema.String),
+});
+
+export type EpicEdit = typeof EpicEdit.Type;
+
+// What an in-flight run's agent knows of its epic and sub-issues: as they were at the claim, or when the agent was last
+// told of edits to them.
+export const EpicSnapshot = Schema.Struct({
+	epicId: Schema.String,
+	// The claim of the run it was taken for; a later claim of the epic takes its own.
+	claimedAt: Millis,
+	// When Linear was read for it. Linear's history since then says who made an edit.
+	takenAt: Millis,
+	// The epic first.
+	issues: Schema.fromJsonString(Schema.Array(IssueSnapshot)),
+	// The edits by others not yet sent, and when they last changed; none while there are none.
+	edits: Schema.NullOr(Schema.fromJsonString(Schema.Array(EpicEdit))),
+	editedAt: Schema.NullOr(Millis),
+});
+
+export type EpicSnapshot = typeof EpicSnapshot.Type;
+
 export type JournalError = SqlError.SqlError | Schema.SchemaError;
 
 export const journalPath = (stateDirectory: string) => join(stateDirectory, 'journal.db');
@@ -451,6 +498,20 @@ const migrations = SqliteMigrator.layer({
 			// Notices no rule writes any more are not posted.
 			yield* sql`UPDATE notices SET sent_at = created_at WHERE sent_at IS NULL AND purpose IN ('awaitingInput', 'error', 'workingOrphan')`;
 		}),
+		'0018_create_epic_snapshots': Effect.gen(function* () {
+			const sql = yield* SqlClient.SqlClient;
+
+			yield* sql`
+				CREATE TABLE epic_snapshots (
+					epic_id TEXT PRIMARY KEY,
+					claimed_at INTEGER NOT NULL,
+					taken_at INTEGER NOT NULL,
+					issues TEXT NOT NULL,
+					edits TEXT,
+					edited_at INTEGER
+				)
+			`;
+		}),
 	}),
 });
 
@@ -498,6 +559,10 @@ export class Journal extends Context.Service<
 		readonly listT3Projects: Effect.Effect<ReadonlyArray<T3ProjectRow>, JournalError>;
 		// Inserts the row or replaces the one of the same repo.
 		readonly putT3Project: (row: T3ProjectRow) => Effect.Effect<void, JournalError>;
+		readonly listEpicSnapshots: Effect.Effect<ReadonlyArray<EpicSnapshot>, JournalError>;
+		// Inserts the snapshot or replaces the one of the same epic.
+		readonly putEpicSnapshot: (snapshot: EpicSnapshot) => Effect.Effect<void, JournalError>;
+		readonly deleteEpicSnapshot: (epicId: string) => Effect.Effect<void, JournalError>;
 	}
 >()('sapphire-agent/Journal') {
 	static readonly layer = (filename: string) =>
@@ -672,6 +737,22 @@ export class Journal extends Context.Service<
 					execute: (row) => sql`INSERT OR REPLACE INTO t3_projects ${sql.insert(row)}`,
 				});
 
+				const listEpicSnapshots = SqlSchema.findAll({
+					Request: Schema.Void,
+					Result: EpicSnapshot,
+					execute: () => sql`SELECT * FROM epic_snapshots ORDER BY epic_id`,
+				})(undefined);
+
+				const putEpicSnapshot = SqlSchema.void({
+					Request: EpicSnapshot,
+					execute: (row) => sql`INSERT OR REPLACE INTO epic_snapshots ${sql.insert(row)}`,
+				});
+
+				const deleteEpicSnapshot = SqlSchema.void({
+					Request: EpicId,
+					execute: (epicId) => sql`DELETE FROM epic_snapshots WHERE epic_id = ${epicId}`,
+				});
+
 				return Journal.of({
 					getRun,
 					listRuns,
@@ -697,6 +778,9 @@ export class Journal extends Context.Service<
 					getT3Project,
 					listT3Projects,
 					putT3Project,
+					listEpicSnapshots,
+					putEpicSnapshot,
+					deleteEpicSnapshot,
 				});
 			}),
 		).pipe(

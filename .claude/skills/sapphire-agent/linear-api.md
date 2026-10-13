@@ -16,6 +16,8 @@ The `Linear` service (`src/linear.ts`), how team states and labels are resolved,
 | `readyEpics(stateIds)` | Top-level issues (`parent: null`) in the ready states, first 50. Every tick. More than 50 are cut off. |
 | `epics(ids)` | The journal's epics wherever they are now. Every tick. More than 250 fails Permanently, because a truncated page would make epics that still exist look gone. |
 | `epicsByIdentifier(identifiers)` | Epics named by worktree branches that are not known otherwise (matched by team key and number), by `sapphire dispatch`, and the epics of notices the tick did not observe. |
+| `epicTree(epicId)` | The epic and its sub-issues (first 50) with title, description, state, labels and `blocks` relations onto them, for the epic-edits rule. Every tick, per run in flight. |
+| `issueHistories(ids)` | The newest 50 history entries of each issue (`botActor`, and the title, description, state, label, relation and parent changes), to tell an edit by one of Linear's automations (`botActor` set) from the others. Only for issues with a difference the epic-edits rule does not leave out by design. |
 | `moveIssue(issueId, stateId)` | Move the epic to Implementing or To Review (or to Ready, by `sapphire dispatch`). |
 | `comment(issueId, comment)` | Post `PR opened: <url>` and every notice, unless a comment on the epic (every one, paged) carries its marker already. |
 | `addLabel(issueId, teamId, name)` | Add `agent-stuck`. |

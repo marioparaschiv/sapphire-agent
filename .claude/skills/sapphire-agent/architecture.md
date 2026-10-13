@@ -38,10 +38,11 @@ Rules run in this order (`rules.ts`):
 | 6 | follow-up | yes | Claims a follow-up run for a follow-up request, once the epic's run ended. |
 | 7 | dispatch | yes | Claims ready epics up to `maxInFlight`. |
 | 8 | start | no | Takes each claimed run through its T3 thread and the move to Implementing; records a run's worktree once T3 made it. |
-| 9 | commands | no | Runs the command agents one at a time: starts the next, watches the running one, posts its replies on GitHub as the bot, ends it when it is done or fails it. |
-| 10 | notices | no | Posts the journal's outbox of notices as comments on their epics in Linear. |
+| 9 | epic-edits | no | Tells a run's agent, in one message per debounce window, of edits to its epic or sub-issues since the snapshot, leaving out the ones the bot makes by design and Linear's automations. |
+| 10 | commands | no | Runs the command agents one at a time: starts the next, watches the running one, posts its replies on GitHub as the bot, ends it when it is done or fails it. |
+| 11 | notices | no | Posts the journal's outbox of notices as comments on their epics in Linear. |
 
-Why this order: requests come first, so a stopped run is ended before any other rule looks at it. Cleanup and results end runs before monitoring looks at them, so one tick never flags a run it just ended. Handoffs follow monitoring, which records when the thread last showed progress. Claims come next, follow-ups before ready epics since both count against `maxInFlight`, so the start rule starts them in the same tick. Notices go last, so what every rule wrote this tick is posted in it. Commands are not pausable: `resume` itself comes in as a command. Rules run one after another, so two rules never act on the same epic at once, and each sees in the journal what the rules before it wrote.
+Why this order: requests come first, so a stopped run is ended before any other rule looks at it. Cleanup and results end runs before monitoring looks at them, so one tick never flags a run it just ended. Handoffs follow monitoring, which records when the thread last showed progress. Claims come next, follow-ups before ready epics since both count against `maxInFlight`, so the start rule starts them in the same tick. Epic edits follow the start, so a run claimed this tick has its epic snapshotted after the start moved it. Notices go last, so what every rule wrote this tick is posted in it. Commands are not pausable: `resume` itself comes in as a command. Rules run one after another, so two rules never act on the same epic at once, and each sees in the journal what the rules before it wrote.
 
 Pausing (`sapphire pause`) skips the pausable rules only: nothing new is claimed, but claimed runs still start, runs in flight are still watched, posted and cleaned up, and mentions still run commands. If the pause file cannot be read, the tick runs as paused and Pushover is told (Outages).
 
@@ -78,12 +79,12 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `T3Config` | `config.ts` | T3's URL and the token from `t3.tokenFile`, with its expiry from the `exp` claim; read by the service and the CLI. | `T3Config.layerTest` |
 | `T3` | `t3.ts` | MCP client of T3 Code over `HttpClient` (`POST <url>/mcp`, bearer token): opens a session (`initialize`, then `notifications/initialized`; `mcp-session-id` and `mcp-protocol-version` on every later request), reopens it on a 404, reads JSON or server-sent event replies and prefers `structuredContent`. `ping`, projects (list, create) and threads (launch, list, read, wait, send, interrupt, settle), each result decoded to the fields the rules use. | `FakeT3.layer`: in-memory projects, threads, runs, subagents and settling, under the same call policy; `rejectToken` and `hang`. The live layer is tested against a local MCP server answering recorded results (`src/fixtures/t3`). |
 | `T3Projects` | `t3-projects.ts` | `projectFor(repo)`: the T3 project id of a team repo or a label repo, from the journal, else T3's project with that workspace root, else a new one; remembered in the journal, one lookup at a time. | Real, over `FakeT3`. |
-| `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, moves, labels, comments (`PR opened` and the notices). | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
+| `Linear` | `linear.ts` | GraphQL over `HttpClient`: teams, epics, the trees of epics in flight and their history, moves, labels, comments (`PR opened` and the notices). | `LinearFixture.layer`: a real HTTP server with the real `Linear` layer pointed at it. |
 | `GitHub` | `github.ts` | `gh` CLI: PR lookup as the user; thread replies and resolves, issue and PR comments and thumbs-ups as the GitHub App. | `FakeGitHub.layer` |
 | `GitHubApp` | `github-app.ts` | GitHub App auth over `HttpClient`: its `<slug>[bot]` login, read at startup, and installation tokens, cached per installation. | `GitHubAppFixture.layer`: a real HTTP server with the real `GitHubApp` layer pointed at it. |
 | `Git` | `git.ts` | Worktrees, pull, unsaved-work check, removal, origin's GitHub repo, the result file. | Real git in temp repos. |
 | `ClaudeTranscript` | `claude-transcript.ts` | Reads the context of a run's Claude session or one of its subagents from its transcript in `~/.claude/projects` (`contextTokens`, reading only what was appended since the last call). | Real temp files, written by `claude-transcript-fixture.ts`. |
-| `Journal` | `journal.ts` | SQLite journal of runs, transient failure streaks, commands, requests, projects, notices, subagent handoffs and the T3 project of each repo. | `Journal.layer(':memory:')` or a temp file. |
+| `Journal` | `journal.ts` | SQLite journal of runs, transient failure streaks, commands, requests, projects, notices, subagent handoffs, the T3 project of each repo and the snapshots of the epics in flight. | `Journal.layer(':memory:')` or a temp file. |
 | `Projects` | `projects.ts` | The projects, read from the journal at startup (importing config `teams` into an empty table) and kept in memory; `list`, `get`, `put`, `remove`, `changes`. Its only writer. | Real, over the journal. |
 | `Pause` | `pause.ts` | The pause file: its `path`, whether it exists, and `pause` and `resume`, which create and remove it. | Real temp dir. |
 | `Prompts` | `prompts.ts` | Thread titles, the orchestrate, follow-up and command prompts, and the handoff prompts. | Pure. |
@@ -93,6 +94,7 @@ Each is an Effect `Context.Service` with a live layer; the externals have a test
 | `Reconciler` | `reconciler.ts` | The tick loop and `wake`. | Real. |
 | `WebhookServer` | `webhook-server.ts` | GitHub App webhook deliveries in, commands recorded, the reconciler woken; Linear deliveries in, the reconciler woken; exposes the `url` it listens on. | Real, on port 0 (`makeHarness` builds it; `h.deliver` posts signed deliveries). |
 | `AgentEventServer` | `agent-event-server.ts` | Agent session events in from `sapphire hook`, `session` requests recorded, the reconciler woken; exposes the socket `path`. | Real, on a socket in the harness's dir (`h.hook` runs the real `ctl.sh hook`). |
+| `Summariser` | `summariser.ts` | `summarise(prompt)`: `claude -p --model <summaryModel>` with the prompt on stdin, no tools and no saved session; one attempt with a 60 s timeout. Fails Permanent on a non-zero exit. | `FakeSummariser.layer` |
 | `Pushover` | `pushover.ts` | `send`: a phone notification (`POST https://api.pushover.net/1/messages.json`, form `token`, `user`, `title`, `message`, optional `url`, `priority`) under the write policy; 5xx are Transient, other non-2xx Permanent with Pushover's `errors` (a 429 is the monthly message limit, which a retry cannot help). | `FakePushover.layer` |
 
 Rules are not services: each rule module exports an Effect that builds its `Rule` (`name`, `pausable`, `plan`) from the services it needs, and `Planner.layer` takes them all. Shared run actions (flag an epic, end a run, and interrupt, settle or send to a run's or command's thread) live in `run-actions.ts`. The context check of the agent event server (`makeContextCheck`) lives beside the handoff rule in `handoffs.ts`.
@@ -103,7 +105,7 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 2. `refuseUndrainedClaims` (`legacy-claims.ts`) stops startup while `$STATE/claims.json` of the old dispatcher still holds claims, and says to drain first (`operations.md`).
 3. Only then are the services built: the journal opens `$STATE/journal.db` and runs its migrations, `Projects` reads the projects (importing config `teams` while there are none, and warning while `teams` is in the config), `GitHubApp` reads the App's slug from GitHub (`GET /app`), `T3Config` reads the T3 token (a problem with it is a `StartupError` of its own), the webhook server starts listening (logging `listening for GitHub webhook deliveries on <url> and Linear ones on <url>/linear`), and so does the agent event server (`listening for agent events on <path>`). A failure there, e.g. the port taken, stops startup.
 4. Checks T3's settings file (`t3.settingsFile`) for the projects' repos and tells Pushover once if T3 would remove their worktrees itself or not settle merged threads (`checkT3Settings`, `t3-settings.ts`; no MCP tool reads or changes them).
-5. Logs `watching <projects> every <n>s, at most <n> in flight` (`no projects` without any), forks a fiber that runs `watchThreads`, one that calls it on every change to the projects and one that calls `wake` whenever the state directory's `wake` file is written, and runs the reconciler.
+5. Logs `watching <projects> every <n>s, at most <n> in flight` (`no projects` without any), forks a fiber that runs `watchThreads`, one that runs `wakeForEpicEdits`, one that calls it on every change to the projects and one that calls `wake` whenever the state directory's `wake` file is written, and runs the reconciler.
 
 `NodeRuntime.runMain` runs it; SIGTERM interrupts the tick cleanly. Logs go to stdout with `epic` and `rule` annotations.
 
@@ -142,6 +144,8 @@ Rules are not services: each rule module exports an Effect that builds its `Rule
 | `src/agent-activity.ts` | `AgentActivity`: when each T3 run's agent or subagents last sent a hook event, in memory, for monitoring. |
 | `src/claude-hooks.ts` | Claude Code's hook payloads to `AgentEvent`. |
 | `src/notices.ts` | Notices rule: the outbox to comments on the epics. |
+| `src/epic-edits.ts` | Epic edits rule and `wakeForEpicEdits`. |
+| `src/summariser.ts` | `Summariser` service. |
 | `src/outages.ts` | `makeOutage`: a failure streak of the whole service, sent to Pushover once. |
 | `src/commands.ts` | Commands rule. |
 | `src/cleanup.ts` | Cleanup rule and orphans. |

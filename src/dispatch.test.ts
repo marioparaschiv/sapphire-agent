@@ -239,8 +239,8 @@ describe('dispatch', () => {
 				assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
 			}
 
-			// The claim, the launched thread and the confirmed start each end with a journal write.
-			assert.deepStrictEqual(crashPoints, [1, 2, 3]);
+			// The claim, the launched thread, the confirmed start and the epic's snapshot each end with a journal write.
+			assert.deepStrictEqual(crashPoints, [1, 2, 3, 4]);
 		}),
 	);
 

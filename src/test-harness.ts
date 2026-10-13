@@ -27,6 +27,7 @@ import { Prompts } from './prompts.ts';
 import { FakePushover, type FakePushoverControls } from './pushover-fake.ts';
 import { Reconciler } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { FakeSummariser, type FakeSummariserControls } from './summariser-fake.ts';
 import { FakeT3, type FakeT3Controls } from './t3-fake.ts';
 import { T3Projects } from './t3-projects.ts';
 import { WebhookServer } from './webhook-server.ts';
@@ -116,6 +117,8 @@ export type Harness = {
 	// What the service sent to Pushover.
 	readonly pushover: FakePushoverControls;
 	readonly t3: FakeT3Controls;
+	// The summary model: the prompts it got, and its answer from now on.
+	readonly summariser: FakeSummariserControls;
 	// Sends the delivery to the current webhook server, as postDelivery does with the configured secret; returns the HTTP
 	// status.
 	readonly deliver: (delivery: WebhookDelivery, signature?: string | null) => Effect.Effect<number>;
@@ -218,7 +221,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 
 		const config = AppConfig.layerTest(dir, settings);
 		const fixtures = yield* Layer.build(
-			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakePushover.layer, FakeT3.layer(t3SettingsFile)).pipe(Layer.provideMerge(config)),
+			Layer.mergeAll(LinearFixture.layer, FakeGitHub.layer.pipe(Layer.provideMerge(GitHubAppFixture.layer)), FakePushover.layer, FakeT3.layer(t3SettingsFile), FakeSummariser.layer).pipe(Layer.provideMerge(config)),
 		);
 		let journalWrites = 0;
 		let crashAt = Option.none<number>();
@@ -253,6 +256,8 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 					addNotice: (notice) => crashPoint.pipe(Effect.andThen(journal.addNotice(notice))),
 					addSubagentHandoff: (handoff) => crashPoint.pipe(Effect.andThen(journal.addSubagentHandoff(handoff))),
 					markNoticeSent: (id) => crashPoint.pipe(Effect.andThen(journal.markNoticeSent(id))),
+					putEpicSnapshot: (snapshot) => crashPoint.pipe(Effect.andThen(journal.putEpicSnapshot(snapshot))),
+					deleteEpicSnapshot: (epicId) => crashPoint.pipe(Effect.andThen(journal.deleteEpicSnapshot(epicId))),
 				});
 			}),
 		).pipe(Layer.provide(Journal.layer(join(dir, 'journal.db'))));
@@ -330,6 +335,7 @@ export const makeHarness = (settings: Parameters<typeof AppConfig.layerTest>[1] 
 			github: Context.get(fixtures, FakeGitHub),
 			pushover: Context.get(fixtures, FakePushover),
 			t3: Context.get(fixtures, FakeT3),
+			summariser: Context.get(fixtures, FakeSummariser),
 			deliver: (delivery: WebhookDelivery, signature?: string | null) => services.pipe(Effect.flatMap((context) => postDelivery(Context.get(context, WebhookServer).url, webhookSecret, delivery, signature))),
 			tick: tick(false),
 			pausedTick: tick(true),

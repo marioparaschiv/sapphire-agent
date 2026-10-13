@@ -7,6 +7,7 @@ import { AgentEventServer } from './agent-event-server.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { Comments } from './comments.ts';
 import { AppConfig, PushoverConfig, T3Config } from './config.ts';
+import { wakeForEpicEdits } from './epic-edits.ts';
 import { Git } from './git.ts';
 import { GitHub } from './github.ts';
 import { GitHubApp } from './github-app.ts';
@@ -21,6 +22,7 @@ import { Prompts } from './prompts.ts';
 import { Pushover } from './pushover.ts';
 import { Reconciler, wakeFileName } from './reconciler.ts';
 import { rules } from './rules.ts';
+import { Summariser } from './summariser.ts';
 import { T3 } from './t3.ts';
 import { T3Projects } from './t3-projects.ts';
 import { checkT3Settings } from './t3-settings.ts';
@@ -29,7 +31,7 @@ import { WebhookServer } from './webhook-server.ts';
 
 const JournalLive = Layer.unwrap(AppConfig.useSync(({ env }) => Journal.layer(journalPath(env.stateDirectory))));
 
-const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTranscript.layer, Comments.layer, Pushover.layer()).pipe(
+const ServicesLive = Layer.mergeAll(Linear.layer(), GitHub.layer, Git.layer, ClaudeTranscript.layer, Comments.layer, Pushover.layer(), Summariser.layer).pipe(
 	Layer.provideMerge(Prompts.layer),
 	Layer.provideMerge(GitHubApp.layer()),
 );
@@ -54,6 +56,7 @@ const program = Effect.gen(function* () {
 
 	yield* checkT3Settings;
 	yield* Effect.forkChild(watchThreads);
+	yield* Effect.forkChild(wakeForEpicEdits);
 	// A project the requests rule changed is observed on the tick after.
 	yield* Effect.forkChild(Stream.runForEach(Stream.drop(projects.changes, 1), () => reconciler.wake));
 	yield* Effect.forkChild(

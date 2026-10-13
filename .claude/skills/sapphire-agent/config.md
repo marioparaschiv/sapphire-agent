@@ -38,6 +38,8 @@ Decoded with an Effect `Schema`. The schema is strict: an unknown key fails star
 | `maxRunSeconds` | `5400` | int, min 600. Wall-clock cap from the claim; the epic is flagged once, in any in-flight state. The run keeps going. |
 | `handoffAtTokens` | `250000` | int, min 10000. Context (input, cache read and cache creation tokens of the latest assistant entry) at which a run's agent, or one of its subagents, hands its work to a fresh session (`rules.md`, Handoff). |
 | `flagTransientAfterSeconds` | `600` | int, min 60. How long an epic's work may keep failing with Transient errors before a `transientFailure` notice is sent once (see `failure-policy.md`). Also how long observing may keep failing before Pushover is told once. |
+| `editDebounceSeconds` | `60` | int, min 0. Edits to a run's epic or sub-issues are sent to its agent in one message once none came for this long (`rules.md`, Epic edits). |
+| `summaryModel` | `claude-haiku-5-5` | The model `claude -p` condenses those edits with. If the call fails, the edits are sent as listed. |
 | `worktreesDirectory` | `~/.t3/worktrees` | `~` expanded. Where T3 creates worktrees (T3's own setting, keep the two equal); the run guards treat `<worktreesDirectory>/<repo>/<branch slug>` as a dispatched run's worktree. |
 | `states.*` | see below | Exact Linear workflow state names. |
 | `labels.stuck` | `agent-stuck` | Label added with every flag. |

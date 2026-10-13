@@ -412,7 +412,7 @@ describe('Journal', () => {
 			assert.deepStrictEqual(reopened, [followUp]);
 			assert.deepStrictEqual(
 				tables.map(({ name }) => name),
-				['commands', 'effect_sql_migrations', 'notices', 'projects', 'requests', 'runs', 'subagent_handoffs', 't3_projects', 'transient_failures'],
+				['commands', 'effect_sql_migrations', 'epic_snapshots', 'notices', 'projects', 'requests', 'runs', 'subagent_handoffs', 't3_projects', 'transient_failures'],
 			);
 		}).pipe(Effect.provide(NodeFileSystem.layer)),
 	);

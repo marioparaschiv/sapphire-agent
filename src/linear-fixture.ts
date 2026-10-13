@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Context, Effect, Layer, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
+import { Clock, Context, Effect, Layer, Redacted, Schema, Stream, SubscriptionRef } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
 import { hmacHex, postJson, serveFixture } from './fixture-server.ts';
-import { type Comment, type Epic, Linear, MAX_PAGE_SIZE, type Team } from './linear.ts';
+import { type Comment, type Epic, type EpicTree, type HistoryEntry, Linear, MAX_PAGE_SIZE, type Team, type TrackedIssue } from './linear.ts';
 
 // A stand-in for api.linear.app/graphql: it understands the operations the Linear service sends, answers with
 // Linear-shaped payloads and applies mutations, so later reads see them.
@@ -20,16 +20,33 @@ export const postLinearDelivery = (url: string, secret: Redacted.Redacted<string
 		return postJson(url, body, { 'linear-event': 'Issue', 'linear-delivery': randomUUID(), ...(header === null ? {} : { 'linear-signature': header }) });
 	});
 
+// Who changes an issue: the owner, in Linear or through sapphire-agent's API key or the run's agent's Linear MCP server,
+// all recorded alike, or one of Linear's automations.
+export type FixtureActor = 'owner' | 'automation';
+
 export type FixtureIssue = {
 	readonly id: string;
 	readonly identifier: string;
-	readonly title: string;
+	title: string;
+	description: string | null;
 	readonly teamId: string;
 	stateId: string;
-	readonly parentId: string | null;
+	parentId: string | null;
 	labelIds: ReadonlyArray<string>;
+	// Identifiers of the issues that block it.
+	blockedBy: ReadonlyArray<string>;
 	readonly sortOrder: number;
 	readonly createdAt: string;
+};
+
+// A change to an issue's fields, as a user or app makes it in Linear. `state` is a state name of the issue's team.
+export type IssueUpdate = {
+	readonly title?: string;
+	readonly description?: string;
+	readonly state?: string;
+	readonly labelIds?: ReadonlyArray<string>;
+	readonly blockedBy?: ReadonlyArray<string>;
+	readonly parentId?: string | null;
 };
 
 // A label without teamId is a workspace label; parentName is its label group.
@@ -61,6 +78,10 @@ export type LinearFixtureShape = {
 	readonly addLabel: (seed: LabelSeed) => FixtureLabel;
 	// A comment as a user would post it in Linear.
 	readonly addComment: (issueId: string, body: string) => FixtureComment;
+	// Applies the change and records it in the issue's history as made by `by` (default the owner) at the current time.
+	readonly updateIssue: (issueId: string, update: IssueUpdate, by?: FixtureActor) => void;
+	// A new sub-issue of the epic in the team's first state.
+	readonly addSubIssue: (epicId: string, identifier: string, title: string) => FixtureIssue;
 	readonly issue: (issueId: string) => FixtureIssue;
 	// Sub-issues of the epic, in creation order.
 	readonly subIssues: (epicId: string) => ReadonlyArray<FixtureIssue>;
@@ -101,6 +122,7 @@ export const testTeam: Team = {
 			{ id: 'state-to-review', name: 'To Review', type: 'started' },
 			{ id: 'state-shipped', name: 'Shipped', type: 'completed' },
 			{ id: 'state-done', name: 'Done', type: 'completed' },
+			{ id: 'state-canceled', name: 'Canceled', type: 'canceled' },
 		],
 	},
 };
@@ -113,6 +135,8 @@ const variableSchemas = {
 	Teams: Schema.Struct({ names: Ids }),
 	ReadyEpics: Schema.Struct({ stateIds: Ids }),
 	Epics: Schema.Struct({ ids: Ids }),
+	EpicTree: Schema.Struct({ id: Schema.String }),
+	IssueHistories: Schema.Struct({ ids: Ids }),
 	EpicsByIdentifier: Schema.Struct({
 		filter: Schema.Struct({
 			or: Schema.Array(
@@ -166,12 +190,28 @@ const readBody = async (request: IncomingMessage) => {
 	return Buffer.concat(chunks).toString('utf8');
 };
 
+const botActors = { owner: null, automation: { type: 'workflow' } } as const;
+
+const noChange = {
+	fromTitle: null,
+	toTitle: null,
+	updatedDescription: null,
+	toStateId: null,
+	addedLabelIds: null,
+	removedLabelIds: null,
+	relationChanges: null,
+	fromParentId: null,
+	toParentId: null,
+} as const;
+
 const make = Effect.gen(function* () {
+	const clock = yield* Clock.Clock;
 	const answers = yield* SubscriptionRef.make(0);
 	const teams: Array<Team> = [testTeam];
 	const issues = new Map<string, FixtureIssue>();
 	const labels: Array<FixtureLabel> = [];
 	const comments: Array<FixtureComment> = [];
+	const histories = new Map<string, Array<HistoryEntry>>();
 	const mutations: Array<string> = [];
 	const authorizations = new Set<string>();
 	const writeFailures = new Map<number, WriteFailure>();
@@ -228,6 +268,69 @@ const make = Effect.gen(function* () {
 
 	const toComment = (found: FixtureComment): Comment => ({ body: found.body });
 
+	const now = () => new Date(clock.currentTimeMillisUnsafe()).toISOString();
+
+	// Newest first, as Linear answers.
+	const record = (issueId: string, by: FixtureActor, change: Partial<HistoryEntry>) => {
+		histories.set(issueId, [{ ...noChange, ...change, createdAt: now(), botActor: botActors[by] }, ...(histories.get(issueId) ?? [])]);
+	};
+
+	const toTracked = (found: FixtureIssue): TrackedIssue => ({
+		id: found.id,
+		identifier: found.identifier,
+		title: found.title,
+		description: found.description,
+		state: { name: stateOf(found).name },
+		labels: { nodes: found.labelIds.map(label).map(({ name }) => ({ name })) },
+		inverseRelations: { nodes: found.blockedBy.map((identifier) => ({ type: 'blocks', issue: { identifier } })) },
+	});
+
+	const toTree = (found: FixtureIssue): EpicTree => ({
+		...toTracked(found),
+		children: { nodes: [...issues.values()].filter((candidate) => candidate.parentId === found.id).map(toTracked) },
+	});
+
+	const updateIssue = (issueId: string, update: IssueUpdate, by: FixtureActor = 'owner') => {
+		const found = issue(issueId);
+
+		if (update.title !== undefined) {
+			record(found.id, by, { fromTitle: found.title, toTitle: update.title });
+			found.title = update.title;
+		}
+
+		if (update.description !== undefined) {
+			record(found.id, by, { updatedDescription: true });
+			found.description = update.description;
+		}
+
+		if (update.state !== undefined) {
+			const stateName = update.state;
+
+			found.stateId = find(team(found.teamId).states.nodes, (state) => state.name === stateName, `WorkflowState ${stateName}`).id;
+			record(found.id, by, { toStateId: found.stateId });
+		}
+
+		if (update.labelIds !== undefined) {
+			const labelIds = update.labelIds;
+
+			record(found.id, by, { addedLabelIds: labelIds.filter((id) => !found.labelIds.includes(id)), removedLabelIds: found.labelIds.filter((id) => !labelIds.includes(id)) });
+			found.labelIds = labelIds;
+		}
+
+		if (update.blockedBy !== undefined) {
+			const blockedBy = update.blockedBy;
+			const changed = [...blockedBy.filter((identifier) => !found.blockedBy.includes(identifier)), ...found.blockedBy.filter((identifier) => !blockedBy.includes(identifier))];
+
+			record(found.id, by, { relationChanges: changed.map((identifier) => ({ identifier, type: 'blocked_by' })) });
+			found.blockedBy = blockedBy;
+		}
+
+		if (update.parentId !== undefined) {
+			record(found.id, by, { fromParentId: found.parentId, toParentId: update.parentId });
+			found.parentId = update.parentId;
+		}
+	};
+
 	const resolve = (operation: Operation, variables: unknown): unknown => {
 		const issueList = [...issues.values()];
 
@@ -249,6 +352,19 @@ const make = Effect.gen(function* () {
 				const { ids } = Schema.decodeUnknownSync(variableSchemas.Epics)(variables);
 
 				return { issues: { nodes: issueList.filter((candidate) => ids.includes(candidate.id)).slice(0, MAX_PAGE_SIZE).map(toEpic) } };
+			}
+
+			case 'EpicTree': {
+				const { id } = Schema.decodeUnknownSync(variableSchemas.EpicTree)(variables);
+
+				return { issue: toTree(issue(id)) };
+			}
+
+			case 'IssueHistories': {
+				const { ids } = Schema.decodeUnknownSync(variableSchemas.IssueHistories)(variables);
+				const found = issueList.filter((candidate) => ids.includes(candidate.id));
+
+				return { issues: { nodes: found.map((candidate) => ({ id: candidate.id, history: { nodes: histories.get(candidate.id) ?? [] } })) } };
 			}
 
 			case 'EpicsByIdentifier': {
@@ -282,6 +398,7 @@ const make = Effect.gen(function* () {
 
 				find(team(found.teamId).states.nodes, (state) => state.id === stateId, `WorkflowState ${stateId}`);
 				found.stateId = stateId;
+				record(id, 'owner', { toStateId: stateId });
 				mutations.push(`move ${id} ${stateId}`);
 
 				return { issueUpdate: { success: true } };
@@ -312,6 +429,7 @@ const make = Effect.gen(function* () {
 
 				label(labelId);
 				found.labelIds = found.labelIds.includes(labelId) ? found.labelIds : [...found.labelIds, labelId];
+				record(id, 'owner', { addedLabelIds: [labelId] });
 				mutations.push(`add-label ${id} ${labelId}`);
 
 				return { issueAddLabel: { success: true } };
@@ -322,6 +440,7 @@ const make = Effect.gen(function* () {
 				const found = issue(id);
 
 				found.labelIds = found.labelIds.filter((candidate) => candidate !== labelId);
+				record(id, 'owner', { removedLabelIds: [labelId] });
 				mutations.push(`remove-label ${id} ${labelId}`);
 
 				return { issueRemoveLabel: { success: true } };
@@ -396,10 +515,12 @@ const make = Effect.gen(function* () {
 				id: `issue-${identifier.toLowerCase()}`,
 				identifier,
 				title,
+				description: null,
 				teamId,
 				stateId: find(owner.states.nodes, (candidate) => candidate.name === state, `WorkflowState ${state}`).id,
 				parentId: null,
 				labelIds,
+				blockedBy: [],
 				sortOrder,
 				createdAt,
 			};
@@ -411,10 +532,12 @@ const make = Effect.gen(function* () {
 					id: `${epic.id}-sub-${index}`,
 					identifier: `${owner.key}-${Number(identifier.split('-')[1]) * 10 + index}`,
 					title: `Slice ${index}`,
+					description: null,
 					teamId,
 					stateId: owner.states.nodes[0].id,
 					parentId: epic.id,
 					labelIds: [],
+					blockedBy: [],
 					sortOrder: index,
 					createdAt,
 				};
@@ -432,6 +555,27 @@ const make = Effect.gen(function* () {
 			return added;
 		},
 		addComment,
+		updateIssue,
+		addSubIssue: (epicId, identifier, title) => {
+			const epic = issue(epicId);
+			const child: FixtureIssue = {
+				id: `issue-${identifier.toLowerCase()}`,
+				identifier,
+				title,
+				description: null,
+				teamId: epic.teamId,
+				stateId: team(epic.teamId).states.nodes[0].id,
+				parentId: epic.id,
+				labelIds: [],
+				blockedBy: [],
+				sortOrder: issues.size,
+				createdAt: now(),
+			};
+
+			issues.set(child.id, child);
+
+			return child;
+		},
 		issue,
 		subIssues: (epicId) => [...issues.values()].filter((candidate) => candidate.parentId === epicId),
 		stateName: (issueId) => stateOf(issue(issueId)).name,
