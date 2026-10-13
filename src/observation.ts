@@ -101,17 +101,16 @@ export const roleOf = (observation: Observation, epic: Epic): Option.Option<Stat
 export const hasRole = (observation: Observation, epic: Epic, roles: ReadonlyArray<StateRole>) =>
 	Option.match(roleOf(observation, epic), { onNone: () => false, onSome: (role) => roles.includes(role) });
 
-// Done, canceled and the like: the epic's work is over.
-export const isFinished = (observation: Observation, epic: Epic) => {
-	const state = observation.teams.get(epic.team.id)?.team.states.nodes.find((candidate) => candidate.id === epic.state.id);
+const isFinishedStateType = (type: string | undefined) => type === 'completed' || type === 'canceled';
 
-	return state?.type === 'completed' || state?.type === 'canceled';
-};
+// Done, canceled and the like: the epic's work is over.
+export const isFinished = (observation: Observation, epic: Epic) =>
+	isFinishedStateType(observation.teams.get(epic.team.id)?.team.states.nodes.find((candidate) => candidate.id === epic.state.id)?.type);
 
 // The identifiers of the issues, in any team, that block the epic and are not completed or canceled yet. The epic is
 // held in its ready state until there are none.
 export const heldBy = (epic: ReadyEpic) =>
-	epic.inverseRelations.nodes.flatMap(({ type, issue }) => (type === 'blocks' && issue.state.type !== 'completed' && issue.state.type !== 'canceled' ? [issue.identifier] : []));
+	epic.inverseRelations.nodes.flatMap(({ type, issue }) => (type === 'blocks' && !isFinishedStateType(issue.state.type) ? [issue.identifier] : []));
 
 export const epicWithIdentifier = (observation: Observation, identifier: string) =>
 	Option.fromUndefinedOr([...observation.epics.values()].find((epic) => epic.identifier === identifier));
