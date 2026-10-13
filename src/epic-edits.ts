@@ -1,4 +1,4 @@
-import { Clock, Duration, Effect, Option } from 'effect';
+import { Clock, Duration, Effect, Equal, Option } from 'effect';
 import { AppConfig } from './config.ts';
 import { type EditedField, type EpicEdit, type EpicSnapshot, type IssueSnapshot, Journal, type Run } from './journal.ts';
 import { type HistoryEntry, Linear, type TrackedIssue } from './linear.ts';
@@ -51,9 +51,6 @@ const editsBetween = (before: ReadonlyArray<IssueSnapshot>, after: ReadonlyArray
 		...before.filter(({ id }) => !current.has(id)).flatMap((issue) => edit(issue, 'subIssue', issue.title, null)),
 	];
 };
-
-const sameEdits = (a: ReadonlyArray<EpicEdit>, b: ReadonlyArray<EpicEdit>) =>
-	a.length === b.length && a.every((edit, index) => edit.issueId === b[index].issueId && edit.field === b[index].field && edit.before === b[index].before && edit.after === b[index].after);
 
 const fieldNames: Record<Exclude<EditedField, 'subIssue'>, string> = { title: 'title', description: 'description', state: 'state', labels: 'labels', blockedBy: 'blocked by' };
 
@@ -145,7 +142,7 @@ export const epicEditsRule = Effect.gen(function* () {
 				return;
 			}
 
-			const unchanged = taken.edits !== null && sameEdits(taken.edits, edits);
+			const unchanged = taken.edits !== null && Equal.equals(taken.edits, edits);
 			const editedAt = unchanged && taken.editedAt !== null ? taken.editedAt : readAt;
 
 			if (!unchanged) {
