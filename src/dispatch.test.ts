@@ -98,11 +98,10 @@ describe('dispatch', () => {
 				inverseRelations: [
 					{ type: 'blocks', issueId: blocker.id },
 					{ type: 'blocks', issueId: finished.id },
-					{ type: 'related', issueId: related.id },
 				],
 			});
 
-			h.linear.addEpic({ identifier: 'TEST-11', title: 'Plugin settings sync', sortOrder: 2 });
+			h.linear.addEpic({ identifier: 'TEST-11', title: 'Plugin settings sync', sortOrder: 2, inverseRelations: [{ type: 'related', issueId: related.id }] });
 			yield* h.tick;
 			yield* h.tick;
 
