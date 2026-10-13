@@ -57,7 +57,7 @@ describe('Summariser', () => {
 			const summary = yield* Summariser.use((summariser) => summariser.summarise('Condense these edits.')).pipe(Effect.provide(layer));
 
 			assert.strictEqual(summary, 'TEST-10 now syncs over WebSockets.');
-			assert.deepStrictEqual(calls, [{ command: 'claude', args: ['-p', '--model', 'claude-haiku-5-5', '--tools', '', '--no-session-persistence'], input: 'Condense these edits.' }]);
+			assert.deepStrictEqual(calls, [{ command: 'claude', args: ['-p', '--model', 'claude-haiku-5-5', '--tools', '', '--no-session-persistence', '--setting-sources', '', '--strict-mcp-config'], input: 'Condense these edits.' }]);
 		}),
 	);
 

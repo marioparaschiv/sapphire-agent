@@ -10,15 +10,16 @@ export class Summariser extends Context.Service<
 		readonly summarise: (prompt: string) => Effect.Effect<string, CallError>;
 	}
 >()('sapphire-agent/Summariser') {
-	// `claude -p` with the prompt on stdin, no tools and no saved session. One attempt: its callers have a fallback, so a
-	// retry would only hold up the tick.
+	// `claude -p` with the prompt on stdin, no tools, no saved session, and none of the user's settings or MCP servers, so
+	// the hooks installed for runs never see it. One attempt: its callers have a fallback, so a retry would only hold up
+	// the tick.
 	static readonly layer = Layer.effect(
 		Summariser,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 			const { summaryModel } = yield* AppConfig;
 			const encoder = new TextEncoder();
-			const args = ['-p', '--model', summaryModel, '--tools', '', '--no-session-persistence'];
+			const args = ['-p', '--model', summaryModel, '--tools', '', '--no-session-persistence', '--setting-sources', '', '--strict-mcp-config'];
 			const command = `claude -p --model ${summaryModel}`;
 			const text = <E>(stream: Stream.Stream<Uint8Array, E>) => stream.pipe(Stream.decodeText(), Stream.mkString);
 
