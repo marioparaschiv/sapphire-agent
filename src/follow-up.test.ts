@@ -331,6 +331,30 @@ describe('follow-ups', () => {
 		}),
 	);
 
+	it.effect('is claimed while the only other run is stale, as a stale run holds no slot', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 1 });
+			const { epic, pullRequest } = yield* reviewedEpic(h);
+			const stale = yield* h.threadRun({ identifier: 'TEST-11', title: 'Busy' });
+
+			yield* h.t3.setRunStatus(stale.run.threadId, 'running');
+			yield* h.t3.addActivity(stale.run.threadId);
+			yield* Effect.forEach(Array.from({ length: 25 }), () => TestClock.adjust('1 minute').pipe(Effect.andThen(h.tick)), { discard: true });
+
+			yield* requestFollowUp(h, addThreads(h, pullRequest.number));
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.identifier, run.status, run.job._tag]).toSorted(),
+				[
+					['TEST-10', 'running', 'follow-up'],
+					['TEST-11', 'stale', 'orchestrate'],
+				],
+			);
+			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
+		}),
+	);
+
 	it.effect('a follow-up that fails to start goes back to ended in To Review, keeps its worktree and is asked for again once the label is removed', () =>
 		Effect.gen(function* () {
 			const h = yield* makeHarness();
