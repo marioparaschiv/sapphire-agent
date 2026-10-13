@@ -57,9 +57,9 @@ describe('epic edits', () => {
 			const { epic } = yield* workingRun(h);
 			const [first, second] = h.linear.subIssues(epic.id);
 
-			h.linear.addSubIssue(epic.id, 'TEST-103', 'Migrate stored settings');
+			const third = h.linear.addSubIssue(epic.id, 'TEST-103', 'Migrate stored settings');
 			h.linear.updateIssue(first.id, { state: 'Ready For Agent', title: 'Slice 1: the sync client', description: 'Use the shared socket.' });
-			h.linear.updateIssue(second.id, { blockedBy: ['TEST-103'] });
+			h.linear.updateIssue(second.id, { blockedBy: [third.id] });
 			yield* h.tick;
 			yield* TestClock.adjust('1 minute');
 			yield* h.tick;

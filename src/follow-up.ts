@@ -3,7 +3,7 @@ import { AppConfig } from './config.ts';
 import { claimedRun } from './dispatch.ts';
 import { Journal, newSession, type Request, type Run } from './journal.ts';
 import type { Epic } from './linear.ts';
-import { hasRole, isInFlight, type Observation, stuckLabelOf } from './observation.ts';
+import { hasRole, holdsSlot, type Observation, stuckLabelOf } from './observation.ts';
 import type { EpicWork, Rule } from './planner.ts';
 import { makeSettle } from './run-actions.ts';
 
@@ -33,7 +33,7 @@ export const followUpRule = Effect.gen(function* () {
 		Effect.gen(function* () {
 			const runs = yield* journal.listRuns;
 			const requests = yield* journal.listRequests;
-			let free = config.maxInFlight - runs.filter(isInFlight).length;
+			let free = config.maxInFlight - runs.filter(holdsSlot).length;
 			const work: Array<EpicWork> = [];
 
 			for (const { id, request } of requests) {

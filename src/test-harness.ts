@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NodeServices } from '@effect/platform-node';
 import { Console, Context, Effect, Exit, Layer, Option, Scope } from 'effect';
-import { TestConsole } from 'effect/testing';
+import { TestClock, TestConsole } from 'effect/testing';
 import { AgentActivity } from './agent-activity.ts';
 import { AgentEventServer } from './agent-event-server.ts';
 import { writeTranscript } from './claude-transcript-fixture.ts';
@@ -104,6 +104,14 @@ export const linearIssueMoved = {
 	webhookId: 'webhook-1',
 };
 
+// Ticks once a minute for `minutes`, calling `each` before every tick, as the poll and T3's wakes do.
+export const minuteTicks = (h: Harness, minutes: number, each: Effect.Effect<void> = Effect.void) =>
+	Effect.forEach(
+		Array.from({ length: minutes }),
+		() => TestClock.adjust('1 minute').pipe(Effect.andThen(each), Effect.andThen(h.tick)),
+		{ discard: true },
+	);
+
 export type Harness = {
 	// Holds the config's paths: repo, worktrees, journal.db.
 	readonly dir: string;
@@ -133,7 +141,7 @@ export type Harness = {
 	// Counted from this call: the nth journal write the reconciler or the webhook server makes dies
 	// without being applied, as if the process crashed right before recording what it had just done.
 	readonly crashAtJournalWrite: (nth: number) => void;
-	// Moves the epic in Linear as the user does.
+	// Moves the epic, or an issue of another team, in Linear as the user does.
 	readonly moveEpic: (epicId: string, state: string) => void;
 	// Whether the injected journal crash happened.
 	readonly crashed: () => boolean;

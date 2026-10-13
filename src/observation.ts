@@ -3,7 +3,7 @@ import type { CallError } from './call-policy.ts';
 import { AppConfig, type AppConfigShape, type StateRole } from './config.ts';
 import { Git, type Worktree } from './git.ts';
 import { Journal, type JournalError, type Project, type Run, type RunStatus } from './journal.ts';
-import { type Epic, Linear, type Team } from './linear.ts';
+import { type Epic, Linear, type ReadyEpic, type Team } from './linear.ts';
 import { Projects } from './projects.ts';
 import { hasActiveRun, T3, type ThreadRead, type ThreadStatus, type ThreadSummary } from './t3.ts';
 
@@ -19,7 +19,7 @@ export type Observation = {
 	// By epic id: every epic the journal has a run of, every ready epic, and the epics of owned worktrees.
 	readonly epics: ReadonlyMap<string, Epic>;
 	// Top-level epics in a team's ready state, at most 50.
-	readonly ready: ReadonlyArray<Epic>;
+	readonly ready: ReadonlyArray<ReadyEpic>;
 	// Every worktree under the worktrees directory of a configured or tracked repo.
 	readonly worktrees: ReadonlyArray<Worktree>;
 	// By thread id: the T3 thread of every run that is not over. A thread T3 no longer has is left out.
@@ -56,10 +56,14 @@ type ThreadReading =
 	| { readonly _tag: 'Gone'; readonly threadId: string }
 	| { readonly _tag: 'Unknown'; readonly threadId: string };
 
-// Runs whose agent may still be alive. They hold a maxInFlight slot, so live agents never exceed it.
+// Runs whose agent may still be alive.
 const inFlightStatuses: ReadonlyArray<RunStatus> = ['claimed', 'running', 'stale'];
 
 export const isInFlight = (run: Run) => inFlightStatuses.includes(run.status);
+
+// Runs that can still make progress hold a maxInFlight slot. A stale run holds none until it moves again, so a dead
+// thread does not block dispatching.
+export const holdsSlot = (run: Run) => run.status === 'claimed' || run.status === 'running';
 
 // A project is not removed while a run of its team is in flight.
 export const hasRunInFlight = (runs: ReadonlyArray<Run>, teamId: string) => runs.some((run) => run.teamId === teamId && isInFlight(run));
@@ -101,12 +105,16 @@ export const roleOf = (observation: Observation, epic: Epic): Option.Option<Stat
 export const hasRole = (observation: Observation, epic: Epic, roles: ReadonlyArray<StateRole>) =>
 	Option.match(roleOf(observation, epic), { onNone: () => false, onSome: (role) => roles.includes(role) });
 
-// Done, canceled and the like: the epic's work is over.
-export const isFinished = (observation: Observation, epic: Epic) => {
-	const state = observation.teams.get(epic.team.id)?.team.states.nodes.find((candidate) => candidate.id === epic.state.id);
+const isFinishedStateType = (type: string | undefined) => type === 'completed' || type === 'canceled';
 
-	return state?.type === 'completed' || state?.type === 'canceled';
-};
+// Done, canceled and the like: the epic's work is over.
+export const isFinished = (observation: Observation, epic: Epic) =>
+	isFinishedStateType(observation.teams.get(epic.team.id)?.team.states.nodes.find((candidate) => candidate.id === epic.state.id)?.type);
+
+// The identifiers of the issues, in any team, that block the epic and are not completed or canceled yet. The epic is
+// held in its ready state until there are none.
+export const heldBy = (epic: ReadyEpic) =>
+	epic.inverseRelations.nodes.flatMap(({ type, issue }) => (type === 'blocks' && !isFinishedStateType(issue.state.type) ? [issue.identifier] : []));
 
 export const epicWithIdentifier = (observation: Observation, identifier: string) =>
 	Option.fromUndefinedOr([...observation.epics.values()].find((epic) => epic.identifier === identifier));
@@ -145,7 +153,7 @@ export const makeWarnOnce = () => {
 		});
 };
 
-const resolveTeams = (config: AppConfigShape, projects: ReadonlyArray<Project>, teams: ReadonlyArray<Team>, warn: (message: string) => Effect.Effect<void>) =>
+export const resolveTeams = (config: AppConfigShape, projects: ReadonlyArray<Project>, teams: ReadonlyArray<Team>, warn: (message: string) => Effect.Effect<void>) =>
 	Effect.gen(function* () {
 		const resolved = new Map<string, ResolvedTeam>();
 

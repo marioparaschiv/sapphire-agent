@@ -5,7 +5,7 @@ import { TestClock } from 'effect/testing';
 import { Transient } from './call-policy.ts';
 import { Refused } from './ctl.ts';
 import type { FixtureIssue } from './linear-fixture.ts';
-import { git, type Harness, makeHarness, markerKeys } from './test-harness.ts';
+import { git, type Harness, makeHarness, markerKeys, minuteTicks } from './test-harness.ts';
 
 // An epic whose first run posted its result and went to To Review, with the branch on origin. A minute passes, so the
 // follow-up's claim (at `followUpAt`) has markers of its own. `push: false` leaves the branch local only, so pulling it fails.
@@ -328,6 +328,30 @@ describe('follow-ups', () => {
 			);
 			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
 			assert.strictEqual(h.linear.stateName(queued.id), 'Ready For Agent');
+		}),
+	);
+
+	it.effect('is claimed while the only other run is stale, as a stale run holds no slot', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 1 });
+			const { epic, pullRequest } = yield* reviewedEpic(h);
+			const stale = yield* h.threadRun({ identifier: 'TEST-11', title: 'Busy' });
+
+			yield* h.t3.setRunStatus(stale.run.threadId, 'running');
+			yield* h.t3.addActivity(stale.run.threadId);
+			yield* minuteTicks(h, 25);
+
+			yield* requestFollowUp(h, addThreads(h, pullRequest.number));
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.identifier, run.status, run.job._tag]).toSorted(),
+				[
+					['TEST-10', 'running', 'follow-up'],
+					['TEST-11', 'stale', 'orchestrate'],
+				],
+			);
+			assert.strictEqual(h.linear.stateName(epic.id), 'Implementing');
 		}),
 	);
 

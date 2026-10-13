@@ -4,7 +4,7 @@ import { TestClock } from 'effect/testing';
 import { Permanent } from './call-policy.ts';
 import { AppConfig } from './config.ts';
 import { Linear } from './linear.ts';
-import { LinearFixture, testTeam } from './linear-fixture.ts';
+import { LinearFixture, otherTeam, testTeam } from './linear-fixture.ts';
 import { renderMarker, withMarker } from './markers.ts';
 
 const withFixture = Effect.provide(LinearFixture.layer.pipe(Layer.provide(AppConfig.layerTest('/tmp/sapphire-agent-test'))));
@@ -37,12 +37,22 @@ describe('Linear reads', () => {
 		}).pipe(withFixture),
 	);
 
-	it.effect('reads ready top-level epics with labels and sub-issue presence, and epics by id wherever they are', () =>
+	it.effect('reads ready top-level epics with labels, sub-issue presence and the issues related to them in any team, and epics by id wherever they are', () =>
 		Effect.gen(function* () {
 			const fixture = yield* LinearFixture;
 			const linear = yield* Linear;
 			const repoLabel = fixture.addLabel({ name: 'loader-ios', parentName: 'repo' });
-			const withSlices = fixture.addEpic({ identifier: 'TEST-10', title: 'Linear service on HttpClient', labelIds: [repoLabel.id] });
+			const blocker = fixture.addEpic({ identifier: 'OPS-3', title: 'Rotate the API keys', teamId: otherTeam.id, state: 'In Progress', subIssues: 0 });
+			const related = fixture.addEpic({ identifier: 'TEST-9', title: 'Old HTTP client', state: 'Done', subIssues: 0 });
+			const withSlices = fixture.addEpic({
+				identifier: 'TEST-10',
+				title: 'Linear service on HttpClient',
+				labelIds: [repoLabel.id],
+				inverseRelations: [
+					{ type: 'blocks', issueId: blocker.id },
+					{ type: 'related', issueId: related.id },
+				],
+			});
 			const withoutSlices = fixture.addEpic({ identifier: 'TEST-11', title: 'Lonely epic', subIssues: 0 });
 			const implementing = fixture.addEpic({ identifier: 'TEST-12', title: 'Already running', state: 'Implementing' });
 
@@ -61,13 +71,19 @@ describe('Linear reads', () => {
 				title: 'Linear service on HttpClient',
 				url: 'https://linear.app/marioparaschiv/issue/TEST-10/linear-service-on-httpclient',
 				branchName: 'mario/test-10-linear-service-on-httpclient',
-				sortOrder: 0,
+				sortOrder: 2,
 				createdAt: '1969-12-31T00:00:00.000Z',
 				team: { id: testTeam.id, name: 'Test' },
 				state: { id: stateId('Ready For Agent'), name: 'Ready For Agent' },
 				labels: { nodes: [{ id: repoLabel.id, name: 'loader-ios', parent: { name: 'repo' } }] },
 				parent: null,
 				children: { nodes: [{ id: fixture.subIssues(withSlices.id)[0].id }] },
+				inverseRelations: {
+					nodes: [
+						{ type: 'blocks', issue: { identifier: 'OPS-3', state: { type: 'started' } } },
+						{ type: 'related', issue: { identifier: 'TEST-9', state: { type: 'completed' } } },
+					],
+				},
 			});
 
 			yield* linear.moveIssue(withSlices.id, stateId('Implementing'));

@@ -37,6 +37,16 @@ export const Epic = Schema.Struct({
 
 export type Epic = typeof Epic.Type;
 
+// An issue related to another, as that one lists it: a `blocks` relation's issue blocks it.
+export const InverseRelation = Schema.Struct({ type: Schema.String, issue: Schema.Struct({ identifier: Schema.String, state: Schema.Struct({ type: Schema.String }) }) });
+
+export type InverseRelation = typeof InverseRelation.Type;
+
+// A ready epic with the issues related to it.
+export const ReadyEpic = Schema.Struct({ ...Epic.fields, inverseRelations: nodes(InverseRelation) });
+
+export type ReadyEpic = typeof ReadyEpic.Type;
+
 // An issue of an epic's tree with what the epic-edits rule compares. `inverseRelations` of type `blocks` are its
 // blockers.
 export const TrackedIssue = Schema.Struct({
@@ -46,7 +56,7 @@ export const TrackedIssue = Schema.Struct({
 	description: Schema.NullOr(Schema.String),
 	state: Schema.Struct({ name: Schema.String }),
 	labels: nodes(Schema.Struct({ name: Schema.String })),
-	inverseRelations: nodes(Schema.Struct({ type: Schema.String, issue: Schema.Struct({ identifier: Schema.String }) })),
+	inverseRelations: nodes(InverseRelation),
 });
 
 export type TrackedIssue = typeof TrackedIssue.Type;
@@ -86,13 +96,15 @@ const EPIC_FIELDS = `
 	children(first: 1) { nodes { id } }
 `;
 
+const INVERSE_RELATION_FIELDS = 'type issue { identifier state { type } }';
+
 // Linear caps a query's complexity, which grows with each page size; an epic has far fewer sub-issues, labels and
 // blockers.
 const TRACKED_FIELDS = `
 	id identifier title description
 	state { name }
 	labels(first: 20) { nodes { name } }
-	inverseRelations(first: 20) { nodes { type issue { identifier } } }
+	inverseRelations(first: 20) { nodes { ${INVERSE_RELATION_FIELDS} } }
 `;
 
 // Enough to reach back to the snapshot an edit is compared against.
@@ -139,8 +151,8 @@ const rateLimited = (response: HttpClientResponse.HttpClientResponse) => {
 export type LinearShape = {
 	// Teams by exact name, with all their workflow states.
 	readonly teams: (names: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Team>, CallError>;
-	// Top-level issues in the given states, at most 50.
-	readonly readyEpics: (stateIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
+	// Top-level issues in the given states with the issues related to them, at most 50.
+	readonly readyEpics: (stateIds: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<ReadyEpic>, CallError>;
 	// The given issues wherever they are now; fails Permanent for more than 250 ids.
 	readonly epics: (ids: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Epic>, CallError>;
 	// The issues with the given identifiers (e.g. HL-8) wherever they are now; fails Permanent for more than 250.
@@ -276,9 +288,11 @@ const make = (endpoint: string) =>
 				stateIds.length === 0
 					? Effect.succeed([])
 					: request(
-							Schema.Struct({ issues: nodes(Epic) }),
+							Schema.Struct({ issues: nodes(ReadyEpic) }),
 							`query ReadyEpics($stateIds: [ID!]) {
-								issues(first: 50, filter: { state: { id: { in: $stateIds } }, parent: { null: true } }) { nodes { ${EPIC_FIELDS} } }
+								issues(first: 50, filter: { state: { id: { in: $stateIds } }, parent: { null: true } }) {
+									nodes { ${EPIC_FIELDS} inverseRelations { nodes { ${INVERSE_RELATION_FIELDS} } } }
+								}
 							}`,
 							{ stateIds },
 						).pipe(

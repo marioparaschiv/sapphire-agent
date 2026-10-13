@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
 import { TestClock } from 'effect/testing';
-import { git, makeHarness } from './test-harness.ts';
+import { otherTeam } from './linear-fixture.ts';
+import { git, makeHarness, minuteTicks } from './test-harness.ts';
 
 describe('dispatch', () => {
 	it.effect('claims an epic dispatched with --reply-to replying to that session, as the newest dispatch asked, and drops its start requests', () =>
@@ -81,6 +82,143 @@ describe('dispatch', () => {
 			);
 			assert.strictEqual(h.linear.stateName(first.id), 'Implementing');
 			assert.strictEqual(h.linear.stateName(second.id), 'Implementing');
+		}),
+	);
+
+	it.effect('holds a ready epic that an unfinished issue blocks: it is not claimed, takes no slot, is not flagged and gets no comment', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 1 });
+			const blocker = h.linear.addEpic({ identifier: 'OPS-3', title: 'Rotate the API keys', teamId: otherTeam.id, state: 'In Progress', subIssues: 0 });
+			const finished = h.linear.addEpic({ identifier: 'TEST-8', title: 'Old HTTP client', state: 'Done', subIssues: 0 });
+			const related = h.linear.addEpic({ identifier: 'TEST-9', title: 'Retry policy', state: 'Implementing', subIssues: 0 });
+			const held = h.linear.addEpic({
+				identifier: 'TEST-10',
+				title: 'Linear service on HttpClient',
+				sortOrder: 1,
+				inverseRelations: [
+					{ type: 'blocks', issueId: blocker.id },
+					{ type: 'blocks', issueId: finished.id },
+				],
+			});
+
+			h.linear.addEpic({ identifier: 'TEST-11', title: 'Plugin settings sync', sortOrder: 2, inverseRelations: [{ type: 'related', issueId: related.id }] });
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.identifier, run.status]),
+				[['TEST-11', 'running']],
+			);
+			assert.strictEqual(h.linear.stateName(held.id), 'Ready For Agent');
+			assert.deepStrictEqual(h.linear.labelNames(held.id), []);
+			assert.deepStrictEqual(h.linear.comments(held.id), []);
+			assert.deepStrictEqual(h.notices(held.identifier), []);
+		}),
+	);
+
+	it.effect('claims a held epic on the next tick once every issue blocking it, in any team, is completed or canceled', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 1 });
+			const otherTeamBlocker = h.linear.addEpic({ identifier: 'OPS-3', title: 'Rotate the API keys', teamId: otherTeam.id, state: 'In Progress', subIssues: 0 });
+			const blocker = h.linear.addEpic({ identifier: 'TEST-9', title: 'Retry policy', state: 'To Do', subIssues: 0 });
+			const held = h.linear.addEpic({
+				identifier: 'TEST-10',
+				title: 'Linear service on HttpClient',
+				inverseRelations: [
+					{ type: 'blocks', issueId: otherTeamBlocker.id },
+					{ type: 'blocks', issueId: blocker.id },
+				],
+			});
+
+			yield* h.tick;
+			h.moveEpic(otherTeamBlocker.id, 'Canceled');
+			yield* h.tick;
+			assert.deepStrictEqual(yield* h.runs, []);
+
+			h.moveEpic(blocker.id, 'Shipped');
+			yield* h.tick;
+			assert.deepStrictEqual(
+				(yield* h.runs).map((run) => [run.identifier, run.status]),
+				[['TEST-10', 'running']],
+			);
+			assert.strictEqual(h.linear.stateName(held.id), 'Implementing');
+		}),
+	);
+
+	it.effect("claims an epic in the tick that sees the epic blocking it shipped, after sapphire-agent's run of that epic ended", () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 1 });
+			const { epic: blocker, run } = yield* h.threadRun({ identifier: 'TEST-9', title: 'Retry policy' });
+			const held = h.linear.addEpic({ identifier: 'TEST-10', title: 'Linear service on HttpClient', inverseRelations: [{ type: 'blocks', issueId: blocker.id }] });
+
+			h.github.addPullRequest({ repo: h.githubRepo, branch: run.branch, author: 'marioparaschiv' });
+			h.writeResultFile(run, JSON.stringify({ summary: 'Retries follow the policy.', replies: [], flags: [] }));
+			yield* h.t3.setRunStatus(run.threadId, 'completed');
+			yield* h.tick;
+
+			assert.deepStrictEqual(
+				(yield* h.runs).map((found) => [found.identifier, found.status]),
+				[['TEST-9', 'ended']],
+			);
+			assert.deepStrictEqual([h.linear.stateName(blocker.id), h.linear.stateName(held.id)], ['To Review', 'Ready For Agent']);
+
+			// Linear moves the epic to Shipped once its PR is merged, and delivers that, which wakes the reconciler.
+			h.moveEpic(blocker.id, 'Shipped');
+			yield* h.tick;
+
+			assert.include(
+				(yield* h.runs).map((found) => `${found.identifier} ${found.status}`),
+				'TEST-10 running',
+			);
+			assert.strictEqual(h.linear.stateName(held.id), 'Implementing');
+		}),
+	);
+
+	it.effect('frees the slot of a stale run without re-claiming its epic, and counts it again once it moves', () =>
+		Effect.gen(function* () {
+			const h = yield* makeHarness({ maxInFlight: 2 });
+			const stale = yield* h.threadRun({ identifier: 'TEST-10', title: 'Plugin settings sync' });
+			const live = yield* h.threadRun({ identifier: 'TEST-11', title: 'Fix the file leak' });
+			const statuses = h.runs.pipe(Effect.map((runs) => runs.map((run) => [run.identifier, run.status]).toSorted(([a], [b]) => a.localeCompare(b))));
+
+			yield* h.t3.setRunStatus(stale.run.threadId, 'running');
+			yield* h.t3.setRunStatus(live.run.threadId, 'running');
+			yield* h.t3.addActivity(stale.run.threadId);
+			yield* minuteTicks(h, 25, h.t3.addActivity(live.run.threadId));
+
+			assert.deepStrictEqual(yield* statuses, [
+				['TEST-10', 'stale'],
+				['TEST-11', 'running'],
+			]);
+
+			h.linear.issue(stale.epic.id).labelIds = [];
+			h.moveEpic(stale.epic.id, 'Ready For Agent');
+			h.linear.addEpic({ identifier: 'TEST-12', title: 'Rename the config' });
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* statuses, [
+				['TEST-10', 'stale'],
+				['TEST-11', 'running'],
+				['TEST-12', 'running'],
+			]);
+			assert.deepStrictEqual(
+				(yield* h.t3.launches).map(({ title }) => title),
+				['TEST-10 Plugin settings sync', 'TEST-11 Fix the file leak', 'TEST-12 Rename the config'],
+			);
+			assert.isTrue((yield* h.ctl('status')).some((line) => line.startsWith('TEST-10 stale (orchestrate), holds no slot, ')));
+
+			const waiting = h.linear.addEpic({ identifier: 'TEST-13', title: 'Drop the old cache' });
+
+			yield* h.t3.addActivity(stale.run.threadId);
+			yield* h.tick;
+			yield* h.tick;
+
+			assert.deepStrictEqual(yield* statuses, [
+				['TEST-10', 'running'],
+				['TEST-11', 'running'],
+				['TEST-12', 'running'],
+			]);
+			assert.strictEqual(h.linear.stateName(waiting.id), 'Ready For Agent');
 		}),
 	);
 
