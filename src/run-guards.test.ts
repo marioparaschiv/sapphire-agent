@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
 import { onTestFinished } from 'vitest';
 import { ctlPath } from './directories.ts';
-import { commandToolDecision, isCommandCwd, isProjectRepo, worktreeOf } from './run-guards.ts';
+import { commandToolDecision, isCommandCwd, isProjectRepo, type ToolCall, worktreeOf } from './run-guards.ts';
 
 const directory = () => {
 	const dir = mkdtempSync(join(tmpdir(), 'sapphire-agent-guards-'));
@@ -48,6 +48,8 @@ describe('isProjectRepo', () => {
 	});
 });
 
+const shell = (command: string): ToolCall => ({ _tag: 'Shell', name: 'Bash', command });
+
 describe('commandToolDecision', () => {
 	it("allows a command thread the CLI, the read-only gh and git subcommands and the read tools, alone or chained", () => {
 		for (const command of [
@@ -65,12 +67,10 @@ describe('commandToolDecision', () => {
 			`sh ${ctlPath} reply https://github.com/test/repo/pull/3#issuecomment-1 '> Can you rerun it?\n\nRerunning it now.'`,
 			"git log --format='$(not run)'",
 		]) {
-			assert.isTrue(commandToolDecision('Bash', command).allow, command);
+			assert.isTrue(commandToolDecision(shell(command)).allow, command);
 		}
 
-		for (const tool of ['Read', 'Grep', 'Glob', 'SendMessage']) {
-			assert.isTrue(commandToolDecision(tool, undefined).allow, tool);
-		}
+		assert.deepStrictEqual(commandToolDecision({ _tag: 'Read', name: 'Grep' }), { allow: true, reason: 'a command agent may use Grep' });
 	});
 
 	it('refuses a command thread anything that writes or runs something else', () => {
@@ -92,14 +92,14 @@ describe('commandToolDecision', () => {
 			'sh scripts/other.sh',
 			'npm test',
 		]) {
-			assert.isFalse(commandToolDecision('Bash', command).allow, command);
+			assert.isFalse(commandToolDecision(shell(command)).allow, command);
 		}
 
-		for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch']) {
-			assert.isFalse(commandToolDecision(tool, undefined).allow, tool);
+		for (const call of [{ _tag: 'FileWrite', name: 'Write', path: 'notes.md' }, { _tag: 'Other', name: 'WebFetch' }] satisfies ReadonlyArray<ToolCall>) {
+			assert.deepStrictEqual(commandToolDecision(call), { allow: false, reason: `a command agent only reads: ${call.name} is not allowed` });
 		}
 
-		assert.deepStrictEqual(commandToolDecision('Bash', 'gh pr view 3 && gh pr merge 3'), {
+		assert.deepStrictEqual(commandToolDecision(shell('gh pr view 3 && gh pr merge 3')), {
 			allow: false,
 			reason: `a command agent only runs \`sh ${ctlPath} ...\` and gh pr view, gh pr diff, gh pr checks, gh issue view, git log, git show, git diff, git status: \`gh pr merge 3\` is not allowed`,
 		});

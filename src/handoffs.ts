@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { Clock, Effect, FileSystem, Option } from 'effect';
+import type { AgentEvent, AgentName } from './agent-event.ts';
 import { fileSystemFailure } from './call-policy.ts';
 import { ClaudeTranscript } from './claude-transcript.ts';
 import { Comments } from './comments.ts';
@@ -17,10 +18,15 @@ import { T3Projects } from './t3-projects.ts';
 // A subagent that goes on this far past the threshold after it was told to hand off gets a notice.
 const subagentOverRatio = 1.2;
 
-// Checks a run's context after a tool call or the end of a turn. The run's own session at handoffAtTokens records a
-// `handoff` request, which the handoff rule acts on. A subagent at handoffAtTokens is told once, by what its hook
-// prints, to write a handoff doc and end with `HANDOFF <path>`; one still going past 1.2 times that gets a notice.
-// Returns what the hook prints, if anything.
+// A tool call or a turn's end, which checks the context of the agent that made it.
+type ContextEvent = Extract<AgentEvent, { readonly _tag: 'ToolUsed' | 'TurnEnded' }>;
+
+const handoffSkillOf = (claudeConfigDirectory: string) => join(claudeConfigDirectory, 'skills', 'handoff', 'SKILL.md');
+
+// Checks a run's context after a tool call or the end of a turn: the context the agent reported with the event, else
+// its transcript's. The run's own session at handoffAtTokens records a `handoff` request, which the handoff rule acts
+// on. A subagent at handoffAtTokens is told once, by what its hook prints, to write a handoff doc and end with
+// `HANDOFF <path>`; one still going past 1.2 times that gets a notice. Returns what the hook prints, if anything.
 export const makeContextCheck = Effect.gen(function* () {
 	const config = yield* AppConfig;
 	const journal = yield* Journal;
@@ -28,15 +34,20 @@ export const makeContextCheck = Effect.gen(function* () {
 	const comments = yield* Comments;
 	const prompts = yield* Prompts;
 	const reconciler = yield* Reconciler;
-	const handoffSkill = join(config.env.claudeConfigDirectory, 'skills', 'handoff', 'SKILL.md');
+	const handoffSkill = handoffSkillOf(config.env.claudeConfigDirectory);
 
-	const orchestrator = (run: ThreadedRun, sessionId: string) =>
+	const contextTokens = (run: ThreadedRun, event: ContextEvent, agentId: string | null) =>
+		event.contextTokens === undefined ? transcript.contextTokens({ id: event.sessionId, cwd: run.worktreePath }, agentId) : Effect.succeed(Option.fromNullOr(event.contextTokens));
+
+	const orchestrator = (run: ThreadedRun, agent: AgentName, event: ContextEvent) =>
 		Effect.gen(function* () {
+			const { sessionId } = event;
+
 			if (run.session?.id !== sessionId || run.handoff?.sessionId === sessionId) {
 				return;
 			}
 
-			const tokens = yield* transcript.contextTokens({ id: sessionId, cwd: run.worktreePath }, null);
+			const tokens = yield* contextTokens(run, event, null);
 
 			if (Option.isNone(tokens) || tokens.value < config.handoffAtTokens) {
 				return;
@@ -46,14 +57,14 @@ export const makeContextCheck = Effect.gen(function* () {
 				return;
 			}
 
-			yield* journal.addRequest({ _tag: 'handoff', identifier: run.identifier, sessionId });
+			yield* journal.addRequest({ _tag: 'handoff', identifier: run.identifier, sessionId, agent });
 			yield* Effect.log(`${run.identifier}'s context reached ${tokens.value} tokens; it hands off`);
 			yield* reconciler.wake;
 		});
 
-	const subagent = (run: ThreadedRun, sessionId: string, agentId: string) =>
+	const subagent = (run: ThreadedRun, event: ContextEvent, agentId: string) =>
 		Effect.gen(function* () {
-			const tokens = Option.getOrElse(yield* transcript.contextTokens({ id: sessionId, cwd: run.worktreePath }, agentId), () => 0);
+			const tokens = Option.getOrElse(yield* contextTokens(run, event, agentId), () => 0);
 
 			if (tokens < config.handoffAtTokens) {
 				return Option.none();
@@ -75,12 +86,12 @@ export const makeContextCheck = Effect.gen(function* () {
 			return Option.none();
 		});
 
-	return (run: ThreadedRun, sessionId: string, agentId: string | null) =>
-		agentId === null ? orchestrator(run, sessionId).pipe(Effect.as(Option.none<string>())) : subagent(run, sessionId, agentId);
+	return (run: ThreadedRun, agent: AgentName, event: ContextEvent) =>
+		event._tag === 'ToolUsed' && event.agentId !== null ? subagent(run, event, event.agentId) : orchestrator(run, agent, event).pipe(Effect.as(Option.none<string>()));
 });
 
 // Hands a run's agent over to a fresh thread once its context filled up, as a thread cannot be cleared: sends the
-// thread `/handoff` with the doc's path, and once the doc exists and the thread stopped, settles it and launches the
+// thread the handoff skill, as its agent invokes it, with the doc's path, and once the doc exists and the thread stopped, settles it and launches the
 // run's next thread on the same worktree and branch (`<ID> (2) ...`, counting up) to read the doc; the run moves to that
 // thread. Each step is recorded on the run before it is sent, so a crash or restart never sends one twice; a thread
 // launched just before a crash is found by its title. A doc still missing startTimeoutSeconds after the turn ended gets
@@ -95,10 +106,11 @@ export const handoffRule = Effect.gen(function* () {
 	const fs = yield* FileSystem.FileSystem;
 	const send = yield* makeSend;
 	const settle = yield* makeSettle;
+	const handoffSkill = handoffSkillOf(config.env.claudeConfigDirectory);
 
 	// The request goes once the send landed, so a crash or a failed send before that sends it again on a later tick,
 	// under the same key.
-	const request = (run: ThreadedRun, requestId: number, sessionId: string) =>
+	const request = (run: ThreadedRun, requestId: number, sessionId: string, agent: AgentName) =>
 		Effect.gen(function* () {
 			if (run.session?.id !== sessionId || (run.handoff?.sessionId === sessionId && run.handoff.step === 'resumed')) {
 				yield* journal.deleteRequest(requestId);
@@ -113,7 +125,7 @@ export const handoffRule = Effect.gen(function* () {
 				yield* journal.putRun(requested);
 			}
 
-			yield* send(requested, prompts.handoff(handoffPath(run.identifier, sessionId)), { mode: 'auto', clientRequestId: `handoff-${sessionId}` });
+			yield* send(requested, prompts.handoff({ agent, path: handoffPath(run.identifier, sessionId), skill: handoffSkill }), { mode: 'auto', clientRequestId: `handoff-${sessionId}` });
 			yield* journal.deleteRequest(requestId);
 		});
 
@@ -186,7 +198,7 @@ export const handoffRule = Effect.gen(function* () {
 				const work = { epicId: run.epicId, identifier: run.identifier, teamId: run.teamId };
 
 				if (pending !== undefined) {
-					return [{ ...work, apply: request(run, pending.id, pending.sessionId) }];
+					return [{ ...work, apply: request(run, pending.id, pending.sessionId, pending.agent) }];
 				}
 
 				if (run.handoff === null || run.handoff.step === 'resumed') {

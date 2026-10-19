@@ -104,6 +104,8 @@ const Launched = Schema.Struct({
 
 type Launched = typeof Launched.Type;
 
+const Capabilities = Schema.Struct({ parentThreadId: Schema.String });
+
 const Waited = Schema.Struct({ threadId: Schema.String, runId: Schema.NullOr(Schema.String), status: ThreadStatus, timedOut: Schema.Boolean });
 
 type Waited = typeof Waited.Type;
@@ -195,6 +197,8 @@ type T3Shape = {
 	// Without runId, the newest interruptible run.
 	readonly interruptThread: (input: InterruptInput) => Effect.Effect<Interrupted, T3Error>;
 	readonly organizeThread: (input: { readonly threadId: string; readonly action: 'settle' }) => Effect.Effect<void, T3Error>;
+	// The thread whose agent holds the token. T3 refuses a caller outside any thread (`thread_credential_required`).
+	readonly currentThread: Effect.Effect<string, T3Error>;
 };
 
 // Reads and the writes T3 dedupes by clientRequestId are retried. A launch or project creation has no retry key, so an
@@ -423,10 +427,17 @@ const make = Effect.gen(function* () {
 		interruptThread: (input) => callTool('t3_thread_interrupt', input, Interrupted).pipe(t3Policy.call),
 
 		organizeThread: (input) => callTool('t3_thread_organize', input, Organized).pipe(Effect.asVoid, t3Policy.call),
+
+		// T3 names the caller's thread the parent of the tasks it would delegate.
+		currentThread: callTool('orchestrator_capabilities', {}, Capabilities).pipe(
+			Effect.map(({ parentThreadId }) => parentThreadId),
+			t3Policy.call,
+		),
 	});
 });
 
-// The T3 Code server's MCP endpoint, as a client outside any T3 thread with the full-access token.
+// The T3 Code server's MCP endpoint, as a client outside any T3 thread with the full-access token, or as an agent in a
+// thread with that thread's token (`T3Config.layerForAgent`).
 export class T3 extends Context.Service<T3, T3Shape>()('sapphire-agent/T3') {
 	static readonly layer = Layer.effect(T3, make);
 }

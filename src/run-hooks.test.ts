@@ -9,7 +9,8 @@ import { onTestFinished } from 'vitest';
 import { testSettings } from './config.ts';
 import { handoffPath } from './directories.ts';
 import { Journal, journalPath } from './journal.ts';
-import { runHookAnswer } from './run-hooks.ts';
+import { piToolCall } from './pi-hooks.ts';
+import { runHookAnswer, toolCallDecision } from './run-hooks.ts';
 import { git, makeHarness } from './test-harness.ts';
 
 const sessionId = '9b2f4c1e-3a7d-4e8b-b6c5-0d1e2f3a4b5c';
@@ -60,11 +61,13 @@ const setup = Effect.gen(function* () {
 	return { dir, repo, worktree, mainWorktree };
 });
 
-const answer = (dir: string, payload: string) =>
-	runHookAnswer(payload).pipe(
-		Effect.map(Option.getOrUndefined),
-		Effect.provide(Layer.mergeAll(NodeServices.layer, ConfigProvider.layer(ConfigProvider.fromEnvRecord({ SAPPHIRE_AGENT_CONFIG_DIR: dir, SAPPHIRE_AGENT_STATE_DIR: dir })))),
-	);
+const hookEnv = (dir: string) => Layer.mergeAll(NodeServices.layer, ConfigProvider.layer(ConfigProvider.fromEnvRecord({ SAPPHIRE_AGENT_CONFIG_DIR: dir, SAPPHIRE_AGENT_STATE_DIR: dir })));
+
+const answer = (dir: string, payload: string) => runHookAnswer(payload).pipe(Effect.map(Option.getOrUndefined), Effect.provide(hookEnv(dir)));
+
+// What the Pi extension decides about a Pi tool call in `cwd`.
+const piDecision = (dir: string, cwd: string, name: string, input: Record<string, unknown>) =>
+	toolCallDecision(cwd, piToolCall(name, input)).pipe(Effect.map(Option.getOrUndefined), Effect.provide(hookEnv(dir)));
 
 const refusalOf = (output: string | undefined) => {
 	if (output === undefined) {
@@ -198,6 +201,32 @@ describe('run hooks', () => {
 			assert.strictEqual(yield* answer(dir, bash(otherWorktree, 'git push --force origin main')), undefined);
 			assert.strictEqual(yield* answer(dir, bash(repo, 'git push --force origin main')), undefined);
 			assert.strictEqual(yield* answer(dir, toolUse(repo, 'Write', { file_path: '/tmp/notes.md', content: 'x' })), undefined);
+		}),
+	);
+
+	it.effect("guard Pi's tool calls with the same rules: its shell and file writes in a run, its read tools in a command thread", () =>
+		Effect.gen(function* () {
+			const { dir, repo, worktree } = yield* setup;
+			const checkout = join(dir, 'commands', 'repo');
+			const outside = `${join(repo, 'src', 'sync.ts')} is outside this run's worktree ${worktree}; a dispatched run only writes inside its worktree`;
+
+			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'bash', { command: 'git push --force origin HEAD' }), {
+				allow: false,
+				reason: 'force pushes are not allowed in a dispatched run: they rewrite what is on the remote',
+			});
+			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'write', { path: join(repo, 'src', 'sync.ts'), content: 'x' }), { allow: false, reason: outside });
+			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'edit', { path: '.env', edits: [] }), {
+				allow: false,
+				reason: '.env may hold secrets; a dispatched run never writes env files or keys (reading them is fine)',
+			});
+			assert.isUndefined(yield* piDecision(dir, worktree, 'edit', { path: 'src/sync.ts', edits: [] }));
+			assert.isUndefined(yield* piDecision(dir, worktree, 'read', { path: '.env' }));
+			assert.isUndefined(yield* piDecision(dir, repo, 'bash', { command: 'git push --force origin main' }));
+
+			assert.deepStrictEqual(yield* piDecision(dir, checkout, 'grep', { pattern: 'x' }), { allow: true, reason: 'a command agent may use grep' });
+			assert.deepStrictEqual(yield* piDecision(dir, checkout, 'bash', { command: 'git log --oneline -5' }), { allow: true, reason: 'a read-only command of the command agent' });
+			assert.deepStrictEqual(yield* piDecision(dir, checkout, 'write', { path: 'README.md', content: 'x' }), { allow: false, reason: 'a command agent only reads: write is not allowed' });
+			assert.deepStrictEqual(yield* piDecision(dir, checkout, 'codemode', { code: 'return 1' }), { allow: false, reason: 'a command agent only reads: codemode is not allowed' });
 		}),
 	);
 

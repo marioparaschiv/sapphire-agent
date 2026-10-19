@@ -4,12 +4,24 @@ import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { commandsDirectory, ctlPath, isHandoffPath } from './directories.ts';
 import type { Project } from './journal.ts';
+import { hasSubstitution, isRedirection, shellWords, simpleCommands } from './shell-words.ts';
 
 // What the guards refuse in a dispatched run, decided from the hook payload, the config, the journal's projects and git
-// alone, so they hold while the service is down. Every other Claude session is left alone.
+// alone, so they hold while the service is down. Every other session is left alone.
 
 // A dispatched run's checkout: T3 creates it at `<worktreesDirectory>/<repo>/<branch slug>` for a project's repo.
 export type DispatchedRun = { readonly worktree: string; readonly repoName: string };
+
+// A tool call as the guards see it, whichever agent makes it, with the agent's own name for the tool: a shell command,
+// a file write, a tool that only reads, or anything else.
+export type ToolCall =
+	| { readonly _tag: 'Shell'; readonly name: string; readonly command: string }
+	| { readonly _tag: 'FileWrite'; readonly name: string; readonly path: string }
+	| { readonly _tag: 'Read'; readonly name: string }
+	| { readonly _tag: 'Other'; readonly name: string };
+
+// Whether a guard lets the tool call run, and why.
+export type ToolDecision = { readonly allow: boolean; readonly reason: string };
 
 // The checkout under the worktrees directory that `cwd` is in, whichever repo it belongs to.
 export const worktreeOf = (worktreesDirectory: string, cwd: string): DispatchedRun | undefined => {
@@ -265,127 +277,6 @@ const commitRefusal = (dir: string, args: ReadonlyArray<string>) => {
 	return secretsRefusal(dir, committed, 'git commit');
 };
 
-// A shell word with its quotes removed; `quoted` when any of it was quoted or escaped, so it is no operator.
-type Word = { readonly text: string; readonly quoted: boolean };
-
-// Splits a shell command into its simple commands, each a list of words with quotes removed, redirections kept. Not a
-// shell: no expansions, subshells or heredocs.
-const shellWords = (command: string) => {
-	const commands: Array<Array<Word>> = [];
-	let words: Array<Word> = [];
-	let word = '';
-	let inWord = false;
-	let quoted = false;
-	let quote: string | null = null;
-
-	const endWord = () => {
-		if (inWord) {
-			words.push({ text: word, quoted });
-		}
-
-		word = '';
-		inWord = false;
-		quoted = false;
-	};
-
-	const endCommand = () => {
-		endWord();
-
-		if (words.length > 0) {
-			commands.push(words);
-		}
-
-		words = [];
-	};
-
-	for (let index = 0; index < command.length; index++) {
-		const char = command[index] ?? '';
-
-		if (quote !== null) {
-			if (char === quote) {
-				quote = null;
-			} else if (char === '\\' && quote === '"' && index + 1 < command.length) {
-				word += command[++index];
-			} else {
-				word += char;
-			}
-
-			continue;
-		}
-
-		if (char === '"' || char === "'") {
-			quote = char;
-			inWord = true;
-			quoted = true;
-		} else if (char === '\\' && index + 1 < command.length) {
-			word += command[++index];
-			inWord = true;
-			quoted = true;
-		} else if (char === '&' && (word.endsWith('>') || word.endsWith('<'))) {
-			word += char;
-		} else if (';&|\n()`'.includes(char)) {
-			endCommand();
-		} else if (char === ' ' || char === '\t') {
-			endWord();
-		} else {
-			word += char;
-			inWord = true;
-		}
-	}
-
-	endCommand();
-
-	return commands;
-};
-
-const isRedirection = ({ text, quoted }: Word) => !quoted && /^\d*(?:>>?|<|>&|<&)/.test(text);
-
-// The simple commands of a shell command, without their redirections.
-const simpleCommands = (command: string) =>
-	shellWords(command).map((commandWords) => {
-		const kept: Array<string> = [];
-
-		for (let index = 0; index < commandWords.length; index++) {
-			const current = commandWords[index] ?? { text: '', quoted: false };
-
-			if (isRedirection(current)) {
-				// `> file` names its target in the next word; `>file` and `2>&1` do not.
-				if (/^\d*(?:>>?|<|>&|<&)$/.test(current.text)) {
-					index++;
-				}
-
-				continue;
-			}
-
-			kept.push(current.text);
-		}
-
-		return kept;
-	});
-
-// A command or process substitution outside single quotes, whose command the words do not show.
-const hasSubstitution = (command: string) => {
-	let quote: string | null = null;
-
-	for (let index = 0; index < command.length; index++) {
-		const char = command[index] ?? '';
-
-		if (quote === "'") {
-			quote = char === "'" ? null : quote;
-		} else if (char === '\\') {
-			index++;
-		} else if (char === '`' || (char === '$' && command[index + 1] === '(')) {
-			return true;
-		} else if (char === "'" && quote === null) {
-			quote = char;
-		} else if (char === '"') {
-			quote = quote === '"' ? null : char;
-		}
-	}
-
-	return false;
-};
-
 const wrappers = new Set(['env', 'command', 'exec', 'time', 'nohup']);
 
 // Options of the wrappers that take the next word: `env -C <dir>`, `env -u <name>`, `time -o <file>`, `time -f <format>`.
@@ -507,11 +398,20 @@ export const fileWriteRefusal = (run: DispatchedRun, cwd: string, path: string) 
 	return undefined;
 };
 
+// Why the run's agent's or a subagent's tool call is refused in a dispatched run, if it is.
+export const toolRefusal = (run: DispatchedRun, cwd: string, call: ToolCall) => {
+	switch (call._tag) {
+		case 'Shell':
+			return bashRefusal(cwd, call.command);
+		case 'FileWrite':
+			return fileWriteRefusal(run, cwd, call.path);
+		default:
+			return undefined;
+	}
+};
+
 // Read-only gh and git subcommands a command's agent may run, besides the CLI. `--output` would make git write a file.
 const readOnlyCommands = ['gh pr view', 'gh pr diff', 'gh pr checks', 'gh issue view', 'git log', 'git show', 'git diff', 'git status'];
-
-// The tools besides Bash a command's agent may use, each in full.
-const commandTools = ['Read', 'Grep', 'Glob', 'SendMessage'];
 
 // Nothing but command threads runs in the commands directory, so the hook tells a command thread by its cwd alone.
 export const isCommandCwd = (stateDirectory: string, cwd: string) => {
@@ -530,17 +430,19 @@ const isAllowedCommand = (words: ReadonlyArray<string>) => {
 	return readOnlyCommands.some((allowed) => allowed.split(' ').every((word, index) => words[index] === word)) && !(program === 'git' && args.some((arg) => arg.startsWith('--output')));
 };
 
-// What a command thread's tool call may do: the CLI, the read-only gh and git subcommands and nothing that writes.
-// Allowed calls run without asking, which the supervised thread would otherwise do; every other Bash command and every
-// file edit is refused. Tools the hook is not run for are left to T3's approvals.
-export const commandToolDecision = (toolName: string, command: string | undefined): { readonly allow: boolean; readonly reason: string } => {
-	if (commandTools.includes(toolName)) {
-		return { allow: true, reason: `a command agent may use ${toolName}` };
+// What a command thread's tool call may do: the read tools, the CLI, the read-only gh and git subcommands and nothing
+// that writes. Allowed calls run without asking, which the supervised thread would otherwise do; every other shell
+// command and every other tool is refused.
+export const commandToolDecision = (call: ToolCall): ToolDecision => {
+	if (call._tag === 'Read') {
+		return { allow: true, reason: `a command agent may use ${call.name}` };
 	}
 
-	if (toolName !== 'Bash' || command === undefined) {
-		return { allow: false, reason: `a command agent only reads: ${toolName} is not allowed` };
+	if (call._tag !== 'Shell') {
+		return { allow: false, reason: `a command agent only reads: ${call.name} is not allowed` };
 	}
+
+	const { command } = call;
 
 	if (hasSubstitution(command)) {
 		return { allow: false, reason: 'a command agent only reads: command substitutions are not allowed' };

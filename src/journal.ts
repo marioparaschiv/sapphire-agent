@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { Clock, Context, Effect, Layer, Option, Schema, String } from 'effect';
 import { SqlClient, type SqlError, SqlSchema } from 'effect/sql';
+import { AgentName } from './agent-event.ts';
 import { Marker, type Notice } from './markers.ts';
 import { ResultFile } from './result-file.ts';
 
@@ -146,8 +147,9 @@ export const Request = Schema.Union([
 	Schema.TaggedStruct('done', { commandId: Schema.Int }),
 	// Recorded by the agent event server when a run's agent starts another session.
 	Schema.TaggedStruct('session', { identifier: Schema.String, sessionId: Schema.String }),
-	// Recorded by the agent event server when a run's agent's context reached handoffAtTokens in that session.
-	Schema.TaggedStruct('handoff', { identifier: Schema.String, sessionId: Schema.String }),
+	// Recorded by the agent event server when a run's agent's context reached handoffAtTokens in that session; `agent`
+	// is the agent whose event it was, recorded before there was one but Claude.
+	Schema.TaggedStruct('handoff', { identifier: Schema.String, sessionId: Schema.String, agent: AgentName.pipe(Schema.withDecodingDefaultKey(Effect.succeed('claude'))) }),
 	// `sapphire project add`, `edit` and `remove`, checked by the CLI before they are recorded.
 	Schema.TaggedStruct('project-add', { project: Project }),
 	Schema.TaggedStruct('project-edit', { project: Project }),

@@ -407,6 +407,11 @@ export class FakeT3 extends Context.Service<FakeT3, FakeT3Controls>()('sapphire-
 						't3_thread_organize',
 						changeThread('t3_thread_organize', threadId, (thread) => ({ ...thread, settled: true })),
 					).pipe(Effect.asVoid, t3Policy.call),
+
+				currentThread: answer(
+					'orchestrator_capabilities',
+					Effect.fail(new T3ToolFailure({ tool: 'orchestrator_capabilities', code: 'thread_credential_required', message: 'A thread credential is required.' })),
+				).pipe(t3Policy.call),
 			});
 
 			const controls: FakeT3Controls = {

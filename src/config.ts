@@ -359,6 +359,18 @@ export class T3Config extends Context.Service<T3Config, T3ConfigShape>()('sapphi
 		}),
 	);
 
+	// What T3 gives each agent it runs: the MCP endpoint and that thread's token, for an agent asking about its own thread.
+	// It launches nothing, so it needs no settings, and T3 renews the token.
+	static readonly layerForAgent = Layer.effect(
+		T3Config,
+		Effect.gen(function* () {
+			const endpoint = yield* Config.NonEmptyString('T3_MCP_URL');
+			const token = yield* Config.Redacted('T3_MCP_BEARER_TOKEN');
+
+			return { url: endpoint.replace(/\/mcp$/, ''), token, expiresAt: Number.POSITIVE_INFINITY, settingsFile: '' };
+		}),
+	);
+
 	// By default T3's settings as recorded from the live server, which have a default model.
 	static readonly layerTest = (settingsFile = join(import.meta.dirname, 'fixtures/t3/settings.json')) =>
 		Layer.succeed(T3Config, { url: 'http://127.0.0.1:3773', token: Redacted.make('test-t3-token'), expiresAt: Date.UTC(2036, 9, 4, 12), settingsFile });

@@ -1,4 +1,5 @@
 import { Context, Layer } from 'effect';
+import type { AgentName } from './agent-event.ts';
 
 export type PromptEpic = {
 	readonly identifier: string;
@@ -57,7 +58,12 @@ const command = ({ identifier, author, url, repo, number, body, ctl }: CommandPr
 	].join(' ');
 
 // Sent to a run's thread once its context is full; the handoff skill takes its arguments as what the next session is for.
-const handoff = (path: string) => `/handoff Write the document to ${path}. The next session continues this run where you stopped.`;
+// Claude invokes it as `/handoff`; Pi, which does not load Claude's skills, is pointed at the skill's file.
+const handoff = ({ agent, path, skill }: { readonly agent: AgentName; readonly path: string; readonly skill: string }) => {
+	const what = `Write the document to ${path}. The next session continues this run where you stopped.`;
+
+	return agent === 'claude' ? `/handoff ${what}` : `Follow ${skill} with these arguments: ${what}`;
+};
 
 // The message the run's next thread starts with.
 const resumeHandoff = (path: string) => `Read ${path} and continue; run its suggested skills`;

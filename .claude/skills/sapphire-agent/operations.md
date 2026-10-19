@@ -26,6 +26,8 @@ Claude hooks are added by hand to `~/.claude/settings.json`: `{ "type": "command
 ]
 ```
 
+Pi loads the extension from the checkout: add `"~/sapphire-agent/src/pi-extension.ts"` to `extensions` in `~/.pi/agent/settings.json` (Pi resolves its Effect from the repo's `node_modules`). Install it only once the running service knows Pi events (`pi` in `adapters`); an older one refuses each and the extension warns on every event. It loads in about 300 ms per Pi session.
+
 `PostToolUse` (every tool) delivers a subagent's handoff instruction; widen it only once the running service knows every tool, since an older one refuses all but `Skill` and the hook fails on each. `PreToolUse` carries the run guards and the command threads' read-only guard (`rules.md`); its matcher spares other tools the hook, and widening it would refuse command threads' tools other than `Read`, `Grep`, `Glob`, `SendMessage`, at about 350 ms per call in every session.
 
 ## T3 settings
@@ -141,4 +143,5 @@ Epics it left in To Review have no run, so no follow-up can be asked for: handle
 | Pushover `T3 rejects the sapphire-agent token` | Session revoked or token format changed: `scripts/mint-t3-token.sh`, then `sapphire t3 status`. |
 | `agent-stuck`, failed command | Read its notice or `commandFailed` reply; `rules.md`, Retrying. |
 | PR up, epic stays Implementing | No result file yet (`rules.md`, Monitoring). |
-| `handoffMissing` | No doc after `/handoff`: look at the thread, `/handoff` again by hand, or let it go on. |
+| `handoffMissing` | No doc after `/handoff` (Pi: the handoff skill's file): look at the thread, ask again by hand, or let it go on. |
+| Pi run never records its session | The extension could not ask T3 its thread (no `T3_MCP_URL`, T3 down): its events are dropped and the next one asks again. Not loaded: `pi config` lists extensions. |

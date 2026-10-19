@@ -31,33 +31,42 @@ const send = (path: string, envelope: EventEnvelope) =>
 
 const isServiceDown = (error: unknown) => error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ECONNREFUSED');
 
-// What the service answers for the event to print for the agent. A refusal fails the hook with the reason, unless the
-// hook's answer comes from elsewhere: Claude ignores the output of a hook that failed.
-const forward = async (stateDirectory: string, envelope: EventEnvelope, failOnRefusal: boolean) => {
+// What the service answers: what to print for the agent, or why it refused the event.
+export type EventAnswer = { readonly output: ReadonlyArray<string> } | { readonly refusal: string };
+
+// Sends the event to the service. While it is not running, nothing: events only make it act sooner; its next poll sees
+// the same state, and the next tool call checks the context again.
+export const sendEvent = async (stateDirectory: string, envelope: EventEnvelope): Promise<EventAnswer> => {
 	try {
 		const answer = await send(join(stateDirectory, eventSocketName), envelope);
 		const [status, ...output] = answer.split('\n');
 
-		if (status !== 'ok') {
-			console.error(`sapphire-agent refused the ${envelope.agent} event: ${answer}`);
-
-			if (failOnRefusal) {
-				process.exitCode = 1;
-			}
-
-			return [];
-		}
-
-		return output;
+		return status === 'ok' ? { output } : { refusal: answer };
 	} catch (error) {
-		// The service is not running. Events only make it act sooner; its next poll sees the same state, and the next tool
-		// call checks the context again.
 		if (isServiceDown(error)) {
-			return [];
+			return { output: [] };
 		}
 
 		throw error;
 	}
+};
+
+// What the service answers for the event to print for the agent. A refusal fails the hook with the reason, unless the
+// hook's answer comes from elsewhere: Claude ignores the output of a hook that failed.
+const forward = async (stateDirectory: string, envelope: EventEnvelope, failOnRefusal: boolean) => {
+	const answer = await sendEvent(stateDirectory, envelope);
+
+	if ('refusal' in answer) {
+		console.error(`sapphire-agent refused the ${envelope.agent} event: ${answer.refusal}`);
+
+		if (failOnRefusal) {
+			process.exitCode = 1;
+		}
+
+		return [];
+	}
+
+	return answer.output;
 };
 
 // The Claude events the hook answers itself for a dispatched run (`run-hooks.ts`), so its guards hold while the

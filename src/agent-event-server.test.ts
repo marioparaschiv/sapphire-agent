@@ -61,7 +61,7 @@ describe('agent events', () => {
 				stdout: '',
 				stderr: 'sapphire-agent refused the claude event: Expected "startup" | "resume" | "clear" | "compact" | "fork"   at ["source"]\n',
 			});
-			assert.deepStrictEqual(unknownAgent, { code: 1, stdout: '', stderr: 'sapphire-agent refused the codex event: Expected "claude"   at ["agent"]\n' });
+			assert.deepStrictEqual(unknownAgent, { code: 1, stdout: '', stderr: 'sapphire-agent refused the codex event: Expected "claude" | "pi"   at ["agent"]\n' });
 			assert.deepStrictEqual(yield* waiting(h), []);
 		}),
 	);
