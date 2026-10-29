@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
@@ -81,6 +81,9 @@ const refusalOf = (output: string | undefined) => {
 
 	return String(hookSpecificOutput.permissionDecisionReason);
 };
+
+const outside = (target: string, worktree: string) =>
+	`${target} is outside this run's worktree ${worktree}; a dispatched run only writes inside its worktree, ${tmpdir()} and ~/share`;
 
 const bashRefusal = (dir: string, cwd: string, command: string) => answer(dir, bash(cwd, command)).pipe(Effect.map(refusalOf));
 
@@ -176,12 +179,17 @@ describe('run hooks', () => {
 			assert.strictEqual(yield* write(handoffPath('TEST-12', sessionId)), undefined);
 			assert.strictEqual(
 				yield* write(join(repo, 'src', 'sync.ts')),
-				`${join(repo, 'src', 'sync.ts')} is outside this run's worktree ${worktree}; a dispatched run only writes inside its worktree`,
+				outside(join(repo, 'src', 'sync.ts'), worktree),
 			);
 			assert.strictEqual(
 				yield* answer(dir, toolUse(worktree, 'Edit', { file_path: '../main/README.md', old_string: 'a', new_string: 'b', replace_all: false })).pipe(Effect.map(refusalOf)),
-				`${join(dir, 'worktrees', 'repo', 'main', 'README.md')} is outside this run's worktree ${worktree}; a dispatched run only writes inside its worktree`,
+				outside(join(dir, 'worktrees', 'repo', 'main', 'README.md'), worktree),
 			);
+			// Scratch: the temp directory and ~/share, but never a checkout in them, and never a secret.
+			assert.strictEqual(yield* write(join(tmpdir(), 'pstack-swarm-run', 'brief.md')), undefined);
+			assert.strictEqual(yield* write(join(homedir(), 'share', 'report', 'index.html')), undefined);
+			assert.strictEqual(yield* write(join(tmpdir(), 'scratch', '.env')), '.env may hold secrets; a dispatched run never writes env files or keys (reading them is fine)');
+			assert.strictEqual(yield* write(join(homedir(), 'notes.md')), outside(join(homedir(), 'notes.md'), worktree));
 			assert.strictEqual(yield* write(join(worktree, '.env')), '.env may hold secrets; a dispatched run never writes env files or keys (reading them is fine)');
 			assert.strictEqual(
 				yield* answer(dir, toolUse(worktree, 'NotebookEdit', { notebook_path: join(worktree, 'id_ed25519'), new_source: 'x' })).pipe(Effect.map(refusalOf)),
@@ -208,13 +216,13 @@ describe('run hooks', () => {
 		Effect.gen(function* () {
 			const { dir, repo, worktree } = yield* setup;
 			const checkout = join(dir, 'commands', 'repo');
-			const outside = `${join(repo, 'src', 'sync.ts')} is outside this run's worktree ${worktree}; a dispatched run only writes inside its worktree`;
+			const refused = outside(join(repo, 'src', 'sync.ts'), worktree);
 
 			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'bash', { command: 'git push --force origin HEAD' }), {
 				allow: false,
 				reason: 'force pushes are not allowed in a dispatched run: they rewrite what is on the remote',
 			});
-			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'write', { path: join(repo, 'src', 'sync.ts'), content: 'x' }), { allow: false, reason: outside });
+			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'write', { path: join(repo, 'src', 'sync.ts'), content: 'x' }), { allow: false, reason: refused });
 			assert.deepStrictEqual(yield* piDecision(dir, worktree, 'edit', { path: '.env', edits: [] }), {
 				allow: false,
 				reason: '.env may hold secrets; a dispatched run never writes env files or keys (reading them is fine)',

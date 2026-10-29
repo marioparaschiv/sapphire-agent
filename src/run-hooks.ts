@@ -5,16 +5,21 @@ import { env, loadSettings } from './config.ts';
 import { journalPath, readProjects } from './journal.ts';
 import { commandToolDecision, isCommandCwd, isProjectRepo, type ToolCall, type ToolDecision, toolRefusal, worktreeOf } from './run-guards.ts';
 
-// The run whose worktree `cwd` is in. The journal is read only for a checkout under the worktrees directory.
+// The run whose worktree `cwd` is in, and the directories that hold checkouts: the worktrees directory and the
+// projects' repos. The journal is read only for a checkout under the worktrees directory.
 const dispatchedRun = (cwd: string) =>
 	Effect.gen(function* () {
-		const run = worktreeOf((yield* loadSettings).worktreesDirectory, cwd);
+		const { worktreesDirectory } = yield* loadSettings;
+		const run = worktreeOf(worktreesDirectory, cwd);
 
 		if (run === undefined) {
 			return undefined;
 		}
 
-		return isProjectRepo(yield* readProjects(journalPath(yield* env.stateDirectory)), run.repoName) ? run : undefined;
+		const projects = yield* readProjects(journalPath(yield* env.stateDirectory));
+		const checkouts = [worktreesDirectory, ...projects.flatMap(({ repo, labelReposDirectory }) => (labelReposDirectory === null ? [repo] : [repo, labelReposDirectory]))];
+
+		return isProjectRepo(projects, run.repoName) ? { run, checkouts } : undefined;
 	});
 
 // What the guards decide about an agent's tool call in `cwd`, whichever agent makes it: in a command thread, whether it
@@ -25,8 +30,8 @@ export const toolCallDecision = (cwd: string, call: ToolCall) =>
 			return Option.some(commandToolDecision(call));
 		}
 
-		const run = yield* dispatchedRun(cwd);
-		const refusal = run === undefined ? undefined : toolRefusal(run, cwd, call);
+		const dispatched = yield* dispatchedRun(cwd);
+		const refusal = dispatched === undefined ? undefined : toolRefusal(dispatched.run, cwd, call, dispatched.checkouts);
 
 		return Option.map(Option.fromUndefinedOr(refusal), (reason): ToolDecision => ({ allow: false, reason }));
 	});
