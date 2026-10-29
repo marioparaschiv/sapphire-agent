@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { commandsDirectory, ctlPath, isHandoffPath } from './directories.ts';
+import { commandsDirectory, ctlPath } from './directories.ts';
 import type { Project } from './journal.ts';
 import { hasSubstitution, isRedirection, shellWords, simpleCommands } from './shell-words.ts';
 
@@ -382,13 +382,21 @@ export const bashRefusal = (cwd: string, command: string) => {
 	return undefined;
 };
 
-// Why writing `path` is refused in a dispatched run, if it is: outside the run's worktree (handoff docs aside), or an
-// env file or key.
-export const fileWriteRefusal = (run: DispatchedRun, cwd: string, path: string) => {
-	const target = resolve(cwd, path);
+const isInside = (dir: string, target: string) => target === dir || target.startsWith(dir + sep);
 
-	if (!isHandoffPath(target) && target !== run.worktree && !target.startsWith(run.worktree + sep)) {
-		return `${target} is outside this run's worktree ${run.worktree}; a dispatched run only writes inside its worktree`;
+// Where a run's scratch goes besides its worktree: the temp directory (handoff docs, briefs, swarm dirs) and ~/share,
+// which the user opens over the tailnet.
+const scratchDirectories = () => [tmpdir(), join(homedir(), 'share')];
+
+// Why writing `path` is refused in a dispatched run, if it is: outside the run's worktree and the scratch directories,
+// inside `checkouts` (where other runs' worktrees and the project repos live, even within a scratch directory) but
+// outside the run's worktree, or an env file or key.
+export const fileWriteRefusal = (run: DispatchedRun, cwd: string, path: string, checkouts: ReadonlyArray<string> = []) => {
+	const target = resolve(cwd, path);
+	const scratch = scratchDirectories().some((dir) => isInside(dir, target)) && !checkouts.some((dir) => isInside(dir, target));
+
+	if (!isInside(run.worktree, target) && !scratch) {
+		return `${target} is outside this run's worktree ${run.worktree}; a dispatched run only writes inside its worktree, ${tmpdir()} and ~/share`;
 	}
 
 	if (isSecretFile(target)) {
@@ -399,12 +407,12 @@ export const fileWriteRefusal = (run: DispatchedRun, cwd: string, path: string) 
 };
 
 // Why the run's agent's or a subagent's tool call is refused in a dispatched run, if it is.
-export const toolRefusal = (run: DispatchedRun, cwd: string, call: ToolCall) => {
+export const toolRefusal = (run: DispatchedRun, cwd: string, call: ToolCall, checkouts: ReadonlyArray<string> = []) => {
 	switch (call._tag) {
 		case 'Shell':
 			return bashRefusal(cwd, call.command);
 		case 'FileWrite':
-			return fileWriteRefusal(run, cwd, call.path);
+			return fileWriteRefusal(run, cwd, call.path, checkouts);
 		default:
 			return undefined;
 	}
