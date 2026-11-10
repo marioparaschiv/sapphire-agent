@@ -27,7 +27,7 @@ Move a Linear epic to Ready For Agent and get a reviewed pull request back.
 
 ### What Is Sapphire Agent?
 
-Sapphire Agent runs on your machine as a systemd user service and watches your Linear teams. When an epic lands in Ready For Agent, it opens a [T3 Code](https://t3.codes) thread in a fresh git worktree, and Claude Code works through the sub-issues there. When the work is done, the agent opens a PR and reviews it, and the service posts the result back on the epic.
+Sapphire Agent runs on your machine as a systemd user service and watches your Linear teams. When an epic lands in Ready For Agent, it opens a [T3 Code](https://t3.codes) thread in a fresh git worktree, and whichever coding agent T3 uses by default works through the sub-issues there. When the work is done, the agent opens a PR and reviews it, and the service posts the result back on the epic.
 
 You review the PR the normal way. To ask for changes, mention the bot in a comment in plain language. It replies, starts a follow-up run on the same branch, and resolves each thread it addressed. Once the PR merges, it removes the worktree, the branch and the thread.
 
@@ -106,12 +106,12 @@ The tests run against fakes of Linear, GitHub and T3, so they never touch a live
 
 The service is one level-triggered reconciler built on [Effect](https://effect.website). On each tick it reads Linear, git, GitHub and the runs' T3 threads, compares that with a small SQLite journal, and does at most one piece of work per epic. Every decision comes from the current state, so a missed webhook or a crash can't leave it out of sync.
 
-| Path                        | Responsibility                                                                        |
-| --------------------------- | ------------------------------------------------------------------------------------- |
-| `src/reconciler.ts`         | The tick loop and what wakes it: the poll, webhooks, agent events, the CLI.           |
-| `src/observation.ts`        | Reads every outside system once per tick.                                             |
-| `src/rules.ts`              | The rules, in order: requests, cleanup, results, monitoring, dispatch.                |
-| `src/journal.ts`            | The SQLite journal of runs, claims, commands and requests.                            |
-| `src/webhook-server.ts`     | Signed GitHub and Linear webhook deliveries.                                          |
-| `src/agent-event-server.ts` | Hook events from Claude Code and Pi, and the guards that keep runs in their worktree. |
-| `src/ctl.ts`                | The `sapphire` CLI.                                                                   |
+| Path                        | Responsibility                                                                                            |
+| --------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `src/reconciler.ts`         | The tick loop and what wakes it: the poll, webhooks, agent events, the CLI.                               |
+| `src/observation.ts`        | Reads every outside system once per tick.                                                                 |
+| `src/rules.ts`              | The rules, in order: requests, cleanup, results, monitoring, dispatch.                                    |
+| `src/journal.ts`            | The SQLite journal of runs, claims, commands and requests.                                                |
+| `src/webhook-server.ts`     | Signed GitHub and Linear webhook deliveries.                                                              |
+| `src/agent-event-server.ts` | Hook events from the agents (Claude Code and Pi so far), and the guards that keep runs in their worktree. |
+| `src/ctl.ts`                | The `sapphire` CLI.                                                                                       |
